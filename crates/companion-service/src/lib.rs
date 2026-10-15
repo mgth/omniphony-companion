@@ -3,5 +3,6 @@ pub mod batch;
 pub mod controller;
 pub mod files;
 pub mod measurement;
+pub mod preferences;
 pub mod review;
 pub type AppResult<T> = Result<T, Box<dyn std::error::Error>>;

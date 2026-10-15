@@ -15,8 +15,8 @@ timestamp or replay stands in for an acoustic reference.
 Progress appears inside the active speaker row. The toolbar remains present
 throughout acquisition. Stop, including the active row's Stop button, cancels
 the entire run. Keep the microphone, input gain, reference and renderer settings
-fixed until recording ends. Settings and checkbox selections are not yet saved
-between application launches.
+fixed until recording ends. Settings and checkbox selections save automatically
+and are restored on the next launch; startup never resumes a capture.
 
 ## Limits and results
 

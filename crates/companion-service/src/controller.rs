@@ -73,7 +73,8 @@ impl Backend for LiveBackend {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Settings {
     pub device: Option<String>,
     pub input_channel: u16,
@@ -161,6 +162,7 @@ pub struct Controller {
     receiver: Receiver<Event>,
     cancelled: Arc<AtomicBool>,
     sequence: u64,
+    startup_endpoint: Option<String>,
 }
 impl Default for Controller {
     fn default() -> Self {
@@ -179,6 +181,7 @@ impl Controller {
             receiver,
             cancelled: Arc::new(AtomicBool::new(false)),
             sequence: 0,
+            startup_endpoint: None,
         }
     }
     pub fn busy(&self) -> bool {
@@ -224,6 +227,13 @@ impl Controller {
             let result = catch_job(|| backend.inputs());
             let _ = sender.send(Event::Inputs(result));
         });
+    }
+    /// Enumerate first, then discover the saved renderer without starting audio.
+    pub fn initialize(&mut self, endpoint: Option<String>) {
+        if !self.busy() {
+            self.startup_endpoint = endpoint;
+            self.refresh_inputs();
+        }
     }
     /// Forget a displayed snapshot when the connection address is edited.
     pub fn disconnect(&mut self) {
@@ -294,7 +304,13 @@ impl Controller {
         if let Some(reason) = &snapshot.unavailable_reason {
             return Err(reason.clone());
         }
-        let device = self.selected_input().ok_or("Choose a microphone input.")?;
+        let device = self.selected_input().ok_or_else(|| {
+            if self.settings.device.is_some() {
+                "Selected input is unavailable. Reconnect it and refresh, or choose another input."
+            } else {
+                "Choose a microphone input."
+            }
+        })?;
         if self
             .state
             .inputs
@@ -562,24 +578,21 @@ impl Controller {
                     match result {
                         Ok(inputs) => {
                             self.state.inputs = inputs;
-                            if self.selected_input().is_none() {
-                                self.settings.device = None;
-                            }
                         }
                         Err(error) => {
                             self.state.inputs.clear();
-                            self.settings.device = None;
                             self.state.input_error = Some(error);
                         }
                     }
                     self.state.job = None;
+                    if let Some(endpoint) = self.startup_endpoint.take() {
+                        self.connect(&endpoint);
+                    }
                 }
                 Event::Discovered(endpoint, result) => {
                     match result {
                         Ok(snapshot) => {
-                            if !snapshot.outputs.iter().any(|o| {
-                                Some(&o.id) == self.settings.reference_output.as_ref() && !o.muted
-                            }) {
+                            if self.settings.reference_output.is_none() {
                                 self.settings.reference_output = snapshot
                                     .outputs
                                     .iter()

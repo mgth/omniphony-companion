@@ -183,6 +183,69 @@ fn microphone_and_channel_can_be_selected_in_the_interface() {
 }
 
 #[test]
+fn restart_restores_settings_reconnects_and_never_measures_automatically() {
+    use companion_service::preferences::PreferenceStore;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    let (mut controller, _) = support::ready();
+    controller.settings.input_channel = 2;
+    controller.settings.reference_output = Some("Front right".into());
+    controller.excluded_outputs.insert("Center".into());
+    let settings = controller.settings.clone();
+    let mut store = PreferenceStore::open(path.clone()).unwrap();
+    store.update(
+        &settings,
+        "127.0.0.1:9003",
+        &controller.excluded_outputs,
+        "sessions/previous",
+    );
+    drop(store);
+    let ctx = egui::Context::default();
+    let (controller, starts) = support::ready();
+    let mut app = CompanionApp::with_preferences(
+        &ctx,
+        controller,
+        PreferenceStore::open(path.clone()).unwrap(),
+    );
+    let size = Vec2::new(1160.0, 800.0);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while app.controller.busy() {
+        frame(&mut app, &ctx, vec![], size);
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(app.controller.settings, settings);
+    assert!(app.controller.excluded_outputs.contains("Center"));
+    assert_eq!(
+        app.controller.state.endpoint,
+        Some("127.0.0.1:9003".parse().unwrap())
+    );
+    assert_eq!(starts.load(Ordering::Relaxed), 0);
+    app.controller.settings.device = Some("Missing interface".into());
+    app.controller.settings.reference_output = Some("Missing speaker".into());
+    let output = frame(&mut app, &ctx, vec![], size);
+    let text = labels(&output);
+    assert!(
+        text.iter()
+            .any(|(t, _)| t.contains("Selected input unavailable"))
+    );
+    assert!(
+        text.iter()
+            .any(|(t, _)| t.contains("Selected reference is missing"))
+    );
+    // Exit immediately after an edit, without another draw.
+    app.controller.settings.position_id = "new-position".into();
+    drop(app);
+    let store = PreferenceStore::open(path).unwrap();
+    assert_eq!(store.preferences().settings.position_id, "new-position");
+    assert_eq!(
+        store.preferences().settings.device.as_deref(),
+        Some("Missing interface")
+    );
+    assert_eq!(store.preferences().review_path, "sessions/previous");
+}
+
+#[test]
 fn active_measurement_progress_stays_finite_across_frames_and_window_sizes() {
     use companion_service::{controller::Job, measurement::MeasureProgress};
     let ctx = egui::Context::default();

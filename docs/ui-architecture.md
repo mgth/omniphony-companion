@@ -28,6 +28,19 @@ closure request cancellation; window closure waits for measurement cleanup.
 The renderer retains its own lease/deadline protection if the process disappears.
 The progress display does not drive the audio or transport clock.
 
+The service's versioned `PreferenceStore` loads UI preferences before input
+enumeration. The controller enumerates inputs and then discovers the saved local
+renderer; it restores no snapshot, session ownership, progress or measurement
+result. Selected input names, channels and reference IDs survive failed refreshes
+and missing/muted devices. Live readiness checks remain mandatory.
+
+Panels submit changed preferences to a bounded worker that keeps only the latest
+value, debounces edits for 400 ms and publishes a synced temporary file by atomic
+replacement. Normal window closure flushes pending edits. No filesystem writes
+run in a paint callback or audio callback. Invalid or future-version files are
+left untouched and disable saving for that launch; save failures are visible and
+can be retried. Tests inject temporary stores; previews use no store at all.
+
 A batch is one worker, one input stream and one renderer measurement session.
 Its ordered output list is frozen at start; checkboxes affect future runs only.
 The renderer schedules all segments without UI or network gaps between them.

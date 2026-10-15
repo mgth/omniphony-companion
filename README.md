@@ -29,6 +29,8 @@ The Rust/egui desktop window lets you:
 - Start a measurement for one speaker, with progress inside its row and no layout shift.
 - Check the wired speakers and use **Measure all checked** for one continuous
   capture with shared reference sweeps. **Stop** cancels the complete run.
+- Restore input/channel/rate, renderer address, reference, microphone/position,
+  sweep settings, recording/calibration paths and speaker checkboxes on startup.
 - Review reference/target levels, clipping, missing sweep diagnostics and arrival evidence.
 - Reanalyze completed rejected takes without playing audio; the original verdict is retained.
 - Reanalyze saved recordings without playback; view impulse envelopes and
@@ -85,8 +87,25 @@ recordings.
 
 The native frontend uses egui/eframe 0.32 with OpenGL to retain the workspace's
 Rust 1.89 minimum. This increment is validated on Linux; native packaging and
-hardware validation on Windows/macOS remain pending. Settings are not persisted
-between launches yet. See [the application boundaries](docs/ui-architecture.md).
+hardware validation on Windows/macOS remain pending.
+
+Settings save automatically after edits and when the window closes. On Linux the
+file is `$XDG_CONFIG_HOME/omniphony-companion/settings.json`, or
+`~/.config/omniphony-companion/settings.json` when XDG_CONFIG_HOME is unset.
+Windows uses `%APPDATA%/omniphony-companion/settings.json`; macOS uses
+`~/Library/Application Support/omniphony-companion/settings.json`.
+The last saved-take review path is also retained; recordings and analysis results
+remain in their own session folders. Relative paths remain relative to the
+application's working directory.
+
+Startup enumerates inputs and reconnects to the saved local renderer address.
+It does not start capture or playback. Missing devices, unsupported channels and
+missing/muted references retain their selections and prevent measurement until
+resolved; no replacement input or reference is silently selected. Reconnect the
+device and press **Refresh**, or choose another input explicitly. A corrupt or
+unsupported settings file is kept untouched with a visible load error; write
+failures show an error and a **Retry saving settings** action. Preview fixtures
+never read or write personal settings. See [the application boundaries](docs/ui-architecture.md).
 
 ## Try it
 
