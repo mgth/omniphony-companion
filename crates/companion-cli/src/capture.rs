@@ -102,9 +102,16 @@ fn measure(args: Measure) -> AppResult<()> {
     }
     if let Some(report) = outcome.timing {
         println!(
-            "Timing diagnostic: relative peak {:.3} ms; clock drift {:.1} ppm. No correction proposed.",
-            report.relative_peak_delay_ms, report.clock_drift_ppm
+            "Acquisition signal / noise: {:.1} dB. No correction proposed.",
+            report.signal_to_noise_db[1]
         );
+        if let Some(warning) = report.timing_warning() {
+            println!("Captured; timing unresolved. {warning}");
+        } else if let (Some(delay), Some(drift)) =
+            (report.relative_peak_delay_ms, report.clock_drift_ppm)
+        {
+            println!("Timing diagnostic: relative peak {delay:.3} ms; clock drift {drift:.1} ppm.");
+        }
     }
     Ok(())
 }

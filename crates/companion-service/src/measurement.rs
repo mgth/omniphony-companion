@@ -43,6 +43,7 @@ pub enum MeasureProgress {
 #[derive(Debug, Clone)]
 pub struct TakeOutcome {
     pub directory: PathBuf,
+    /// Passed acquisition checks; arrival timing may still need review.
     pub accepted: bool,
     pub cancelled: bool,
     pub rejection_reason: Option<String>,
@@ -157,7 +158,7 @@ pub fn measure(
             write_json(
                 &args.out_dir.join("capture-report.json"),
                 &serde_json::json!({
-                    "schema_version": 1, "origin": origin, "accepted_for_analysis": false,
+                    "schema_version": 2, "origin": origin, "accepted_for_analysis": false,
                     "valid_for_correction": false, "recording_file": null, "rejection_reason": error.to_string(),
                 }),
             )?;
@@ -264,11 +265,12 @@ pub fn measure(
     write_json(
         &args.out_dir.join("capture-report.json"),
         &serde_json::json!({
-            "schema_version": 1, "origin": origin, "capture": recording.metadata,
+            "schema_version": 2, "origin": origin, "capture": recording.metadata,
             "renderer_progress": acquisition.as_ref().ok(),
             "analysis_start_frame": analysis_start_frame,
             "timing_frame_origin": "analysis_start_frame_in_recording_wav",
             "timing": result.as_ref().ok(), "rejection_reason": result.as_ref().err(),
+            "timing_warning": result.as_ref().ok().and_then(|report| report.timing_warning()),
             "accepted_for_analysis": result.is_ok(), "valid_for_correction": false,
             "calibration_applied": false,
         }),

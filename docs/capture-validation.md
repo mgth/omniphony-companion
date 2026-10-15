@@ -22,6 +22,11 @@ of microphone or installation performance.
    metadata and retained partial audio.
 7. Check clipping and low-SNR rejection at the input; record the actual accepted
    operating range. Keep raw takes outside Git.
+8. Check that competing arrival peaks show **Captured · timing unresolved**:
+   level diagnostics remain visible, delay/drift are withheld, and
+   `valid_for_correction` stays false. Raising playback level is not a remedy
+   for arrival ambiguity. Missing or competing complete sweep sequences still
+   reject the take.
 
 Record interface/driver/host configuration with the local session, repeated
 relative delays and reference levels, drift distribution, failure reasons and
