@@ -1,0 +1,19 @@
+[package]
+name = "measurement-capture"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+repository.workspace = true
+description = "Bounded microphone acquisition and offline timing diagnostics"
+
+[dependencies]
+cpal = "0.15.3"
+rtrb = "0.4"
+rustfft = "6.4"
+serde.workspace = true
+thiserror.workspace = true
+omniphony-osc-contract.workspace = true
+
+[lints]
+workspace = true

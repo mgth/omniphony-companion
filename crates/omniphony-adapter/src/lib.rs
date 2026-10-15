@@ -197,7 +197,17 @@ impl Client {
             && (progress.signal.validate(snapshot.sample_rate).is_err()
                 || !snapshot.outputs.iter().any(|o| o.id == progress.output_id)
                 || progress.signal_id == 0
-                || progress.total_frames != progress.signal.frames(snapshot.sample_rate)
+                || progress
+                    .reference_output_id
+                    .as_ref()
+                    .is_some_and(|id| !snapshot.outputs.iter().any(|o| &o.id == id))
+                || progress.total_frames
+                    != progress.signal.frames(snapshot.sample_rate)
+                        * if progress.reference_output_id.is_some() {
+                            3
+                        } else {
+                            1
+                        }
                 || progress.rendered_frames > progress.total_frames
                 || (progress.state == SignalState::Completed
                     && progress.rendered_frames != progress.total_frames))
@@ -208,11 +218,22 @@ impl Client {
     }
 
     pub fn start(&mut self, signal_id: u64, output_id: &str, signal: Sweep) -> Result<Progress> {
+        self.start_referenced(signal_id, output_id, None, signal)
+    }
+
+    pub fn start_referenced(
+        &mut self,
+        signal_id: u64,
+        output_id: &str,
+        reference_output_id: Option<&str>,
+        signal: Sweep,
+    ) -> Result<Progress> {
         let session_id = self.session_id()?;
         let reply = self.exchange(protocol::Command::Start {
             session_id,
             signal_id,
             output_id: output_id.into(),
+            reference_output_id: reference_output_id.map(str::to_owned),
             signal,
         })?;
         let Some(progress) = self.accept_session(reply)? else {
@@ -220,6 +241,7 @@ impl Client {
         };
         if progress.signal_id != signal_id
             || progress.output_id != output_id
+            || progress.reference_output_id.as_deref() != reference_output_id
             || progress.signal != signal
         {
             return Err(self.fail("renderer acknowledged a different signal"));
@@ -240,6 +262,7 @@ impl Client {
             (Some(old), Some(new))
                 if old.signal_id == new.signal_id
                     && old.output_id == new.output_id
+                    && old.reference_output_id == new.reference_output_id
                     && old.signal == new.signal
                     && new.rendered_frames >= old.rendered_frames
                     && (matches!(old.state, SignalState::Queued | SignalState::Rendering)

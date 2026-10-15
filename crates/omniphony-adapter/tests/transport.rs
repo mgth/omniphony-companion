@@ -85,6 +85,7 @@ fn spec() -> Sweep {
 }
 fn progress(state: SignalState, frames: u64) -> Progress {
     Progress {
+        reference_output_id: None,
         signal_id: 1,
         output_id: "L".into(),
         signal: spec(),
@@ -293,4 +294,31 @@ fn refusal_is_returned_without_replaying_the_signal() {
     ));
     client.end().unwrap();
     handle.join().unwrap();
+}
+
+#[test]
+fn referenced_sequence_requires_matching_identity_and_total_frames() {
+    for incorrect in [false, true] {
+        let (endpoint, handle) = server(move |mut stream| {
+            let r = receive(&mut stream);
+            send(&mut stream, r.request_id, session(None));
+            let r = receive(&mut stream);
+            assert!(
+                matches!(r.command, Command::Start { reference_output_id: Some(ref id), .. } if id == "L")
+            );
+            let mut p = progress(SignalState::Queued, 0);
+            p.reference_output_id = Some("L".into());
+            if !incorrect {
+                p.total_frames *= 3;
+            }
+            send(&mut stream, r.request_id, session(Some(p)));
+        });
+        let mut client = Client::connect(endpoint, Duration::from_secs(1)).unwrap();
+        client.begin(&snapshot()).unwrap();
+        assert_eq!(
+            client.start_referenced(1, "L", Some("L"), spec()).is_err(),
+            incorrect
+        );
+        handle.join().unwrap();
+    }
 }

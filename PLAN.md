@@ -57,7 +57,13 @@ session, finite sweeps, explicit stop/end and render-progress acknowledgements.
 The companion CLI exercises it and saves stimulus metadata and render reports.
 It is validated against real renderer code with discarded output buffers;
 physical output routing and acoustic behavior still require installation tests.
-Single-microphone acquisition is the next development milestone.
+The third increment adds selected-channel interface capture, retained float WAVs,
+calibration-file preservation and repeated acoustic reference sequences.
+Offline diagnostics estimate linear clock drift and relative correlation-peak
+delay and reject several capture/quality failures. This is a milestone-3
+prototype: real-interface repeatability and discontinuity tests remain open.
+It does not yet produce direct-arrival observations or calibration profiles.
+See `docs/capture-validation.md` for the next bench checks.
 
 ### Multiple microphones
 
@@ -155,8 +161,8 @@ and IIR/FIR/MIMO choices will be decided separately.
 
 - Use one `feat/*` or `fix/*` branch per concern and a PR with green CI and review.
 - Do not develop features directly on `main`.
-- Any Omniphony changes get their own workflow and PR; do not implement them in
-  the integration worktree.
+- Any Omniphony changes get their own workflow and PR targeting `dev/calibration`;
+  do not implement them in the integration worktree or target `main` for this work.
 - Keep this plan in the companion repository. `README.md` describes the
   executable capabilities and prototype limitations accurately.
 - Use English exclusively for repository content and project communication,
