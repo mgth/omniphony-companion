@@ -30,11 +30,33 @@ accuracy from a single take.
 
 ## Pending work before automatic correction
 
-- Validate stable capture timestamps and discontinuity detection on real ALSA,
-  CoreAudio and WASAPI interfaces. Hidden OS resampling is not currently detected.
+- Validate stable capture timestamps and discontinuity detection on real PipeWire,
+  ALSA, CoreAudio and WASAPI interfaces. The PipeWire backend checks corrupt
+  chunks, long callback stalls and source loss; it does not read device timestamps
+  or prove continuity through all upstream processing. Hidden OS resampling is
+  not currently detected.
 - Quantify repeatability, nonlinear clock behavior and confidence limits.
 - Derive impulse responses and identify direct arrivals; compare level estimates
   over a defined band/window with microphone calibration actually applied.
 - Consider an electrical loopback reference for suitable multichannel interfaces.
 - Convert accepted measurements into validated observation sessions with
   persistent installation identity, then implement apply/readback/remeasure.
+
+## Local PipeWire regression
+
+With PipeWire running and `pw-cli`/`pw-play` installed:
+
+```sh
+cargo test --locked -p measurement-capture --test pipewire_live -- --ignored
+```
+
+This explicit test creates a temporary virtual sink, feeds different synthetic
+levels to its channels, captures its right monitor channel and checks that the
+channels were neither mixed nor swapped. It also removes the node and verifies
+that capture fails without following another source. The temporary node and
+playback process are removed. No microphone or physical speaker is opened, and
+the test does not establish acoustic measurement accuracy.
+
+Headless UI tests render active measurement progress across successive frames at
+the minimum window size. This covers the infinite-width progress bar regression
+that previously crashed the window when Measure was clicked.

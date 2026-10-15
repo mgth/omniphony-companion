@@ -193,7 +193,7 @@ impl CompanionApp {
         section(ui, "01", "Microphone");
         ui.add_space(10.0);
         ui.horizontal(|ui| {
-            caption(ui, "Audio input");
+            caption(ui, "Microphone / capture source");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .add_enabled(
@@ -216,12 +216,12 @@ impl CompanionApp {
         ui.add_enabled_ui(!busy, |ui| {
             let selected = self
                 .controller
-                .settings
-                .device
-                .clone()
+                .selected_input()
+                .map(|input| input.label())
                 .unwrap_or_else(|| "Choose an input…".into());
             egui::ComboBox::from_id_salt("device")
                 .width(ui.available_width())
+                .truncate()
                 .selected_text(truncate(&selected, 31))
                 .show_ui(ui, |ui| {
                     for device in &self.controller.state.inputs {
@@ -230,8 +230,9 @@ impl CompanionApp {
                             if ui
                                 .selectable_label(
                                     self.controller.settings.device.as_ref() == Some(&device.name),
-                                    &device.name,
+                                    device.label(),
                                 )
+                                .on_hover_text(&device.name)
                                 .clicked()
                             {
                                 self.controller.settings.device = Some(device.name.clone());
@@ -242,6 +243,9 @@ impl CompanionApp {
                 })
                 .response
                 .on_hover_text(&selected);
+            if self.controller.selected_input().is_some_and(|input| input.is_monitor) {
+                ui.label(RichText::new("Sink monitor: records a digital output. Choose a microphone source to measure sound in the room.").small().color(WARM));
+            }
             if self.controller.state.inputs.is_empty()
                 && self.controller.state.input_error.is_none()
                 && !busy
@@ -258,16 +262,18 @@ impl CompanionApp {
                 caption(&mut columns[0], "Input channel");
                 egui::ComboBox::from_id_salt("channel")
                     .width(110.0)
-                    .selected_text(format!(
-                        "Channel {}",
-                        self.controller.settings.input_channel
-                    ))
+                    .truncate()
+                    .selected_text(self.controller.selected_input().map_or_else(
+                        || format!("Channel {}", self.controller.settings.input_channel),
+                        |input| input.channel_label(self.controller.settings.input_channel)))
                     .show_ui(&mut columns[0], |ui| {
                         for channel in 1..=channels {
+                            let label = self.controller.selected_input().map_or_else(
+                                || format!("Channel {channel}"), |input| input.channel_label(channel));
                             ui.selectable_value(
                                 &mut self.controller.settings.input_channel,
                                 channel,
-                                format!("Channel {channel}"),
+                                label,
                             );
                         }
                     });
@@ -424,6 +430,13 @@ impl CompanionApp {
             RichText::new("Measure one speaker at a time from your listening position.")
                 .color(MUTED),
         );
+        ui.label(
+            RichText::new(
+                "Choose the speaker playback sink in Studio / Audio Output / Output device.",
+            )
+            .small()
+            .color(MUTED),
+        );
         ui.add_space(18.0);
         if self.controller.measuring() {
             self.progress(ui);
@@ -569,7 +582,7 @@ impl CompanionApp {
                     Some(MeasureProgress::OpeningInput) => ("Opening microphone input", 0.0),
                     Some(MeasureProgress::LeadIn) => ("Recording a quiet lead-in", 0.0),
                     Some(MeasureProgress::Playing(p)) => (
-                        "Playing reference → speaker → reference",
+                        "Playing reference, speaker, then reference",
                         p.rendered_frames as f32 / p.total_frames.max(1) as f32,
                     ),
                     Some(MeasureProgress::Tail) => ("Recording the acoustic tail", 1.0),
@@ -607,7 +620,7 @@ impl CompanionApp {
                 ui.add(
                     egui::ProgressBar::new(fraction)
                         .fill(ACCENT)
-                        .desired_width(f32::INFINITY),
+                        .desired_width(ui.available_width()),
                 );
             });
     }

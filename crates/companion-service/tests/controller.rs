@@ -59,6 +59,9 @@ impl Backend for Bench {
     fn inputs(&self) -> Result<Vec<InputDevice>, String> {
         Ok(vec![InputDevice {
             name: "Test interface".into(),
+            description: "Test interface".into(),
+            channel_names: Vec::new(),
+            is_monitor: false,
             configurations: vec![InputConfiguration {
                 channels: 2,
                 min_sample_rate: 44100,

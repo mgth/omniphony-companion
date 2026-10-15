@@ -65,8 +65,9 @@ between launches yet. See [the application boundaries](docs/ui-architecture.md).
 
 ## Try it
 
-Requires Rust 1.89 or later. On Linux, install ALSA development headers and
-`pkg-config` (`sudo apt-get install libasound2-dev pkg-config`). The offline
+Requires Rust 1.89 or later. On Linux, install ALSA and PipeWire development
+headers, Clang and pkg-config:
+`sudo apt-get install libasound2-dev libpipewire-0.3-dev libclang-dev pkg-config`. The offline
 demonstration needs no audio device or Omniphony service.
 
 ```sh
@@ -135,9 +136,23 @@ for limits, identifiers and the hardware-free `measurement_fixture` bench.
 ## Single-microphone acquisition
 
 The first workflow targets an audio interface with one measurement microphone.
-CPAL uses the platform default host (ALSA on Linux, CoreAudio on macOS, WASAPI
-on Windows); ASIO and an electrical loopback channel are not implemented yet.
-Select the exact device name and a one-based input channel:
+Linux uses native PipeWire when its server is available. Sources have their
+actual descriptions and port names, such as a USB microphone and `capture_FL`.
+The channel count comes from the node's audio ports; MIDI ports are excluded.
+The complete input channel map is requested without remixing, then only the
+selected channel is retained. The target is pinned for the take; removal rejects
+the capture instead of switching to a default microphone.
+
+Sink monitors are also selectable and explicitly labelled. They record a digital
+output for routing diagnostics, not an acoustic room response. Saved reports mark
+these takes as `sink_monitor_capture`. To choose where the test speakers play,
+use **Studio → Audio Output → Output device**; Companion's selector controls
+what it records. Neither choice changes the system-wide default device.
+
+Without PipeWire, Linux falls back to CPAL/ALSA. macOS uses CoreAudio and Windows
+uses WASAPI. ASIO and an electrical loopback channel are not implemented yet.
+The CLI takes the exact `name` field from `capture devices` (for example
+`pipewire:source:your-node-name`) and a one-based input channel:
 
 ```sh
 cargo run --locked -p companion-cli -- capture devices
@@ -166,7 +181,12 @@ Each new take directory contains:
 - `microphone-calibration.txt`, if supplied with `--calibration`: preserved
   two-column frequency/relative-dB data. It is validated but **not applied**.
 
-Takes are rejected on stream errors, queue overflow, timestamp gaps, clipping,
+PipeWire may resample to the chosen recording rate. Its metadata records that
+continuity checking uses chunk flags and callback cadence, not device timestamps;
+small discontinuities and all upstream clock behavior are not established by
+this check. Hardware validation remains necessary.
+
+Takes are rejected on stream errors, queue overflow, detected timing gaps, clipping,
 missing/ambiguous references, poor SNR or unstable reference levels. Limits
 (20 dB SNR, 2000 ppm linear drift, 100 ms relative peak delay and 1 dB reference
 level change) are prototype gates, not hardware accuracy guarantees.
