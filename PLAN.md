@@ -1,167 +1,165 @@
-# Plan de développement — Omniphony Companion
+# Development plan — Omniphony Companion
 
-## Objectif
+## Goal
 
-Construire un compagnon d'Omniphony qui automatise la mesure acoustique et la
-mise au point d'une installation à partir d'un ou plusieurs microphones :
+Build an Omniphony companion that automates acoustic measurement and system
+calibration using one or more microphones:
 
-**Préparer → mesurer → analyser → proposer → appliquer → remesurer → vérifier.**
+**Prepare → measure → analyze → propose → apply → remeasure → verify.**
 
-Le compagnon prend en charge les sessions, les acquisitions, les analyses et
-l'optimisation. Omniphony émet les signaux de mesure et applique les réglages aux
-sorties physiques. Les méthodes de correction avancée resteront ouvertes : ce
-plan fixe les responsabilités et les jalons, sans choisir prématurément un
-algorithme pour le grave ou les réflexions.
+The companion owns sessions, acquisition, analysis and optimization. Omniphony
+plays measurement signals and applies settings to physical outputs. Advanced
+correction methods remain open: this plan defines responsibilities and
+milestones without prematurely choosing bass or reflection algorithms.
 
-## Mission 1 — Délais et niveaux
+## Mission 1 — Delays and levels
 
-### Résultat attendu
+### Expected outcome
 
-L'utilisateur connecte son microphone, choisit une position de référence,
-lance la mesure des enceintes et obtient des réglages de gain et de délai
-vérifiés par une nouvelle acquisition. Il peut écouter avant/après, sauvegarder
-explicitement le résultat ou revenir aux réglages précédents.
+The user connects a microphone, selects a reference position and starts
+measuring the speakers. The companion produces gain and delay settings verified
+through a new acquisition. The user can compare before/after, explicitly save
+the result or restore the previous settings.
 
-Les niveaux sont relatifs. Une mesure absolue de pression acoustique nécessite
-une calibration de sensibilité appropriée et n'est pas une condition de cette
-première mission.
+Levels are relative. Absolute sound pressure measurements require appropriate
+sensitivity calibration and are not a prerequisite for this first mission.
 
-Les délais sont alignés pour une position de référence. Les autres positions
-servent à évaluer la robustesse et, ultérieurement, à définir un compromis de
-zone. On ne promet pas des temps d'arrivée identiques partout.
+Delays are aligned for one reference position. Other positions help assess
+robustness and, later, determine a listening-area compromise. Identical arrival
+times throughout the room are not promised.
 
-Les caissons restent identifiés séparément. On conserve leurs mesures et leurs
-réglages ; leur intégration acoustique avec les enceintes sera traitée dans la
-mission sur le grave. Un pic de réponse de caisson ne doit pas être interprété
-automatiquement comme l'arrivée directe d'une enceinte large bande.
+Subwoofers remain separately identified. Their measurements and settings are
+preserved; their acoustic integration with the speakers belongs to the bass
+mission. A subwoofer response peak must not automatically be interpreted as the
+direct arrival of a full-range speaker.
 
-### Lots de développement
+### Development milestones
 
-| Lot | Travail | Critère de passage |
+| Milestone | Work | Acceptance criteria |
 | --- | --- | --- |
-| 1. Socle et sessions | Cœur indépendant de l'interface, modèle des installations/micros/positions/mesures/profils, sauvegarde versionnée, CLI et banc simulé. | Une session est enregistrable, rechargeable et analysable sans renderer ni matériel audio. |
-| 2. Contrat avec Omniphony | Découverte des sorties physiques et de leurs limites ; état initial ; émission de signaux finis et identifiés ; confirmation des commandes ; début/fin/arrêt d'une session. | La bonne sortie émet le bon signal et le renderer arrête de lui-même une mesure abandonnée. |
-| 3. Acquisition avec un micro | Entrée audio, fichier de calibration micro, réglage des niveaux, capture brute, référence temporelle et gestion des horloges indépendantes. | La répétabilité est mesurée et les acquisitions saturées, interrompues, désynchronisées ou trop bruitées sont refusées. |
-| 4. Analyse délais/niveaux | Réponse impulsionnelle, estimation de l'arrivée directe et du niveau représentatif, indicateurs d'incertitude, proposition bornée de réglages. | Validation sur signaux connus et installation réelle ; les ambiguïtés d'arrivée sont détectées et présentées. |
-| 5. Application et vérification | Application cohérente d'un profil, lecture de l'état réellement appliqué, nouvelle acquisition, comparaison et ajustements bornés. | Le résultat est confirmé par une nouvelle mesure ; réappliquer un profil n'empile pas les corrections. |
-| 6. Assistant utilisateur | Préparation, progression, reprise ciblée, résultats avant/après, écoute comparative à niveau égal, sauvegarde et restauration. | Parcours complet sans commandes manuelles ; fermeture/minimisation de la fenêtre sans conséquence sur les délais d'arrêt. |
-| 7. Plusieurs positions et micros | Déplacement guidé d'un micro, puis capture simultanée sur interface multicanale ; calibration et résultats propres à chaque micro/position. | Les mêmes données et analyses couvrent le micro déplacé et les micros fixes ; référence d'alignement explicite. |
+| 1. Foundation and sessions | UI-independent core; models for installations, microphones, positions, measurements and profiles; versioned persistence; CLI and simulated test rig. | A session can be saved, reloaded and analyzed without a renderer or audio hardware. |
+| 2. Omniphony contract | Discover physical outputs and their limits; capture initial settings; emit finite, identified signals; acknowledge commands; start, finish and stop sessions. | The correct output emits the correct signal, and the renderer independently stops an abandoned measurement. |
+| 3. Single-microphone acquisition | Audio input, microphone calibration file, level checks, raw capture, timing reference and independent clock handling. | Repeatability is measured; clipped, interrupted, unsynchronized or excessively noisy acquisitions are rejected. |
+| 4. Delay/level analysis | Impulse response, direct-arrival and representative-level estimation, uncertainty indicators and bounded setting proposals. | Validation against known signals and a real installation; ambiguous arrivals are detected and reported. |
+| 5. Application and verification | Apply a consistent profile, read back actual settings, acquire again, compare results and make bounded adjustments. | New measurements confirm the result; reapplying a profile does not accumulate corrections. |
+| 6. User assistant | Preparation, progress, targeted retries, before/after results, level-matched listening comparisons, saving and restoration. | The complete workflow requires no manual commands; closing or minimizing the window does not affect stop deadlines. |
+| 7. Multiple positions and microphones | Guided microphone repositioning, then simultaneous capture through a multichannel interface; calibration and results for each microphone/position. | The same data and analysis support a moving microphone and fixed microphones, with an explicit alignment reference. |
 
-Les lots sont des jalons fonctionnels, pas une obligation d'attendre la fin d'un
-lot pour tester une tranche verticale. Le premier incrément logiciel couvre le
-lot 1 et exerce une proposition/vérification sur des observations simulées.
-Il ne termine ni l'acquisition réelle ni l'analyse acoustique des lots 3 et 4.
+These are functional milestones, not a requirement to finish each milestone
+before testing a complete workflow. The first software increment covers
+milestone 1 and exercises proposals and verification using simulated
+observations. It does not complete real acquisition or the acoustic analysis
+in milestones 3 and 4.
 
-### Plusieurs micros
+### Multiple microphones
 
-- Commencer par un micro, avec positions successives guidées.
-- Modéliser dès le départ chaque observation par enceinte, position et micro.
-- Ajouter ensuite plusieurs entrées synchronisées sur une interface commune.
-- Reporter les micros USB indépendants jusqu'à validation d'une compensation
-  par appareil des décalages et dérives d'horloge.
-- Conserver les observations individuelles ; une moyenne de signaux bruts ne
-  remplace pas une méthode explicite d'agrégation acoustique.
+- Start with one microphone and guided measurements at successive positions.
+- Model every observation by speaker, position and microphone from the outset.
+- Then add multiple synchronized inputs on a shared interface.
+- Defer independent USB microphones until per-device offset and clock-drift
+  compensation has been validated.
+- Preserve individual observations; averaging raw signals does not replace an
+  explicit acoustic aggregation method.
 
-### Règles de mesure et d'application
+### Measurement and application rules
 
-- Séparer transport des commandes et temps audio : l'arrivée d'un message OSC
-  ne fournit pas le temps d'émission d'un échantillon.
-- Conserver une référence temporelle commune aux mesures comparées, sans
-  effacer les différences de propagation à mesurer.
-- Fixer et tracer les gains, traitements et routages pendant une acquisition.
-  Éviter les changements automatiques de gain et les traitements du microphone.
-- Identifier les sorties par des identifiants stables ; détecter tout changement
-  de disposition, de fréquence d'échantillonnage ou de réglages pendant la session.
-- Distinguer réglages initiaux, corrections calculées et valeurs absolues à
-  appliquer, afin d'éviter les cumuls et les applications à une autre installation.
-- Appliquer les réglages sans allocation ni calcul d'analyse dans le chemin
-  audio ; préparer les données hors temps réel.
-- Borner niveau/durée des signaux, gains et délais. Prévoir l'arrêt local côté
-  renderer si le compagnon disparaît, indépendamment de l'interface graphique.
-- Arrêter les itérations lorsque l'amélioration n'est plus significative par
-  rapport à la répétabilité. Conserver le meilleur état vérifié.
-- Distinguer essai et sauvegarde : appliquer temporairement un profil ne doit
-  pas changer silencieusement la configuration persistante d'Omniphony.
+- Separate command transport from audio timing: an OSC message arrival does not
+  identify the emission time of an audio sample.
+- Preserve a shared timing reference across compared measurements without
+  removing the propagation differences being measured.
+- Fix and record gains, processing and routing throughout acquisition.
+  Avoid automatic gain changes and microphone processing.
+- Use stable output identifiers; detect changes to the layout, sample rate or
+  settings during a session.
+- Distinguish initial settings, calculated corrections and absolute targets to
+  prevent accumulated corrections and application to a different installation.
+- Apply settings without allocating or running analysis in the audio path;
+  prepare data outside realtime processing.
+- Bound signal levels/durations, gains and delays. The renderer must stop
+  locally if the companion disappears, independently of the UI.
+- Stop iterating when improvements are no longer significant relative to
+  repeatability. Retain the best verified state.
+- Distinguish preview from saving: temporarily applying a profile must not
+  silently change Omniphony's persistent configuration.
 
 ## Architecture
 
-1. **Cœur de calibration** : modèles, validation, progression d'une session,
-   politiques de réglage, comparaison des résultats. Pas de dépendance UI,
-   d'accès matériel, de threads ou d'adresses OSC dans ce cœur.
-2. **Services d'acquisition et d'analyse** : capture, signaux, synchronisation,
-   analyse des enregistrements ; tâches hors temps réel, résultats traçables.
-3. **Adaptateur Omniphony** : commandes typées, état confirmé, contrôle de la
-   configuration et application/restauration cohérente des profils.
-4. **Interface et CLI** : pilotent les mêmes opérations. L'interface présente les
-   données et les actions ; les timers et les opérations durables sont gérés
-   dans les services, même lorsque la fenêtre est minimisée.
+1. **Calibration core**: models, validation, session progression, adjustment
+   policies and result comparison. No UI dependencies, hardware access,
+   threads or OSC addresses.
+2. **Acquisition and analysis services**: capture, signals, synchronization and
+   recording analysis; work outside realtime processing, with traceable results.
+3. **Omniphony adapter**: typed commands, confirmed state, configuration checks
+   and consistent profile application/restoration.
+4. **UI and CLI**: drive the same operations. The UI presents data and actions;
+   services own timers and ongoing operations, even when the window is minimized.
 
-L'implémentation démarre dans un workspace Rust indépendant. Les modules
-d'analyse pourront évoluer sans changer le modèle d'acquisition. Il n'est pas
-nécessaire de créer immédiatement un système de plugins.
+Implementation starts in an independent Rust workspace. Analysis modules can
+evolve without changing the acquisition model. A plugin system is not required
+at this stage.
 
-Omniphony possède déjà des gains/délais par enceinte et un test de sortie en
-bruit rose. Le mode d'acquisition synchronisée nécessitera un contrat dédié : le
-test actuel ne constitue pas à lui seul un protocole de calibration.
+Omniphony already provides per-speaker gains/delays and a pink-noise output
+test. Synchronized acquisition needs a dedicated contract: the existing test
+alone is not a calibration protocol.
 
-## Données à conserver
+## Data to retain
 
-- Configuration de l'installation, rôles et identifiants des enceintes,
-  routage, fréquence d'échantillonnage et réglages effectivement utilisés.
-- Micros, calibration individuelle, positions et position de référence.
-- Signaux émis, enregistrements bruts, référence temporelle et métadonnées
-  d'acquisition, puis versions des méthodes d'analyse.
-- Observations, qualité/incertitude, réglages proposés, réglages appliqués et
-  résultats de vérification.
+- Installation configuration, speaker roles and identifiers, routing, sample
+  rate and the settings actually used.
+- Microphones, individual calibration, positions and the reference position.
+- Emitted signals, raw recordings, timing reference and acquisition metadata,
+  followed by analysis method versions.
+- Observations, quality/uncertainty, proposed settings, applied settings and
+  verification results.
 
-Les schémas sont versionnés. Les enregistrements et calibrations pourront être
-des fichiers associés à la session, transportables sans chemins propres à une
-machine. Le premier schéma conserve des observations déjà estimées ; il ne doit
-jamais les présenter comme des acquisitions micro.
+Schemas are versioned. Recordings and calibrations can become associated session
+files, portable without machine-specific paths. The initial schema stores
+already-estimated observations and must never present them as microphone
+captures.
 
 ## Validation
 
-Trois niveaux complémentaires :
+Three complementary levels:
 
-1. Tests déterministes : décalages/gains connus, entrées invalides, mesures
-   manquantes, faible qualité, changements de configuration et réapplication.
-2. Banc de mesure audio : référence temporelle, dérive d'horloge, bruit,
-   saturation, réflexions susceptibles de masquer l'arrivée directe.
-3. Installation réelle : répétabilité, écarts avant/après, positions de contrôle,
-   écoute comparative et essais d'interruption/reconnexion.
+1. Deterministic tests: known offsets/gains, invalid input, missing measurements,
+   poor quality, configuration changes and reapplication.
+2. Audio measurement bench: timing reference, clock drift, noise, clipping and
+   reflections that could obscure the direct arrival.
+3. Real installation: repeatability, before/after deviations, control positions,
+   listening comparisons and interruption/reconnection tests.
 
-Les tolérances acoustiques seront choisies sur la base du banc et de la
-répétabilité mesurée. Les seuils du simulateur ne constituent pas une promesse
-de précision sur du matériel réel.
+Acoustic tolerances will be chosen using bench results and measured
+repeatability. Simulator thresholds are not a promise of real-hardware accuracy.
 
-## Missions suivantes
+## Later missions
 
-- **Grave et caissons** : réponse dans le grave, raccords, coopération entre
-  sources et régularité entre places, dans les limites de chaque enceinte.
-- **Réflexions et comportement temporel** : identifier les phénomènes
-  reproductibles et corrigibles, puis évaluer les corrections sur la zone
-  d'écoute et à l'écoute.
-- **Affinage global** : courbes cibles, préférences, compromis de zone, profils
-  et stratégies d'optimisation selon les résultats expérimentaux.
+- **Bass and subwoofers**: bass response, crossovers, source cooperation and
+  seat-to-seat consistency within each speaker's capabilities.
+- **Reflections and temporal behavior**: identify reproducible, correctable
+  phenomena, then evaluate corrections across the listening area and by listening.
+- **Overall refinement**: target curves, preferences, listening-area compromises,
+  profiles and optimization strategies informed by experimental results.
 
-Ces missions réutilisent les acquisitions et la boucle de vérification ; leurs
-algorithmes et choix IIR/FIR/MIMO restent à décider séparément.
+These missions reuse acquisition and the verification loop. Their algorithms
+and IIR/FIR/MIMO choices will be decided separately.
 
-## Livraison et suivi
+## Delivery and tracking
 
-- Une branche `feat/*` ou `fix/*` par sujet et une PR avec CI verte et revue.
-- Aucun développement de fonctionnalité directement sur `main`.
-- Les éventuels changements d'Omniphony auront leur propre workflow et PR ;
-  le worktree d'intégration ne servira pas à leur implémentation.
-- Le présent plan est conservé dans le dépôt du compagnon. `README.md` décrit
-  précisément les fonctions déjà exécutables et les limites du prototype.
+- Use one `feat/*` or `fix/*` branch per concern and a PR with green CI and review.
+- Do not develop features directly on `main`.
+- Any Omniphony changes get their own workflow and PR; do not implement them in
+  the integration worktree.
+- Keep this plan in the companion repository. `README.md` describes the
+  executable capabilities and prototype limitations accurately.
+- Use English exclusively for repository content and project communication,
+  as specified in `AGENTS.md`.
 
-## Références de départ
+## Starting references
 
-- [Cecchi, Carini, Spors — Room Response Equalization, revue (2018)](https://arts.units.it/handle/11368/2933738)
-- [Farina — mesure par balayage sinusoïdal (2000)](https://aes.org/publications/elibrary/elibrary-page/?id=10211)
-- [Kirkeby et Nelson — inversion régularisée (1999)](https://aes.org/publications/elibrary-page/?id=12098)
-- [Welti et Devantier — optimisation multicaisson (2006)](https://aes.org/publications/elibrary/elibrary-page/?id=13680)
-- [REW — mesures et références temporelles](https://www.roomeqwizard.com/help/help_en-GB/html/makingmeasurements.html)
-- [DRC-FIR — documentation des méthodes](https://drc-fir.sourceforge.net/doc/drc.html)
-- [CamillaDSP — moteur et documentation](https://github.com/HEnquist/camilladsp)
+- [Cecchi, Carini, Spors — Room Response Equalization review (2018)](https://arts.units.it/handle/11368/2933738)
+- [Farina — swept-sine measurement (2000)](https://aes.org/publications/elibrary/elibrary-page/?id=10211)
+- [Kirkeby and Nelson — regularized inversion (1999)](https://aes.org/publications/elibrary-page/?id=12098)
+- [Welti and Devantier — multiple-subwoofer optimization (2006)](https://aes.org/publications/elibrary/elibrary-page/?id=13680)
+- [REW — measurements and timing references](https://www.roomeqwizard.com/help/help_en-GB/html/makingmeasurements.html)
+- [DRC-FIR — method documentation](https://drc-fir.sourceforge.net/doc/drc.html)
+- [CamillaDSP — engine and documentation](https://github.com/HEnquist/camilladsp)

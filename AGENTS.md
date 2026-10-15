@@ -1,5 +1,9 @@
 # Development agreement
 
+- Use English exclusively for this repository and project, including code
+  identifiers, comments, documentation, UI/CLI text, tests, commit messages,
+  issues, pull requests and project-related communication. Translate material
+  provided in another language before adding it to the project.
 - Read `PLAN.md` and keep `README.md` honest about implemented capabilities.
 - Work on a dedicated `feat/*` or `fix/*` branch, open a PR, require green CI
   and human review; do not land changes by pushing directly to `main`.

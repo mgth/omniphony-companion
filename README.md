@@ -1,18 +1,18 @@
 # Omniphony Companion
 
-Compagnon de calibration acoustique pour [Omniphony](https://github.com/mgth/Omniphony).
+Acoustic calibration companion for [Omniphony](https://github.com/mgth/Omniphony).
 
-**État : premier incrément hors ligne de la mission délais et niveaux.**
-Le prototype traite des observations déjà estimées et propose des gains/délais.
-Il ne capture pas encore de microphone, n'analyse pas de PCM et ne pilote pas
-un renderer réel. La démonstration est explicitement simulée.
+**Status: first offline increment of the delay and level mission.**
+The prototype processes already-estimated observations and proposes gains/delays.
+It does not yet capture microphones, analyze PCM or control a real renderer.
+The demonstration is explicitly simulated.
 
-Le [plan de développement](PLAN.md) décrit les sept lots de la première mission
-et les extensions futures : grave, caissons, réflexions et affinage global.
+The [development plan](PLAN.md) describes the first mission's seven milestones
+and later extensions: bass, subwoofers, reflections and overall refinement.
 
-## Essayer
+## Try it
 
-Rust 1.89 ou ultérieur. Aucun périphérique audio ni service Omniphony requis.
+Requires Rust 1.89 or later. No audio device or Omniphony service is needed.
 
 ```sh
 cargo run --locked -p companion-cli -- demo --out-dir sessions/demo
@@ -21,70 +21,69 @@ cargo run --locked -p companion-cli -- plan --session sessions/demo/session.json
 cargo run --locked -p companion-cli -- verify --session sessions/demo/session.json --profile sessions/proposed.json --measurements sessions/demo/verification-measurements.json --out sessions/checked.json
 ```
 
-La démonstration représente trois enceintes, un caisson conservé sans correction
-automatique, deux microphones et deux positions. La politique initiale aligne
-uniquement les enceintes à la position de référence. Une seconde série
-d'observations est générée à partir de l'état modifié du banc, puis vérifiée.
-Le banc est ensuite restauré à ses réglages initiaux.
+The demonstration represents three speakers, a subwoofer preserved without
+automatic correction, two microphones and two positions. The initial policy
+aligns speakers only at the reference position. A second set of observations
+is generated from the modified rig state, then verified. The rig is subsequently
+restored to its initial settings.
 
-À la position de référence, le scénario passe de 2 ms à 0 ms d'écart d'arrivée
-et de 5 dB à 0 dB d'écart de niveau. Ce sont des résultats déterministes du
-simulateur, pas une précision mesurée en acoustique réelle.
+At the reference position, the scenario reduces arrival spread from 2 ms to
+0 ms and level spread from 5 dB to 0 dB. These are deterministic simulator
+results, not measured accuracy in a real acoustic environment.
 
-La commande produit :
+The command produces:
 
-- `session.json` : installation, micros, positions et observations initiales ;
-- `profile.json` : politique, état initial et valeurs absolues proposées ;
-- `verification-measurements.json` : nouvelle série d'observations ;
-- `verification-report.json` : écarts avant/après et statut de vérification.
+- `session.json`: installation, microphones, positions and initial observations;
+- `profile.json`: policy, initial state and proposed absolute settings;
+- `verification-measurements.json`: a new set of observations;
+- `verification-report.json`: before/after deviations and verification status.
 
-Les chemins de sortie existants sont refusés. Pour rejouer la démonstration,
-choisir un nouveau dossier. Les sessions locales sont ignorées par Git.
+Existing output paths are refused. Choose a new directory to run the demonstration
+again. Local sessions are ignored by Git.
 
-## Capacités du premier incrément
+## First-increment capabilities
 
-- Modèle JSON versionné avec identifiants de sorties, micros et positions.
-- Validation des valeurs, références, doublons et couverture du point de référence.
-- Rejet des mesures saturées, désynchronisées ou de SNR insuffisant.
-- Proposition conservatrice : retarder les arrivées précoces et atténuer les
-  enceintes plus fortes, en tenant compte des gains/délais déjà actifs.
-- Vérification distincte sur les observations après application.
-- Préparation d'application/restauration idempotente, refusant un état périmé
-  ou des modifications intervenues depuis la mesure.
-- Sauvegarde des documents sans écraser un fichier existant.
+- Versioned JSON model with output, microphone and position identifiers.
+- Validation of values, references, duplicates and reference-position coverage.
+- Rejection of clipped, unsynchronized or insufficient-SNR measurements.
+- Conservative proposals: delay early arrivals and attenuate louder speakers,
+  accounting for already-active gains/delays.
+- Separate verification using observations after application.
+- Idempotent application/restoration preparation that rejects stale state or
+  edits made since measurement.
+- Document persistence without overwriting existing files.
 
-Les observations importées doivent déjà être comparables : même signal/niveau
-d'émission, méthode de mesure du niveau, calibration micro et référence
-temporelle. Les champs déclaratifs ne prouvent pas à eux seuls cette qualité.
-Le futur service d'acquisition devra la mesurer et la tracer.
+Imported observations must already be comparable: the same stimulus/emission
+level, level measurement method, microphone calibration and timing reference.
+Declarative fields alone do not establish this quality. The future acquisition
+service must measure and record it.
 
-La première politique exige le même micro pour les observations de la position
-de référence. Les autres positions et micros sont conservés pour les étapes
-suivantes ; ils ne sont pas moyennés et ne participent pas au verdict actuel.
+The initial policy requires the same microphone for observations at the reference
+position. Other positions and microphones are retained for later stages; they
+are not averaged and do not contribute to the current verdict.
 
-`verify` retourne 0 si les tolérances sont satisfaites, 2 si la mesure valide
-échoue aux tolérances, 1 si les données ou les fichiers sont invalides.
-Les tolérances par défaut (0,1 ms / 0,5 dB) sont des seuils de prototype à
-valider sur matériel. Le rapport ne juge pas l'ensemble de la zone d'écoute.
+`verify` returns 0 when tolerances are met, 2 when valid measurements fail the
+tolerances, and 1 when data or files are invalid. Default tolerances (0.1 ms /
+0.5 dB) are prototype thresholds requiring hardware validation. The report
+does not assess the entire listening area.
 
-## Architecture et limites
+## Architecture and limitations
 
-- `crates/calibration-core` : modèles, validation, propositions et vérification ;
-  aucun matériel audio, réseau, accès fichier, timer ou toolkit UI.
-- `crates/companion-cli` : commandes, fichiers et banc simulé.
+- `crates/calibration-core`: models, validation, proposals and verification;
+  no audio hardware, network, file access, timers or UI toolkit.
+- `crates/companion-cli`: commands, files and the simulated rig.
 
-Le cœur accepte des observations d'arrivée/niveau ; l'estimation de l'arrivée
-directe à partir d'enregistrements est encore à développer. Les fonctions
-d'application retournent un état cible : un futur adaptateur devra vérifier et
-appliquer cet état atomiquement côté renderer. Il n'existe pas encore de
-transaction réseau ni de restauration automatique après panne matérielle.
+The core accepts arrival/level observations; estimating direct arrivals from
+recordings remains to be implemented. Application functions return a target
+state: a future adapter must verify and apply it atomically in the renderer.
+There is no network transaction or automatic recovery from hardware failure yet.
 
-Prochaine tranche : contrat de session de mesure avec Omniphony, puis capture
-micro et référence temporelle. La capture réelle, les balayages, la compensation
-d'horloge, l'assistant graphique, les itérations automatiques et les corrections
-acoustiques avancées restent à implémenter.
+The next increment is a measurement-session contract with Omniphony, followed
+by microphone capture and timing references. Real capture, sweeps, clock
+compensation, the graphical assistant, automatic iterations and advanced
+acoustic corrections remain to be implemented.
 
-## Validation du développement
+## Development checks
 
 ```sh
 cargo fmt --all -- --check
@@ -92,5 +91,8 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 ```
 
-La CI exécute ces vérifications, la démonstration et une compilation avec Rust
-1.89. Les changements passent par une branche dédiée et une PR à relire.
+CI is configured to run these checks, the demonstration and a Rust 1.89 build.
+Changes go through a dedicated branch and a PR for review.
+
+All repository content and project communication must be in English. See
+[the development agreement](AGENTS.md).
