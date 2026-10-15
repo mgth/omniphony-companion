@@ -35,6 +35,8 @@ The Rust/egui desktop window lets you:
 - Reanalyze completed rejected takes without playing audio; the original verdict is retained.
 - Reanalyze saved recordings without playback; view impulse envelopes and
   frequency-band arrival candidates even while disconnected from Omniphony.
+- Inspect frequency response, peak-energy arrival versus frequency and group
+  delay in the result graphs. Reanalyze an old accepted take to add these views.
 
 **Captured · arrival candidate** means the new impulse analysis found a repeatable
 early peak. **Captured · arrival needs review** means the impulse responses are
@@ -42,6 +44,13 @@ available but the timing evidence disagrees. Both are acquisition successes;
 neither authorizes correction. The older correlation diagnostics remain in the saved report and may still
 show **Unresolved**. Increasing volume does not resolve
 arrival ambiguity.
+
+The **Arrival / frequency** view helps inspect timing differences across a
+speaker's frequency range. **Group delay** also includes crossover phase and room
+effects. Both use one correlation-peak zero, and neither identifies individual
+drivers or proves a direct arrival. The spectral response includes the room and
+microphone and covers only the sweep's excited range. See
+[frequency-dependent timing](docs/spectral-timing.md) for interpretation and limits.
 
 The **Measure** button becomes available when the renderer, microphone, channel,
 reference and sweep settings are usable. Each take plays a sweep on the reference,
@@ -77,6 +86,9 @@ cargo run --locked -p companion-ui --example preview
 cargo run --locked -p companion-ui --example preview -- --arrival-review
 cargo run --locked -p companion-ui --example preview -- --missing-target-review
 cargo run --locked -p companion-ui --example preview -- --batch-progress
+cargo run --locked -p companion-ui --example preview -- --frequency-response
+cargo run --locked -p companion-ui --example preview -- --energy-arrival
+cargo run --locked -p companion-ui --example preview -- --group-delay
 ```
 
 This fixture window is labelled **UI PREVIEW · NO AUDIO**. Its speakers and

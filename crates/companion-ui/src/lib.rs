@@ -1,4 +1,5 @@
 //! Native presentation only. Workers and measurement ownership live in companion-service.
+mod spectral_plot;
 use companion_service::{
     controller::{Controller, Job, Take},
     measurement::MeasureProgress,
@@ -17,8 +18,18 @@ const ACCENT: Color32 = Color32::from_rgb(113, 219, 201);
 const WARM: Color32 = Color32::from_rgb(243, 194, 123);
 const RED: Color32 = Color32::from_rgb(248, 136, 139);
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum ResultPlot {
+    #[default]
+    Impulse,
+    FrequencyResponse,
+    EnergyArrival,
+    GroupDelay,
+}
+
 pub struct CompanionApp {
     pub controller: Controller,
+    pub result_plot: ResultPlot,
     endpoint: String,
     closing: bool,
     selected_result: Option<Take>,
@@ -72,6 +83,7 @@ impl CompanionApp {
         }
         Self {
             controller,
+            result_plot: ResultPlot::default(),
             endpoint: "127.0.0.1:9000".into(),
             closing: false,
             selected_result: None,
@@ -767,7 +779,7 @@ impl CompanionApp {
                     Ok(outcome) => {
                         if take.settings.device.as_deref().is_some_and(|s| s.starts_with("pipewire:monitor:")) { ui.label(RichText::new("Sink monitor · not an acoustic microphone measurement").color(WARM)); }
                         if let Some(report) = &outcome.diagnostics { draw_diagnostics(ui, report); }
-                        if let Some(impulse) = &outcome.impulse { draw_impulse(ui, impulse); }
+                        if let Some(impulse) = &outcome.impulse { draw_impulse(ui, impulse, &mut self.result_plot); }
                         if let Some(error) = &outcome.impulse_error { ui.label(RichText::new(error).color(WARM)); }
                         if let Some(timing) = &outcome.timing {
                             ui.add_space(12.0);
@@ -849,7 +861,7 @@ impl CompanionApp {
                     ui.label(RichText::new(error).color(WARM));
                 }
                 if let Some(impulse) = &review.impulse {
-                    draw_impulse(ui, impulse);
+                    draw_impulse(ui, impulse, &mut self.result_plot);
                 }
                 if let Some(error) = &review.impulse_error {
                     ui.label(RichText::new(error).color(WARM));
@@ -1028,8 +1040,7 @@ fn draw_diagnostics(ui: &mut egui::Ui, report: &companion_service::review::Acqui
     ui.separator();
 }
 
-fn draw_impulse(ui: &mut egui::Ui, report: &ImpulseReport) {
-    ui.add_space(12.0);
+fn draw_arrival_summary(ui: &mut egui::Ui, report: &ImpulseReport) {
     if let (Some(delay), Some(bound)) = (report.relative_arrival_ms, report.uncertainty_ms) {
         ui.label(
             RichText::new(format!("Arrival candidate  {delay:+.3} ms"))
@@ -1060,6 +1071,16 @@ fn draw_impulse(ui: &mut egui::Ui, report: &ImpulseReport) {
         ));
     }
     ui.label(RichText::new("Experimental arrival evidence; direct path and automatic correction are not validated.").small().color(MUTED));
+}
+
+fn draw_impulse(ui: &mut egui::Ui, report: &ImpulseReport, plot: &mut ResultPlot) {
+    ui.add_space(12.0);
+    if *plot == ResultPlot::Impulse {
+        draw_arrival_summary(ui, report);
+    } else {
+        egui::CollapsingHeader::new("Arrival diagnostics")
+            .show(ui, |ui| draw_arrival_summary(ui, report));
+    }
     let id = ui.id().with("impulse_segment");
     let mut selected: usize = ui.data_mut(|d| d.get_persisted(id)).unwrap_or(1);
     selected = selected.min(2);
@@ -1077,6 +1098,32 @@ fn draw_impulse(ui: &mut egui::Ui, report: &ImpulseReport) {
     });
     ui.data_mut(|d| d.insert_persisted(id, selected));
     let segment = &report.segments[selected];
+    ui.horizontal_wrapped(|ui| {
+        for (mode, label) in [
+            (ResultPlot::Impulse, "Impulse"),
+            (ResultPlot::FrequencyResponse, "Frequency response"),
+            (ResultPlot::EnergyArrival, "Arrival / frequency"),
+            (ResultPlot::GroupDelay, "Group delay"),
+        ] {
+            ui.selectable_value(plot, mode, label);
+        }
+    });
+    if *plot != ResultPlot::Impulse {
+        if let Some(spectral) = &segment.spectral {
+            spectral_plot::draw(ui, spectral, *plot);
+        } else {
+            ui.label(
+                RichText::new(
+                    segment
+                        .spectral_error
+                        .as_deref()
+                        .unwrap_or("Reanalyze this take to generate frequency plots."),
+                )
+                .color(WARM),
+            );
+        }
+        return;
+    }
     ui.label(
         RichText::new("Impulse envelope · dB relative to peak")
             .small()

@@ -49,6 +49,8 @@ pub struct ImpulseSegment {
     /// Peak-preserving envelope buckets for bounded-cost display (at most 1600).
     pub envelope_db: Vec<f32>,
     pub envelope_step_ms: f64,
+    pub spectral: Option<crate::spectral::SpectralReport>,
+    pub spectral_error: Option<String>,
 }
 
 /// The timing report must come from `timing::analyze` on these same samples.
@@ -141,6 +143,16 @@ pub fn analyze(
         for (bin, inverse_bin) in y.iter_mut().zip(&x) {
             *bin *= inverse_bin;
         }
+        // Preserve the full excited band for frequency plots, before the arrival
+        // detector's three raised-cosine bands alter its spectral shape.
+        let mut full = y.clone();
+        inverse.process(&mut full);
+        let full_response: Vec<_> = full[..response_len]
+            .iter()
+            .map(|v| v.re / fft_len as f64)
+            .collect();
+        drop(full);
+        let spectral = crate::spectral::analyze(&full_response, rate, pre, sweep);
         let mut candidates = [None; 3];
         let mut threshold_candidates = [[None; 3]; 3];
         let mut sensitivity: f64 = 0.0;
@@ -243,6 +255,8 @@ pub fn analyze(
             response: wide.iter().map(|v| *v as f32).collect(),
             envelope_db,
             envelope_step_ms: bucket as f64 / rate * 1000.0,
+            spectral: spectral.as_ref().ok().cloned(),
+            spectral_error: spectral.err(),
         });
         analysis_responses.push(wide);
     }
