@@ -208,3 +208,58 @@ fn active_measurement_progress_stays_finite_across_frames_and_window_sizes() {
         }
     }
 }
+
+#[test]
+fn captured_sweeps_with_ambiguous_arrivals_show_levels_and_withhold_timing() {
+    use companion_service::{controller::Take, measurement::TakeOutcome};
+    use measurement_capture::timing::TimingReport;
+    let ctx = egui::Context::default();
+    let (mut controller, _) = support::ready();
+    controller.state.takes.push(Take {
+        output_id: "Front left".into(),
+        revision: "ui-preview:1".into(),
+        settings: controller.settings.clone(),
+        outcome: Ok(TakeOutcome {
+            directory: "sessions/synthetic-review".into(),
+            accepted: true,
+            cancelled: false,
+            rejection_reason: None,
+            timing: Some(TimingReport {
+                method: "synthetic-ui-fixture",
+                reference_start_frames: [24000.0, 168000.0],
+                target_start_frame: 96000.0,
+                clock_drift_ppm: None,
+                relative_peak_delay_ms: None,
+                ambiguous_peaks: true,
+                competing_peak_ratio: [0.9; 3],
+                normalized_correlation: [0.3; 3],
+                signal_to_noise_db: [25.0; 3],
+                sweep_rms_dbfs: [-26.0; 3],
+                noise_rms_dbfs: -51.0,
+                valid_for_correction: false,
+            }),
+        }),
+    });
+    let mut app = CompanionApp::preview(&ctx, controller);
+    let size = Vec2::new(1160.0, 800.0);
+    frame(&mut app, &ctx, vec![], size);
+    let output = frame(&mut app, &ctx, vec![], size);
+    let text = labels(&output);
+    assert!(
+        text.iter()
+            .any(|(t, _)| t == "Captured · timing unresolved")
+    );
+    let (_, button) = text.iter().find(|(t, _)| t == "View result").unwrap();
+    click(&mut app, &ctx, button.center(), size);
+    frame(&mut app, &ctx, vec![], size);
+    let output = frame(&mut app, &ctx, vec![], size);
+    let text = labels(&output);
+    assert_eq!(text.iter().filter(|(t, _)| t == "Unresolved").count(), 2);
+    assert!(text.iter().any(|(t, _)| t == "25.0 dB"));
+    assert!(
+        text.iter()
+            .any(|(t, _)| t.contains("More volume will not resolve this"))
+    );
+    assert!(!text.iter().any(|(t, _)| t.contains("Take rejected")));
+    assert!(text.iter().all(|(_, rect)| rect.is_finite()));
+}

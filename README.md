@@ -28,6 +28,11 @@ The Rust/egui desktop window lets you:
 - Start a measurement for one speaker, follow progress and stop it.
 - Review diagnostics or rejection reasons and find the saved take folder.
 
+**Captured · timing unresolved** means the sweeps passed acquisition checks,
+but competing arrival peaks prevent a timing estimate. The review shows sweep
+and background levels and signal-to-noise ratio; delay and clock drift show
+**Unresolved**. Increasing volume does not resolve arrival ambiguity.
+
 The **Measure** button becomes available when the renderer, microphone, channel,
 reference and sweep settings are usable. Each take plays a sweep on the reference,
 the selected speaker, then the reference again. It uses the same acquisition
@@ -177,7 +182,7 @@ Each new take directory contains:
 - `recording.wav`: the selected channel, float32 PCM, including lead-in and tail;
 - `snapshot.json` and `stimulus.json`: settings, identities and exact stimulus;
 - `capture-report.json`: input configuration, quality flags, raw level checks,
-  timing diagnostics or rejection reason, and the frame origin for analysis;
+  timing diagnostics/warning or rejection reason, and the frame origin for analysis;
 - `microphone-calibration.txt`, if supplied with `--calibration`: preserved
   two-column frequency/relative-dB data. It is validated but **not applied**.
 
@@ -187,9 +192,15 @@ small discontinuities and all upstream clock behavior are not established by
 this check. Hardware validation remains necessary.
 
 Takes are rejected on stream errors, queue overflow, detected timing gaps, clipping,
-missing/ambiguous references, poor SNR or unstable reference levels. Limits
+missing or ambiguous sweep sequences, poor SNR or unstable reference levels. Limits
 (20 dB SNR, 2000 ppm linear drift, 100 ms relative peak delay and 1 dB reference
 level change) are prototype gates, not hardware accuracy guarantees.
+Competing arrival peaks within an otherwise valid sweep sequence produce a
+timing warning. Acquisition and level diagnostics remain available, while delay
+and clock drift are withheld. Capture-report schema version 2 records
+`timing.ambiguous_peaks`, the competing-peak ratios and background RMS; its
+`relative_peak_delay_ms` and `clock_drift_ppm` fields are nullable.
+`accepted_for_analysis` confirms acquisition checks, not validated arrival timing.
 Ctrl+C ends the session and saves the partial take as rejected. Connection
 failure follows the same cleanup path. Force-killing the process or a disk
 failure can prevent saving; the renderer still has its own stop limits.

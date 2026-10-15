@@ -643,10 +643,16 @@ impl CompanionApp {
                         if let Some(timing) = &outcome.timing {
                             ui.add_space(12.0);
                             egui::Grid::new("timing_values").spacing([32.0, 10.0]).show(ui, |ui| {
-                                ui.label("Relative peak delay"); ui.monospace(format!("{:+.3} ms", timing.relative_peak_delay_ms)); ui.end_row();
-                                ui.label("Clock drift"); ui.monospace(format!("{:+.1} ppm", timing.clock_drift_ppm)); ui.end_row();
+                                ui.label("Relative peak delay"); ui.monospace(timing.relative_peak_delay_ms.map_or_else(|| "Unresolved".into(), |v| format!("{v:+.3} ms"))); ui.end_row();
+                                ui.label("Clock drift"); ui.monospace(timing.clock_drift_ppm.map_or_else(|| "Unresolved".into(), |v| format!("{v:+.1} ppm"))); ui.end_row();
                                 ui.label("Speaker signal / noise"); ui.monospace(format!("{:.1} dB", timing.signal_to_noise_db[1])); ui.end_row();
+                                ui.label("Speaker sweep RMS"); ui.monospace(format!("{:.1} dBFS", timing.sweep_rms_dbfs[1])); ui.end_row();
+                                ui.label("Background RMS"); ui.monospace(format!("{:.1} dBFS", timing.noise_rms_dbfs)); ui.end_row();
                             });
+                            if let Some(warning) = timing.timing_warning() {
+                                ui.add_space(10.0);
+                                ui.label(RichText::new(warning).color(WARM));
+                            }
                         }
                         if let Some(reason) = &outcome.rejection_reason { ui.label(RichText::new(reason).color(WARM)); }
                         ui.add_space(14.0);
@@ -733,6 +739,15 @@ fn truncate(text: &str, limit: usize) -> String {
 fn take_status(take: &Take) -> (&str, Color32) {
     match &take.outcome {
         Ok(outcome) if outcome.cancelled => ("Cancelled · recording retained", WARM),
+        Ok(outcome)
+            if outcome.accepted
+                && outcome
+                    .timing
+                    .as_ref()
+                    .is_some_and(|report| report.ambiguous_peaks) =>
+        {
+            ("Captured · timing unresolved", WARM)
+        }
         Ok(outcome) if outcome.accepted => ("Recorded · diagnostics available", ACCENT),
         Ok(_) => ("Take rejected · review report", WARM),
         Err(_) => ("Measurement failed", RED),
