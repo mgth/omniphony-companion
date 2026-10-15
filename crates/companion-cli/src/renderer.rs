@@ -21,6 +21,9 @@ pub enum Command {
         snapshot: PathBuf,
         #[arg(long)]
         output: String,
+        /// Optional reference output for a reference/target/reference bench sequence.
+        #[arg(long)]
+        reference_output: Option<String>,
         #[arg(long, default_value_t = 1000)]
         duration_ms: u32,
         #[arg(long, default_value_t = -30.0, allow_hyphen_values = true)]
@@ -49,6 +52,7 @@ pub fn run(command: Command) -> AppResult<()> {
             endpoint,
             snapshot,
             output,
+            reference_output,
             duration_ms,
             peak_dbfs,
             start_hz,
@@ -70,7 +74,7 @@ pub fn run(command: Command) -> AppResult<()> {
                 &out_dir.join("stimulus.json"),
                 &serde_json::json!({
                     "protocol_version": omniphony_adapter::protocol::VERSION,
-                    "signal_id": 1, "output_id": output, "signal": signal,
+                    "signal_id": 1, "output_id": output, "reference_output_id": reference_output, "signal": signal,
                     "microphone_capture": false,
                 }),
             )?;
@@ -80,7 +84,8 @@ pub fn run(command: Command) -> AppResult<()> {
                 "Playing a measurement sweep on {output}. No microphone capture. Ctrl+C disconnects the session."
             );
             let result: AppResult<_> = (|| {
-                let mut progress = client.start(1, &output, signal)?;
+                let mut progress =
+                    client.start_referenced(1, &output, reference_output.as_deref(), signal)?;
                 loop {
                     match progress.state {
                         SignalState::Completed => return Ok(progress),

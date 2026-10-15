@@ -3,3 +3,6 @@
 *.tmp
 
 /renderer-snapshot*.json
+
+# Raw microphone captures must never be committed.
+*.wav

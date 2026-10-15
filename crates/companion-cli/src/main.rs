@@ -1,3 +1,4 @@
+mod capture;
 mod renderer;
 mod simulation;
 
@@ -18,7 +19,7 @@ type AppResult<T> = Result<T, Box<dyn Error>>;
 #[derive(Parser)]
 #[command(
     version,
-    about = "Omniphony calibration prototype: offline analysis and renderer measurement control"
+    about = "Omniphony calibration prototype: microphone capture and offline analysis"
 )]
 struct Args {
     #[command(subcommand)]
@@ -27,6 +28,11 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Capture a microphone with acoustic timing references.
+    Capture {
+        #[command(subcommand)]
+        command: capture::Command,
+    },
     /// Discover Omniphony outputs or play an identified measurement sweep.
     Renderer {
         #[command(subcommand)]
@@ -98,6 +104,7 @@ fn write_json(path: &Path, value: &impl Serialize) -> AppResult<()> {
 
 fn run(args: Args) -> AppResult<ExitCode> {
     match args.command {
+        Command::Capture { command } => capture::run(command)?,
         Command::Renderer { command } => renderer::run(command)?,
         Command::Demo { out_dir } => {
             let (session, profile, measurements, report) = simulation::run()?;
