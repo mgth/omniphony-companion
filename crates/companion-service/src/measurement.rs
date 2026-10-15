@@ -91,6 +91,11 @@ pub fn measure(
         }
     }
     let snapshot = &args.snapshot;
+    let origin = if args.device.starts_with("pipewire:monitor:") {
+        "sink_monitor_capture"
+    } else {
+        "microphone_capture"
+    };
     let sweep = args.sweep;
     sweep.validate(snapshot.sample_rate)?;
     if !(8_000..=192_000).contains(&args.sample_rate)
@@ -137,7 +142,7 @@ pub fn measure(
         &args.out_dir.join("stimulus.json"),
         &serde_json::json!({
             "schema_version": 1, "protocol_version": omniphony_adapter::protocol::VERSION,
-            "origin": "microphone_capture", "microphone_id": args.microphone_id, "position_id": args.position_id,
+            "origin": origin, "microphone_id": args.microphone_id, "position_id": args.position_id,
             "output_id": args.output, "reference_output_id": args.reference_output, "signal": sweep,
             "segment_start_render_frames": [0, sweep.frames(snapshot.sample_rate), 2*sweep.frames(snapshot.sample_rate)],
             "calibration_file": calibration.as_ref().map(|_| "microphone-calibration.txt"),
@@ -152,7 +157,7 @@ pub fn measure(
             write_json(
                 &args.out_dir.join("capture-report.json"),
                 &serde_json::json!({
-                    "schema_version": 1, "origin": "microphone_capture", "accepted_for_analysis": false,
+                    "schema_version": 1, "origin": origin, "accepted_for_analysis": false,
                     "valid_for_correction": false, "recording_file": null, "rejection_reason": error.to_string(),
                 }),
             )?;
@@ -259,7 +264,7 @@ pub fn measure(
     write_json(
         &args.out_dir.join("capture-report.json"),
         &serde_json::json!({
-            "schema_version": 1, "origin": "microphone_capture", "capture": recording.metadata,
+            "schema_version": 1, "origin": origin, "capture": recording.metadata,
             "renderer_progress": acquisition.as_ref().ok(),
             "analysis_start_frame": analysis_start_frame,
             "timing_frame_origin": "analysis_start_frame_in_recording_wav",

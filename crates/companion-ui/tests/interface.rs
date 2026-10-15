@@ -160,7 +160,7 @@ fn microphone_and_channel_can_be_selected_in_the_interface() {
     let text = labels(&output);
     let channel = text
         .iter()
-        .find(|(t, _)| t == "Channel 1")
+        .find(|(t, _)| t == "1 · Mic 1")
         .unwrap()
         .1
         .center();
@@ -169,7 +169,7 @@ fn microphone_and_channel_can_be_selected_in_the_interface() {
     let text = labels(&output);
     let channel = text
         .iter()
-        .find(|(t, _)| t == "Channel 2")
+        .find(|(t, _)| t == "2 · Mic 2")
         .unwrap()
         .1
         .center();
@@ -180,4 +180,31 @@ fn microphone_and_channel_can_be_selected_in_the_interface() {
         0,
         "selection must not start recording"
     );
+}
+
+#[test]
+fn active_measurement_progress_stays_finite_across_frames_and_window_sizes() {
+    use companion_service::{controller::Job, measurement::MeasureProgress};
+    let ctx = egui::Context::default();
+    let (mut controller, _) = support::ready();
+    controller.state.job = Some(Job::Measure {
+        output_id: "Front left".into(),
+    });
+    let mut app = CompanionApp::preview(&ctx, controller);
+    for size in [Vec2::new(850.0, 640.0), Vec2::new(1160.0, 800.0)] {
+        for progress in [
+            MeasureProgress::Preparing,
+            MeasureProgress::LeadIn,
+            MeasureProgress::Saving,
+            MeasureProgress::Analyzing,
+        ] {
+            app.controller.state.progress = Some(progress);
+            for _ in 0..3 {
+                let output = frame(&mut app, &ctx, vec![], size);
+                let text = labels(&output);
+                assert!(text.iter().any(|(s, _)| s == "Stop measurement"));
+                assert!(text.iter().all(|(_, rect)| rect.is_finite()));
+            }
+        }
+    }
 }

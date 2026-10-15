@@ -19,6 +19,9 @@ impl Backend for UiBench {
     fn inputs(&self) -> Result<Vec<InputDevice>, String> {
         Ok(vec![InputDevice {
             name: "Preview audio interface".into(),
+            description: "Preview audio interface".into(),
+            channel_names: vec!["Mic 1".into(), "Mic 2".into()],
+            is_monitor: false,
             configurations: vec![InputConfiguration {
                 channels: 2,
                 min_sample_rate: 44100,

@@ -1,6 +1,8 @@
 //! Device I/O lives here, outside the calibration policy core.
 //! Callbacks only convert samples, push into a bounded queue and update flags.
 pub mod calibration;
+#[cfg(target_os = "linux")]
+mod pipewire_capture;
 pub mod timing;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -22,8 +24,30 @@ pub const LENGTH_LIMIT: u32 = 16;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct InputDevice {
+    /// Stable selector passed back to Capture::start; not a transient node ID.
     pub name: String,
+    pub description: String,
+    pub channel_names: Vec<String>,
+    pub is_monitor: bool,
     pub configurations: Vec<InputConfiguration>,
+}
+impl InputDevice {
+    pub fn label(&self) -> String {
+        if self.is_monitor {
+            format!("{} (sink monitor)", self.description)
+        } else {
+            self.description.clone()
+        }
+    }
+    pub fn channel_label(&self, channel: u16) -> String {
+        match channel
+            .checked_sub(1)
+            .and_then(|i| self.channel_names.get(usize::from(i)))
+        {
+            Some(name) => format!("{channel} · {name}"),
+            None => format!("Channel {channel}"),
+        }
+    }
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct InputConfiguration {
@@ -33,11 +57,18 @@ pub struct InputConfiguration {
     pub sample_format: String,
 }
 pub fn devices() -> Result<Vec<InputDevice>> {
+    #[cfg(target_os = "linux")]
+    if let Ok(inputs) = pipewire_capture::devices() {
+        return Ok(inputs);
+    }
     let host = cpal::default_host();
     host.input_devices()?
         .map(|device| {
             Ok(InputDevice {
                 name: device.name()?,
+                description: device.name()?,
+                channel_names: Vec::new(),
+                is_monitor: false,
                 configurations: device
                     .supported_input_configs()?
                     .map(|c| InputConfiguration {
@@ -61,6 +92,9 @@ pub struct CaptureMetadata {
     pub stream_channels: u16,
     pub sample_rate: u32,
     pub sample_format: String,
+    pub is_monitor: bool,
+    pub channel_name: Option<String>,
+    pub continuity_check: String,
     pub frames: usize,
     pub fault_flags: u32,
     pub peak_dbfs: Option<f64>,
@@ -69,12 +103,17 @@ pub struct CaptureMetadata {
 }
 
 pub struct Capture {
-    stream: cpal::Stream,
+    stream: CaptureStream,
     consumer: Consumer<f32>,
     faults: Arc<AtomicU32>,
     samples: Vec<f32>,
     metadata: CaptureMetadata,
     max_frames: usize,
+}
+enum CaptureStream {
+    Cpal(cpal::Stream),
+    #[cfg(target_os = "linux")]
+    PipeWire(Box<pipewire_capture::Stream>),
 }
 pub struct Recording {
     pub metadata: CaptureMetadata,
@@ -156,6 +195,10 @@ impl Capture {
         if input_channel == 0 || !(8_000..=192_000).contains(&sample_rate) {
             return Err("choose a one-based channel and a sample rate in 8000..=192000".into());
         }
+        #[cfg(target_os = "linux")]
+        if device_name.starts_with("pipewire:") {
+            return pipewire_capture::start(device_name, input_channel, sample_rate);
+        }
         let host = cpal::default_host();
         let mut matches = host
             .input_devices()?
@@ -213,6 +256,9 @@ impl Capture {
             stream_channels: config.channels(),
             sample_rate,
             sample_format: config.sample_format().to_string(),
+            is_monitor: false,
+            channel_name: None,
+            continuity_check: "device timestamps".into(),
             frames: 0,
             fault_flags: 0,
             peak_dbfs: None,
@@ -223,7 +269,7 @@ impl Capture {
         let samples = Vec::with_capacity(max_frames);
         stream.play()?;
         Ok(Self {
-            stream,
+            stream: CaptureStream::Cpal(stream),
             consumer,
             faults,
             samples,
@@ -233,6 +279,13 @@ impl Capture {
     }
     /// Drain on the orchestration thread at least every 200 ms.
     pub fn poll(&mut self) {
+        match &self.stream {
+            CaptureStream::Cpal(stream) => {
+                let _ = stream;
+            }
+            #[cfg(target_os = "linux")]
+            CaptureStream::PipeWire(stream) => stream.poll(),
+        }
         drain(
             &mut self.consumer,
             &mut self.samples,
