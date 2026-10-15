@@ -22,7 +22,7 @@ of microphone or installation performance.
    metadata and retained partial audio.
 7. Check clipping and low-SNR rejection at the input; record the actual accepted
    operating range. Keep raw takes outside Git.
-8. Check that competing arrival peaks show **Captured · timing unresolved**:
+8. Check that competing arrival peaks remain visible in the correlation diagnostics:
    level diagnostics remain visible, delay/drift are withheld, and
    `valid_for_correction` stays false. Raising playback level is not a remedy
    for arrival ambiguity. Missing or competing complete sweep sequences still
@@ -41,8 +41,10 @@ accuracy from a single take.
   or prove continuity through all upstream processing. Hidden OS resampling is
   not currently detected.
 - Quantify repeatability, nonlinear clock behavior and confidence limits.
-- Derive impulse responses and identify direct arrivals; compare level estimates
-  over a defined band/window with microphone calibration actually applied.
+- Validate the experimental impulse-response arrival candidates against known
+  physical delay changes and repeated captures; see [arrival review](arrival-review.md).
+- Compare level estimates over a defined band/window with microphone calibration
+  actually applied.
 - Consider an electrical loopback reference for suitable multichannel interfaces.
 - Convert accepted measurements into validated observation sessions with
   persistent installation identity, then implement apply/readback/remeasure.

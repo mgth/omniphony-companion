@@ -6,7 +6,7 @@ CLI. Keep acoustic policy separate from both presentation and acquisition.
 | Crate | Responsibility |
 | --- | --- |
 | calibration-core | Pure observation validation, policy, proposals and verification |
-| measurement-capture | Audio device access, bounded capture queue, offline timing diagnostics |
+| measurement-capture | Audio device access, bounded capture queue, offline timing and impulse-response analysis |
 | omniphony-adapter | Typed renderer protocol, transport, ownership and acknowledgements |
 | companion-service | Discovery, readiness checks, background jobs, capture orchestration, file persistence |
 | companion-cli | Command parsing, console output and process cancellation |
@@ -19,7 +19,7 @@ keepalives into panel drawing code.
 ## Background work and ownership
 
 The controller accepts one operation at a time. Input enumeration, renderer
-discovery and measurement run on service workers; the frontend only consumes
+discovery, measurement and saved-take review run on service workers; the frontend only consumes
 events and sends actions. Each measurement owns a cloned request, snapshot and
 settings. Editing a future input selection cannot alter a running take.
 
@@ -41,6 +41,12 @@ path fragments. The UI retains the latest 100 take results in memory, associates
 them with the measured speaker and settings, and keeps results from a changed
 position/microphone/configuration out of the current speaker status. The files
 remain available after closing the application.
+
+Saved-take review has separate controller state and does not populate the current
+speaker's measurement status or change acquisition settings. It requires no live
+renderer/input. File validation, FFT work and unique report publication live in
+the service worker; the UI draws bounded envelope data and shared impulse reports.
+A reanalysis error remains visible when the saved-take panel is collapsed.
 
 The example preview installs a synthetic backend explicitly and labels the
 window accordingly. It never records or plays audio. Production starts with

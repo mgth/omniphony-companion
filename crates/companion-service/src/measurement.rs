@@ -2,14 +2,17 @@ use crate::{
     AppResult,
     files::{parent, write_json},
 };
-use measurement_capture::{Capture, MAX_SECONDS, calibration, timing};
+use measurement_capture::{Capture, MAX_SECONDS, calibration, impulse, timing};
 use omniphony_adapter::{Client, Progress, SignalState, Snapshot, Sweep};
 use std::{
     fs,
     io::{Read, Write},
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -48,6 +51,8 @@ pub struct TakeOutcome {
     pub cancelled: bool,
     pub rejection_reason: Option<String>,
     pub timing: Option<timing::TimingReport>,
+    pub impulse: Option<Arc<impulse::ImpulseReport>>,
+    pub impulse_error: Option<String>,
 }
 
 fn save_wav(path: &Path, samples: &[f32], rate: u32) -> AppResult<()> {
@@ -168,6 +173,8 @@ pub fn measure(
                 cancelled: false,
                 rejection_reason: Some(error.to_string()),
                 timing: None,
+                impulse: None,
+                impulse_error: None,
             });
         }
     };
@@ -262,6 +269,21 @@ pub fn measure(
     if was_cancelled {
         result = Err("capture cancelled by user".into());
     }
+    let response = result.as_ref().ok().map(|timing| {
+        impulse::analyze(
+            &recording.samples[analysis_start_frame..],
+            args.sample_rate,
+            snapshot.sample_rate,
+            sweep,
+            timing,
+        )
+    });
+    let impulse = response
+        .as_ref()
+        .and_then(|r| r.as_ref().ok())
+        .cloned()
+        .map(Arc::new);
+    let impulse_error = response.and_then(Result::err);
     write_json(
         &args.out_dir.join("capture-report.json"),
         &serde_json::json!({
@@ -270,6 +292,7 @@ pub fn measure(
             "analysis_start_frame": analysis_start_frame,
             "timing_frame_origin": "analysis_start_frame_in_recording_wav",
             "timing": result.as_ref().ok(), "rejection_reason": result.as_ref().err(),
+            "impulse": impulse, "impulse_error": impulse_error,
             "timing_warning": result.as_ref().ok().and_then(|report| report.timing_warning()),
             "accepted_for_analysis": result.is_ok(), "valid_for_correction": false,
             "calibration_applied": false,
@@ -281,6 +304,8 @@ pub fn measure(
         cancelled: was_cancelled,
         rejection_reason: result.as_ref().err().cloned(),
         timing: result.ok(),
+        impulse,
+        impulse_error,
     })
 }
 

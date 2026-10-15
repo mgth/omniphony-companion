@@ -1,6 +1,7 @@
 //! Device I/O lives here, outside the calibration policy core.
 //! Callbacks only convert samples, push into a bounded queue and update flags.
 pub mod calibration;
+pub mod impulse;
 #[cfg(target_os = "linux")]
 mod pipewire_capture;
 pub mod timing;

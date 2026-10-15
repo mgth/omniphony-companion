@@ -2,12 +2,13 @@
 
 Acoustic calibration companion for [Omniphony](https://github.com/mgth/Omniphony).
 
-**Status: native desktop UI, single-microphone capture, timing diagnostics and an offline calibration core.**
+**Status: native desktop UI, microphone capture, offline impulse-response review and an offline calibration core.**
 The companion discovers renderer outputs, plays finite measurement sequences,
 records a selected interface input channel and saves raw audio with quality reports.
 The offline core can propose gains/delays from already-estimated observations.
-Direct-arrival analysis and live application of calibration profiles are still
-pending. The demonstration is explicitly simulated.
+Experimental arrival candidates can now be reviewed against impulse responses.
+Validated direct-arrival observations and live application of calibration profiles
+are still pending. The demonstration is explicitly simulated.
 
 The [development plan](PLAN.md) describes the first mission's seven milestones
 and later extensions: bass, subwoofers, reflections and overall refinement.
@@ -27,11 +28,15 @@ The Rust/egui desktop window lets you:
 - Choose a fixed timing-reference speaker and a listening position.
 - Start a measurement for one speaker, follow progress and stop it.
 - Review diagnostics or rejection reasons and find the saved take folder.
+- Reanalyze saved recordings without playback; view impulse envelopes and
+  frequency-band arrival candidates even while disconnected from Omniphony.
 
-**Captured · timing unresolved** means the sweeps passed acquisition checks,
-but competing arrival peaks prevent a timing estimate. The review shows sweep
-and background levels and signal-to-noise ratio; delay and clock drift show
-**Unresolved**. Increasing volume does not resolve arrival ambiguity.
+**Captured · arrival candidate** means the new impulse analysis found a repeatable
+early peak. **Captured · arrival needs review** means the impulse responses are
+available but the timing evidence disagrees. Both are acquisition successes;
+neither authorizes correction. The older correlation diagnostics remain in the saved report and may still
+show **Unresolved**. Increasing volume does not resolve
+arrival ambiguity.
 
 The **Measure** button becomes available when the renderer, microphone, channel,
 reference and sweep settings are usable. Each take plays a sweep on the reference,
@@ -48,13 +53,16 @@ Discovery and measurement run in background service workers. Minimizing the
 window does not pause keepalives or capture. Closing it during measurement requests
 cancellation and waits for cleanup so the rejected partial take can be saved.
 Results are kept in the window for the current run; raw WAVs and JSON reports
-remain in the recording folders. Loading a previous session into the UI is
-not implemented yet.
+remain in the recording folders. Use **Review a saved take · no playback**,
+paste a take folder, and press **Analyze saved take** to reopen a recording.
+A current result also has a **Reanalyze this take** action. This reads the take
+and generates a fresh report; it does not restore acquisition settings.
 
 To inspect the layout without an interface or renderer:
 
 ```sh
 cargo run --locked -p companion-ui --example preview
+cargo run --locked -p companion-ui --example preview -- --arrival-review
 ```
 
 This fixture window is labelled **UI PREVIEW · NO AUDIO**. Its speakers and
@@ -182,7 +190,8 @@ Each new take directory contains:
 - `recording.wav`: the selected channel, float32 PCM, including lead-in and tail;
 - `snapshot.json` and `stimulus.json`: settings, identities and exact stimulus;
 - `capture-report.json`: input configuration, quality flags, raw level checks,
-  timing diagnostics/warning or rejection reason, and the frame origin for analysis;
+  timing diagnostics/warning or rejection reason, impulse analysis when available,
+  and the frame origin for analysis;
 - `microphone-calibration.txt`, if supplied with `--calibration`: preserved
   two-column frequency/relative-dB data. It is validated but **not applied**.
 
@@ -221,6 +230,42 @@ clock drift, inverted polarity, noise, missing references, clipping and strong
 competing reflections. Real interface/microphone repeatability remains to be
 measured. See [the capture validation checklist](docs/capture-validation.md).
 
+## Offline impulse-response review
+
+```sh
+cargo run --locked -p companion-cli -- capture review --take sessions/first-capture
+```
+
+The UI's saved-take review uses the same service. No microphone, audio output or
+renderer connection is opened. A new `analysis-*.json` is saved beside the source
+files; `recording.wav`, `stimulus.json`, `snapshot.json` and the original capture
+report are never overwritten. The command returns success when review completes,
+even if arrival timing remains unresolved; malformed or faulty acquisitions return
+an error. Legacy takes rejected only for competing correlation peaks can be
+reviewed. Interrupted, clipped, mismatched or otherwise rejected takes cannot be
+promoted by reanalysis.
+
+The analyzer reconstructs the emitted sweep, compensates its candidate constant
+clock ratio and performs regularized, band-limited deconvolution. It retains three
+impulse responses (reference, speaker, reference). The UI shows a peak-preserving
+envelope and arrival markers for the broad, lower and upper analysis bands.
+The report also retains the full band-limited response samples and their time axis.
+
+An early local peak is tested across three frequency bands and detection
+thresholds. Timing is withheld when those choices disagree or the repeated
+reference waveforms do not match. A reported sensitivity bound describes those
+choices; it is **not a calibrated accuracy or statistical confidence interval**.
+An undetectable or obstructed direct sound can still leave a repeatable reflection:
+no candidate is a validated direct-path observation. All reports retain
+`valid_for_correction: false` and cannot be converted automatically into profiles.
+
+This increment targets broadband speakers, not subwoofer alignment. Microphone
+calibration, representative level estimation, nonlinear clock validation and
+hardware accuracy assessment remain pending. See [the analysis method and
+validation](docs/arrival-review.md) for the versioned algorithm, gates and limits.
+
+![Saved-take arrival review with synthetic preview data](docs/images/arrival-review-preview.png)
+
 ## Offline calibration capabilities
 
 - Versioned JSON model with output, microphone and position identifiers.
@@ -256,19 +301,19 @@ does not assess the entire listening area.
   cancellation, acquisition orchestration and persistence shared by CLI/UI.
 - `crates/companion-ui`: native egui views; no audio callback or protocol implementation.
 - `crates/measurement-capture`: bounded input capture, calibration-file parsing
-  and offline timing diagnostics; no correction policy.
+  and offline timing/impulse-response diagnostics; no correction policy.
 - `crates/omniphony-adapter`: typed TCP requests, acknowledgements, session
   ownership and protocol validation; independent of the calibration core and UI.
 
-The core accepts arrival/level observations; estimating direct arrivals from
-recordings remains to be implemented. Application functions return a target
+The core accepts validated arrival/level observations; experimental arrival
+candidates from recordings are kept separate until hardware validation. Application functions return a target
 state: a future adapter must verify and apply it atomically in the renderer.
 Profile application and restoration have no live network implementation yet.
 The adapter's snapshots and render reports are separate from acoustic observation
 sessions; renderer instance IDs are not permanent installation IDs.
 
-The next steps are real-interface validation, repeatability assessment and
-impulse-response/direct-arrival analysis. The native assistant can already launch
+The next steps are real-interface validation, arrival repeatability assessment
+and representative-level analysis. The native assistant can already launch
 individual takes; guided multi-speaker workflows, automatic iterations and
 advanced corrections follow after that.
 

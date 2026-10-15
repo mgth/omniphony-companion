@@ -150,7 +150,7 @@ pub fn analyze(
 fn rms(samples: &[f32]) -> f64 {
     (samples.iter().map(|&x| (x as f64).powi(2)).sum::<f64>() / samples.len().max(1) as f64).sqrt()
 }
-fn resample(source: &[f32], ratio: f64) -> Vec<f32> {
+pub(crate) fn resample(source: &[f32], ratio: f64) -> Vec<f32> {
     let len = (source.len() as f64 * ratio).round() as usize;
     (0..len)
         .map(|i| {

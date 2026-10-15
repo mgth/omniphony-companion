@@ -12,7 +12,10 @@ fn main() -> eframe::Result {
             ..Default::default()
         },
         Box::new(|cc| {
-            let (controller, _) = support::ready();
+            let (mut controller, _) = support::ready();
+            if std::env::args().any(|a| a == "--arrival-review") {
+                controller.state.review = Some(support::arrival_review());
+            }
             Ok(Box::new(companion_ui::CompanionApp::preview(
                 &cc.egui_ctx,
                 controller,

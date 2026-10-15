@@ -70,7 +70,16 @@ Rust/egui window: input/channel selection, renderer speaker discovery, a fixed
 reference, per-speaker Measure/Stop actions, progress and saved-take diagnostics.
 The shared service owns discovery, capture and cancellation outside the UI event
 loop. This does not yet add automatic correction, guided whole-system runs or
-loading previous sessions into the UI.
+restoring previous acquisition settings into the UI.
+
+An initial milestone-4 increment now reconstructs band-limited impulse responses,
+checks early arrival candidates across bands/thresholds and compares the two
+reference waveforms. New takes and offline reanalysis share this code. The UI
+can review a saved recording without a renderer and display impulse envelopes,
+candidates and unresolved reasons. This remains experimental evidence, not a
+validated direct-path observation or an automatic correction input. Representative
+levels, microphone-calibration application, hardware accuracy and profile
+conversion remain pending; see `docs/arrival-review.md`.
 
 ### Multiple microphones
 
