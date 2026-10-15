@@ -201,13 +201,7 @@ impl Client {
                     .reference_output_id
                     .as_ref()
                     .is_some_and(|id| !snapshot.outputs.iter().any(|o| &o.id == id))
-                || progress.total_frames
-                    != progress.signal.frames(snapshot.sample_rate)
-                        * if progress.reference_output_id.is_some() {
-                            3
-                        } else {
-                            1
-                        }
+                || !valid_sequence(progress, &snapshot)
                 || progress.rendered_frames > progress.total_frames
                 || (progress.state == SignalState::Completed
                     && progress.rendered_frames != progress.total_frames))
@@ -228,12 +222,24 @@ impl Client {
         reference_output_id: Option<&str>,
         signal: Sweep,
     ) -> Result<Progress> {
+        self.start_sequence(signal_id, output_id, reference_output_id, &[], signal)
+    }
+
+    pub fn start_sequence(
+        &mut self,
+        signal_id: u64,
+        output_id: &str,
+        reference_output_id: Option<&str>,
+        sequence_outputs: &[String],
+        signal: Sweep,
+    ) -> Result<Progress> {
         let session_id = self.session_id()?;
         let reply = self.exchange(protocol::Command::Start {
             session_id,
             signal_id,
             output_id: output_id.into(),
             reference_output_id: reference_output_id.map(str::to_owned),
+            sequence_outputs: sequence_outputs.to_vec(),
             signal,
         })?;
         let Some(progress) = self.accept_session(reply)? else {
@@ -241,6 +247,7 @@ impl Client {
         };
         if progress.signal_id != signal_id
             || progress.output_id != output_id
+            || progress.sequence_outputs != sequence_outputs
             || progress.reference_output_id.as_deref() != reference_output_id
             || progress.signal != signal
         {
@@ -263,6 +270,7 @@ impl Client {
                 if old.signal_id == new.signal_id
                     && old.output_id == new.output_id
                     && old.reference_output_id == new.reference_output_id
+                    && old.sequence_outputs == new.sequence_outputs
                     && old.signal == new.signal
                     && new.rendered_frames >= old.rendered_frames
                     && (matches!(old.state, SignalState::Queued | SignalState::Rendering)
@@ -359,4 +367,24 @@ fn validate_snapshot(snapshot: &Snapshot) -> std::result::Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn valid_sequence(p: &Progress, snapshot: &Snapshot) -> bool {
+    if p.sequence_outputs.is_empty() {
+        return p.total_frames
+            == p.signal.frames(snapshot.sample_rate)
+                * if p.reference_output_id.is_some() {
+                    3
+                } else {
+                    1
+                };
+    }
+    let mut seen = std::collections::HashSet::new();
+    p.reference_output_id.is_some()
+        && p.sequence_outputs.first() == Some(&p.output_id)
+        && p.sequence_outputs
+            .iter()
+            .all(|id| seen.insert(id) && snapshot.outputs.iter().any(|o| &o.id == id))
+        && protocol::sequence_frames(p.signal, snapshot.sample_rate, p.sequence_outputs.len())
+            == Ok(p.total_frames)
 }

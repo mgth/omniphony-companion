@@ -220,13 +220,17 @@ pub(crate) fn correlation_scores(samples: &[f32], template: &[f32]) -> Result<Ve
 }
 
 pub(crate) fn peak_candidates(scores: &[f64], spacing: f64) -> Vec<Peak> {
+    peak_candidates_bounded(scores, spacing, 12)
+}
+
+pub(crate) fn peak_candidates_bounded(scores: &[f64], spacing: f64, limit: usize) -> Vec<Peak> {
     // Find a unique sequence independently of whether the room response has
     // competing arrivals inside each sweep. Arrival ambiguity is reported after
     // clock compensation; it does not mean the sweeps were not recorded.
     let guard = (spacing * 0.4) as usize;
     let mut candidates = Vec::new();
     let mut masked = scores.to_vec();
-    for _ in 0..12 {
+    for _ in 0..limit {
         let Some((i, &score)) = masked.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)) else {
             break;
         };

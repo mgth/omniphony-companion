@@ -26,7 +26,9 @@ The Rust/egui desktop window lets you:
 - Connect to the local Omniphony address and list its physical speaker outputs,
   including current gain, delay, mute and frequency limits.
 - Choose a fixed timing-reference speaker and a listening position.
-- Start a measurement for one speaker, follow progress and stop it.
+- Start a measurement for one speaker, with progress inside its row and no layout shift.
+- Check the wired speakers and use **Measure all checked** for one continuous
+  capture with shared reference sweeps. **Stop** cancels the complete run.
 - Review reference/target levels, clipping, missing sweep diagnostics and arrival evidence.
 - Reanalyze completed rejected takes without playing audio; the original verdict is retained.
 - Reanalyze saved recordings without playback; view impulse envelopes and
@@ -45,7 +47,14 @@ the selected speaker, then the reference again. It uses the same acquisition
 service as the CLI. A fresh renderer snapshot is checked before opening the input.
 No corrections or persistent renderer settings are applied.
 
-Connect to a build from the [Omniphony calibration PR](https://github.com/mgth/Omniphony/pull/862), normally
+Whole-system capture plays **reference → speaker 1 → reference → speaker 2 →
+reference → …**. The reference between two speakers is recorded once and reused
+in both results. Each speaker still has independent acquisition diagnostics.
+Uncheck unwired speakers before starting; muted outputs and outputs incompatible
+with the chosen sweep are excluded. See [batch capture](docs/batch-capture.md)
+for recording limits, cancellation and saved-take review.
+
+Connect to a build from the [Omniphony calibration PR](https://github.com/mgth/Omniphony/pull/863), normally
 `127.0.0.1:9000`; the dedicated calibration workflow uses port 9003.
 The UI does not launch Omniphony itself. Change the address and press **Connect**
 or **Refresh speakers** after changing its speaker layout or settings.
@@ -65,6 +74,7 @@ To inspect the layout without an interface or renderer:
 cargo run --locked -p companion-ui --example preview
 cargo run --locked -p companion-ui --example preview -- --arrival-review
 cargo run --locked -p companion-ui --example preview -- --missing-target-review
+cargo run --locked -p companion-ui --example preview -- --batch-progress
 ```
 
 This fixture window is labelled **UI PREVIEW · NO AUDIO**. Its speakers and
@@ -115,7 +125,9 @@ again. Local sessions are ignored by Git.
 ## Renderer measurement control
 
 Requires an Omniphony build with OSC contract revision 9 and measurement protocol
-version 2 from the calibration development PR. The adapter uses its existing local TCP listener, normally port 9000.
+version 3 from the calibration development branch. Update the renderer and
+Companion together. Saved version-2 single-speaker takes remain reviewable.
+The adapter uses its existing local TCP listener, normally port 9000.
 It shares the typed protocol through a pinned revision of Omniphony's
 `omniphony-osc-contract` crate; no local sibling checkout is needed to build.
 
@@ -145,7 +157,7 @@ explicit `stop` and `end` operations. A host that does not render expires the
 signal instead of reporting completion. Render progress is not a DAC timestamp
 or an acoustic timing reference.
 
-See the [wire protocol](https://github.com/mgth/Omniphony/blob/defdec01c507b38c600bae08e29aca3bf1987d38/docs/measurement-protocol.md)
+See the [wire protocol](https://github.com/mgth/Omniphony/blob/d1b18ba2400371b5713bbb8f594befa5f556b8a9/docs/measurement-protocol.md)
 for limits, identifiers and the hardware-free `measurement_fixture` bench.
 
 ## Single-microphone acquisition

@@ -1,5 +1,6 @@
 //! Frontend-neutral state and background jobs. No device/network I/O in paint calls.
 use crate::{
+    batch::{self, BatchOutcome},
     measurement::{self, MeasureProgress, MeasureRequest, TakeOutcome},
     review::{self, SavedReview},
 };
@@ -17,6 +18,16 @@ use std::{
 };
 
 pub trait Backend: Send + Sync + 'static {
+    fn measure_batch(
+        &self,
+        request: MeasureRequest,
+        outputs: Vec<String>,
+        cancel: &AtomicBool,
+        progress: &mut dyn FnMut(usize, MeasureProgress),
+    ) -> Result<BatchOutcome, String> {
+        let _ = (request, outputs, cancel, progress);
+        Err("Continuous batch capture is unavailable in this backend.".into())
+    }
     fn review(&self, directory: PathBuf) -> Result<SavedReview, String> {
         let _ = directory;
         Err("Saved-take review is unavailable in this backend.".into())
@@ -32,6 +43,15 @@ pub trait Backend: Send + Sync + 'static {
 }
 pub struct LiveBackend;
 impl Backend for LiveBackend {
+    fn measure_batch(
+        &self,
+        request: MeasureRequest,
+        outputs: Vec<String>,
+        cancel: &AtomicBool,
+        progress: &mut dyn FnMut(usize, MeasureProgress),
+    ) -> Result<BatchOutcome, String> {
+        batch::measure(request, outputs, cancel, progress).map_err(|e| e.to_string())
+    }
     fn review(&self, directory: PathBuf) -> Result<SavedReview, String> {
         review::saved_take(&directory).map_err(|e| e.to_string())
     }
@@ -91,7 +111,13 @@ pub enum Job {
     Review,
     Inputs,
     Discover,
-    Measure { output_id: String },
+    Measure {
+        output_id: String,
+    },
+    Batch {
+        output_ids: Vec<String>,
+        current: usize,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -123,10 +149,13 @@ enum Event {
     Discovered(SocketAddr, Result<Snapshot, String>),
     Progress(MeasureProgress),
     Measured(Box<Take>),
+    BatchProgress(usize, MeasureProgress),
+    Batched(Settings, String, Result<BatchOutcome, String>),
 }
 pub struct Controller {
     pub state: State,
     pub settings: Settings,
+    pub excluded_outputs: std::collections::BTreeSet<String>,
     backend: Arc<dyn Backend>,
     sender: Sender<Event>,
     receiver: Receiver<Event>,
@@ -144,6 +173,7 @@ impl Controller {
         Self {
             state: State::default(),
             settings: Settings::default(),
+            excluded_outputs: Default::default(),
             backend,
             sender,
             receiver,
@@ -155,7 +185,10 @@ impl Controller {
         self.state.job.is_some()
     }
     pub fn measuring(&self) -> bool {
-        matches!(self.state.job, Some(Job::Measure { .. }))
+        matches!(
+            self.state.job,
+            Some(Job::Measure { .. } | Job::Batch { .. })
+        )
     }
 
     /// Offline analysis uses the same worker boundary as acquisition. No renderer needed.
@@ -246,6 +279,10 @@ impl Controller {
         if self.busy() {
             return Err("Wait for the current operation to finish.".into());
         }
+        self.output_readiness(output_id)
+    }
+    /// Shared eligibility checks, independent of an operation currently running.
+    pub fn output_readiness(&self, output_id: &str) -> Result<(), String> {
         let snapshot = self
             .state
             .snapshot
@@ -379,6 +416,93 @@ impl Controller {
             })));
         });
     }
+    pub fn active_output(&self) -> Option<&str> {
+        match &self.state.job {
+            Some(Job::Measure { output_id }) => Some(output_id),
+            Some(Job::Batch {
+                output_ids,
+                current,
+            }) => output_ids.get(*current).map(String::as_str),
+            _ => None,
+        }
+    }
+    pub fn batch_outputs(&self) -> Result<Vec<String>, String> {
+        if self.busy() {
+            return Err("Wait for the current operation to finish.".into());
+        }
+        let snapshot = self
+            .state
+            .snapshot
+            .as_ref()
+            .ok_or("Connect to Omniphony first.")?;
+        let outputs: Vec<_> = snapshot
+            .outputs
+            .iter()
+            .filter(|o| !self.excluded_outputs.contains(&o.id) && self.can_measure(&o.id).is_ok())
+            .map(|o| o.id.clone())
+            .collect();
+        if outputs.is_empty() {
+            return Err("Check at least one speaker with compatible measurement settings.".into());
+        }
+        measurement_capture::sequence::capture_budget(
+            self.settings.sweep,
+            snapshot.sample_rate,
+            self.settings.sample_rate,
+            outputs.len(),
+        )?;
+        Ok(outputs)
+    }
+    pub fn start_batch(&mut self) {
+        let outputs = match self.batch_outputs() {
+            Ok(o) => o,
+            Err(e) => {
+                self.state.error = Some(e);
+                return;
+            }
+        };
+        let snapshot = self.state.snapshot.as_ref().expect("validated").clone();
+        let settings = self.settings.clone();
+        self.sequence += 1;
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let request = MeasureRequest {
+            endpoint: self.state.endpoint.expect("validated"),
+            snapshot: snapshot.clone(),
+            device: settings.device.clone().expect("validated"),
+            input_channel: settings.input_channel,
+            sample_rate: settings.sample_rate,
+            microphone_id: settings.microphone_id.clone(),
+            position_id: settings.position_id.clone(),
+            output: outputs[0].clone(),
+            reference_output: settings.reference_output.clone().expect("validated"),
+            calibration: (!settings.calibration_path.trim().is_empty())
+                .then(|| PathBuf::from(&settings.calibration_path)),
+            sweep: settings.sweep,
+            out_dir: PathBuf::from(&settings.output_root)
+                .join(format!("batch-{stamp}-{}", self.sequence)),
+        };
+        self.cancelled = Arc::new(AtomicBool::new(false));
+        self.state.job = Some(Job::Batch {
+            output_ids: outputs.clone(),
+            current: 0,
+        });
+        self.state.progress = Some(MeasureProgress::Preparing);
+        self.state.stopping = false;
+        self.state.error = None;
+        let backend = self.backend.clone();
+        let sender = self.sender.clone();
+        let cancel = self.cancelled.clone();
+        std::thread::spawn(move || {
+            let result = catch_job(|| {
+                backend.measure_batch(request, outputs, &cancel, &mut |i, p| {
+                    let _ = sender.send(Event::BatchProgress(i, p));
+                })
+            });
+            let _ = sender.send(Event::Batched(settings, snapshot.revision, result));
+        });
+    }
     pub fn cancel(&mut self) {
         if self.measuring() {
             self.state.stopping = true;
@@ -389,6 +513,43 @@ impl Controller {
     pub fn poll(&mut self) {
         while let Ok(event) = self.receiver.try_recv() {
             match event {
+                Event::BatchProgress(index, progress) => {
+                    if let Some(Job::Batch {
+                        output_ids,
+                        current,
+                    }) = &mut self.state.job
+                    {
+                        *current = index.min(output_ids.len().saturating_sub(1));
+                    }
+                    self.state.progress = Some(progress);
+                }
+                Event::Batched(settings, revision, result) => {
+                    match result {
+                        Ok(batch) => {
+                            if let Some(error) = batch.error {
+                                self.state.error = Some(format!(
+                                    "{error}. Saved batch: {}",
+                                    batch.directory.display()
+                                ));
+                            }
+                            for (output_id, outcome) in batch.takes {
+                                self.state.takes.push(Take {
+                                    output_id,
+                                    revision: revision.clone(),
+                                    settings: settings.clone(),
+                                    outcome: Ok(outcome),
+                                });
+                            }
+                            if self.state.takes.len() > 100 {
+                                self.state.takes.drain(..self.state.takes.len() - 100);
+                            }
+                        }
+                        Err(error) => self.state.error = Some(error),
+                    }
+                    self.state.progress = None;
+                    self.state.job = None;
+                    self.state.stopping = false;
+                }
                 Event::Reviewed(result) => {
                     match *result {
                         Ok(review) => self.state.review = Some(review),

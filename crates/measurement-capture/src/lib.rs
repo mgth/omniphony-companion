@@ -5,6 +5,7 @@ pub mod diagnostics;
 pub mod impulse;
 #[cfg(target_os = "linux")]
 mod pipewire_capture;
+pub mod sequence;
 pub mod timing;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -194,12 +195,31 @@ where
 impl Capture {
     /// Opening/starting input is explicit. Enumeration never records audio.
     pub fn start(device_name: &str, input_channel: u16, sample_rate: u32) -> Result<Self> {
+        Self::start_bounded(
+            device_name,
+            input_channel,
+            sample_rate,
+            sample_rate as usize * MAX_SECONDS as usize,
+        )
+    }
+    /// Continuous batches have a separate bounded mono capture budget.
+    pub fn start_bounded(
+        device_name: &str,
+        input_channel: u16,
+        sample_rate: u32,
+        max_frames: usize,
+    ) -> Result<Self> {
+        if max_frames == 0
+            || max_frames > 4_000_000.max(sample_rate as usize * MAX_SECONDS as usize)
+        {
+            return Err("capture exceeds the frame budget".into());
+        }
         if input_channel == 0 || !(8_000..=192_000).contains(&sample_rate) {
             return Err("choose a one-based channel and a sample rate in 8000..=192000".into());
         }
         #[cfg(target_os = "linux")]
         if device_name.starts_with("pipewire:") {
-            return pipewire_capture::start(device_name, input_channel, sample_rate);
+            return pipewire_capture::start(device_name, input_channel, sample_rate, max_frames);
         }
         let host = cpal::default_host();
         let mut matches = host
@@ -267,7 +287,6 @@ impl Capture {
             rms_dbfs: None,
             clipped_samples: 0,
         };
-        let max_frames = sample_rate as usize * MAX_SECONDS as usize;
         let samples = Vec::with_capacity(max_frames);
         stream.play()?;
         Ok(Self {

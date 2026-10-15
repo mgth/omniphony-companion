@@ -85,6 +85,7 @@ fn spec() -> Sweep {
 }
 fn progress(state: SignalState, frames: u64) -> Progress {
     Progress {
+        sequence_outputs: Vec::new(),
         reference_output_id: None,
         signal_id: 1,
         output_id: "L".into(),
@@ -93,6 +94,46 @@ fn progress(state: SignalState, frames: u64) -> Progress {
         rendered_frames: frames,
         total_frames: spec().frames(48000),
     }
+}
+
+#[test]
+fn shared_reference_sequence_preserves_identity_and_rejects_later_plan_changes() {
+    let (endpoint, handle) = server(|mut stream| {
+        let r = receive(&mut stream);
+        send(&mut stream, r.request_id, session(None));
+        let r = receive(&mut stream);
+        let Command::Start {
+            sequence_outputs,
+            reference_output_id,
+            ..
+        } = r.command
+        else {
+            panic!("start")
+        };
+        assert_eq!(sequence_outputs, ["L"]);
+        assert_eq!(reference_output_id.as_deref(), Some("L"));
+        let mut p = progress(SignalState::Queued, 0);
+        p.reference_output_id = reference_output_id;
+        p.sequence_outputs = sequence_outputs;
+        p.total_frames *= 3;
+        send(&mut stream, r.request_id, session(Some(p.clone())));
+        let r = receive(&mut stream);
+        p.sequence_outputs.clear();
+        send(&mut stream, r.request_id, session(Some(p)));
+    });
+    let mut c = Client::connect(endpoint, Duration::from_secs(1)).unwrap();
+    c.begin(&snapshot()).unwrap();
+    let p = c
+        .start_sequence(1, "L", Some("L"), &["L".into()], spec())
+        .unwrap();
+    assert_eq!(p.total_frames, spec().frames(48000) * 3);
+    assert!(
+        c.status()
+            .unwrap_err()
+            .to_string()
+            .contains("identity changed")
+    );
+    handle.join().unwrap();
 }
 
 #[test]

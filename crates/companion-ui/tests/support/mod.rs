@@ -131,6 +131,7 @@ pub fn arrival_review() -> companion_service::review::SavedReview {
         capture_sample_rate: 48000,
         render_sample_rate: 48000,
         signal: companion_service::controller::Settings::default().sweep,
+        sequence_window: None,
         original_accepted_for_analysis: true,
         original_rejection_reason: None,
         diagnostics: measurement_capture::diagnostics::AcquisitionDiagnostics {

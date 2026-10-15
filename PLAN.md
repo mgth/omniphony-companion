@@ -69,8 +69,11 @@ A first milestone-6 interface now exposes the acquisition prototype in a native
 Rust/egui window: input/channel selection, renderer speaker discovery, a fixed
 reference, per-speaker Measure/Stop actions, progress and saved-take diagnostics.
 The shared service owns discovery, capture and cancellation outside the UI event
-loop. This does not yet add automatic correction, guided whole-system runs or
-restoring previous acquisition settings into the UI.
+loop. Whole-system acquisition now adds selectable outputs and a continuous
+reference–speaker–reference sequence whose intervening references are shared.
+Progress stays in the active speaker row. This does not yet add automatic
+correction, guided microphone positioning or restoring previous acquisition
+settings into the UI. See `docs/batch-capture.md`.
 
 An initial milestone-4 increment now reconstructs band-limited impulse responses,
 checks early arrival candidates across bands/thresholds and compares the two

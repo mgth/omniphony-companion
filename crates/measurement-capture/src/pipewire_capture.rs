@@ -288,7 +288,7 @@ impl Drop for Stream {
     }
 }
 
-pub(super) fn start(name: &str, channel: u16, rate: u32) -> Result<Capture> {
+pub(super) fn start(name: &str, channel: u16, rate: u32, max_frames: usize) -> Result<Capture> {
     let mut targets = targets()?.into_iter().filter(|t| t.device.name == name);
     let target = targets
         .next()
@@ -459,7 +459,6 @@ pub(super) fn start(name: &str, channel: u16, rate: u32) -> Result<Capture> {
         rms_dbfs: None,
         clipped_samples: 0,
     };
-    let max_frames = rate as usize * MAX_SECONDS as usize;
     Ok(Capture {
         stream: CaptureStream::PipeWire(Box::new(Stream {
             _listener: listener,
