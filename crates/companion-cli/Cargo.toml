@@ -15,7 +15,7 @@ path = "src/main.rs"
 calibration-core.workspace = true
 omniphony-adapter.workspace = true
 measurement-capture = { path = "../measurement-capture" }
-hound = "3.5"
+companion-service = { path = "../companion-service" }
 ctrlc = "3.4"
 clap.workspace = true
 serde.workspace = true

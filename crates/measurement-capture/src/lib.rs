@@ -20,12 +20,12 @@ pub const INVALID_SAMPLE: u32 = 4;
 pub const TIMESTAMP_GAP: u32 = 8;
 pub const LENGTH_LIMIT: u32 = 16;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct InputDevice {
     pub name: String,
     pub configurations: Vec<InputConfiguration>,
 }
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct InputConfiguration {
     pub channels: u16,
     pub min_sample_rate: u32,
