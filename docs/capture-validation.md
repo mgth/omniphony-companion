@@ -20,7 +20,11 @@ of microphone or installation performance.
 6. Exercise Ctrl+C, device disconnection, input starvation, renderer loss and
    configuration changes. Check bounded playback termination, rejected-take
    metadata and retained partial audio.
-7. Check clipping and low-SNR rejection at the input; record the actual accepted
+7. With a deliberately disconnected target and intact references, verify that
+   reference-pair diagnostics identify a target interval near background, retain
+   the rejection and provide no delay. Reconnect before retrying. Missing
+   references must leave interval diagnostics unavailable.
+8. Check clipping and low-SNR rejection at the input; record the actual accepted
    operating range. Keep raw takes outside Git.
 8. Check that competing arrival peaks remain visible in the correlation diagnostics:
    level diagnostics remain visible, delay/drift are withheld, and

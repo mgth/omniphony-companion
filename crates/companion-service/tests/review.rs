@@ -99,8 +99,15 @@ fn cancelled_faulty_or_inconsistent_takes_cannot_be_promoted() {
             }
             _ => r["analysis_start_frame"] = json!(usize::MAX),
         });
-        assert!(saved_take(dir.path()).is_err(), "case {mode}");
-        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 4);
+        if mode == 7 {
+            let review = saved_take(dir.path()).unwrap();
+            assert!(!review.original_accepted_for_analysis);
+            assert!(review.timing.is_none() && review.impulse.is_none());
+            assert!(review.analysis_error.is_some());
+        } else {
+            assert!(saved_take(dir.path()).is_err(), "case {mode}");
+            assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 4);
+        }
     }
 }
 #[test]
@@ -133,4 +140,67 @@ fn sink_monitor_origin_survives_review() {
     let report = saved_take(dir.path()).unwrap();
     assert_eq!(report.origin, "sink_monitor_capture");
     assert!(!report.valid_for_correction);
+}
+
+#[test]
+fn rejected_missing_and_clipped_target_takes_are_diagnosed_without_promotion() {
+    use measurement_capture::diagnostics::SegmentStatus;
+    for clipped in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        fixture(dir.path());
+        let wav_path = dir.path().join("recording.wav");
+        let mut reader = hound::WavReader::open(&wav_path).unwrap();
+        let spec = reader.spec();
+        let mut samples: Vec<f32> = reader.samples().map(Result::unwrap).collect();
+        drop(reader);
+        for x in &mut samples[96000..168000] {
+            *x = if clipped {
+                (*x * 50.0).clamp(-1.0, 1.0)
+            } else {
+                0.0
+            };
+        }
+        let count = samples.iter().filter(|x| x.abs() >= 0.999).count();
+        let mut writer = hound::WavWriter::create(&wav_path, spec).unwrap();
+        for x in samples {
+            writer.write_sample(x).unwrap();
+        }
+        writer.finalize().unwrap();
+        change(dir.path(), "capture-report.json", |r| {
+            r["accepted_for_analysis"] = json!(false);
+            r["rejection_reason"] = json!(if clipped {
+                "clipped recording"
+            } else {
+                "three reliable timing references were not found"
+            });
+            r["capture"]["clipped_samples"] = json!(count);
+        });
+        let original = fs::read(dir.path().join("capture-report.json")).unwrap();
+        let audio = fs::read(&wav_path).unwrap();
+        let review = saved_take(dir.path()).unwrap();
+        assert_eq!(
+            review.diagnostics.segments.as_ref().unwrap()[1].status,
+            if clipped {
+                SegmentStatus::Clipped
+            } else {
+                SegmentStatus::NoSweepDetected
+            }
+        );
+        assert!(!review.original_accepted_for_analysis && !review.valid_for_correction);
+        assert!(review.timing.is_none() && review.impulse.is_none());
+        assert_eq!(
+            original,
+            fs::read(dir.path().join("capture-report.json")).unwrap()
+        );
+        assert_eq!(audio, fs::read(&wav_path).unwrap());
+        let report: Value = serde_json::from_slice(&fs::read(review.report_file).unwrap()).unwrap();
+        assert_eq!(report["schema_version"], 2);
+        assert!(report["timing"].is_null());
+        if clipped {
+            change(dir.path(), "capture-report.json", |r| {
+                r["capture"]["clipped_samples"] = json!(0)
+            });
+            assert!(saved_take(dir.path()).is_err());
+        }
+    }
 }

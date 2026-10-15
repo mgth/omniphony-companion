@@ -224,6 +224,7 @@ fn captured_sweeps_with_ambiguous_arrivals_show_levels_and_withhold_timing() {
             accepted: true,
             cancelled: false,
             rejection_reason: None,
+            diagnostics: None,
             impulse: None,
             impulse_error: None,
             timing: Some(TimingReport {
@@ -311,4 +312,33 @@ fn unresolved_impulse_review_shows_reasons_instead_of_a_delay() {
             .any(|(t, _)| t == "speaker: detection thresholds disagree")
     );
     assert!(!text.iter().any(|(t, _)| t.contains("Arrival candidate  ")));
+}
+
+#[test]
+fn rejected_target_review_explains_routing_evidence_without_fabricating_a_delay() {
+    let ctx = egui::Context::default();
+    let (mut controller, starts) = support::ready();
+    controller.disconnect();
+    controller.state.review = Some(support::missing_target_review());
+    let mut app = CompanionApp::preview(&ctx, controller);
+    for size in [Vec2::new(850.0, 640.0), Vec2::new(1160.0, 800.0)] {
+        for _ in 0..3 {
+            frame(&mut app, &ctx, vec![], size);
+        }
+        let output = frame(&mut app, &ctx, vec![], size);
+        let text = labels(&output);
+        assert!(text.iter().any(|(t, _)| t == "No target sweep detected"));
+        assert!(
+            text.iter()
+                .any(|(t, _)| t.contains("Original take rejected"))
+        );
+        assert!(text.iter().any(|(t, _)| t == "Reference after"));
+        assert!(
+            text.iter()
+                .any(|(t, _)| t.contains("Check the selected speaker's output route"))
+        );
+        assert!(!text.iter().any(|(t, _)| t.contains("Arrival candidate  ")));
+        assert!(text.iter().all(|(_, r)| r.is_finite()));
+        assert_eq!(starts.load(Ordering::Relaxed), 0);
+    }
 }

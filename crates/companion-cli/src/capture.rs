@@ -81,6 +81,13 @@ pub fn run(command: Command) -> AppResult<()> {
                     "Sink monitor: digital routing evidence, not an acoustic microphone measurement."
                 );
             }
+            if let Some(reason) = &review.original_rejection_reason {
+                println!("Original take rejected: {reason}");
+            }
+            print_diagnostics(&review.diagnostics);
+            if let Some(error) = &review.analysis_error {
+                println!("{error}");
+            }
             print_impulse(review.impulse.as_deref(), review.impulse_error.as_deref());
             println!("Review report: {}", review.report_file.display());
             println!(
@@ -119,6 +126,9 @@ fn measure(args: Measure) -> AppResult<()> {
     );
     let outcome = companion_service::measurement::measure(request, &cancelled, |_| {})?;
     println!("Raw recording and report: {}", outcome.directory.display());
+    if let Some(report) = &outcome.diagnostics {
+        print_diagnostics(report);
+    }
     if let Some(reason) = outcome.rejection_reason {
         return Err(format!("take rejected: {reason}; see saved report").into());
     }
@@ -164,4 +174,28 @@ fn print_impulse(report: Option<&companion_service::review::ImpulseReport>, erro
     if let Some(error) = error {
         println!("Impulse response unavailable: {error}");
     }
+}
+
+fn print_diagnostics(report: &measurement_capture::diagnostics::AcquisitionDiagnostics) {
+    println!(
+        "Acquisition background: {:.1} dBFS; clipped samples: {}.",
+        report.noise_rms_dbfs, report.total_clipped_samples
+    );
+    if let Some(segments) = &report.segments {
+        for segment in segments {
+            println!(
+                "{}: {}; RMS {:.1} dBFS; signal / noise {:.1} dB; peak {:.1} dBFS; {} clipped samples.",
+                segment.role,
+                segment.status.label(),
+                segment.rms_dbfs,
+                segment.signal_to_noise_db,
+                segment.peak_dbfs,
+                segment.clipped_samples
+            );
+        }
+    }
+    for message in &report.messages {
+        println!("{message}");
+    }
+    println!("Approximate reference-pair windows; these levels are not speaker gain corrections.");
 }

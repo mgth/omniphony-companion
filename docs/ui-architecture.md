@@ -42,6 +42,11 @@ them with the measured speaker and settings, and keeps results from a changed
 position/microphone/configuration out of the current speaker status. The files
 remain available after closing the application.
 
+Completed rejected takes can show reference/target acquisition diagnostics,
+while retaining their rejection and withholding timing/impulse estimates. The
+shared service owns reference-pair detection and classification; panels only
+display the result.
+
 Saved-take review has separate controller state and does not populate the current
 speaker's measurement status or change acquisition settings. It requires no live
 renderer/input. File validation, FFT work and unique report publication live in

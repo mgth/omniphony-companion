@@ -16,6 +16,9 @@ fn main() -> eframe::Result {
             if std::env::args().any(|a| a == "--arrival-review") {
                 controller.state.review = Some(support::arrival_review());
             }
+            if std::env::args().any(|a| a == "--missing-target-review") {
+                controller.state.review = Some(support::missing_target_review());
+            }
             Ok(Box::new(companion_ui::CompanionApp::preview(
                 &cc.egui_ctx,
                 controller,

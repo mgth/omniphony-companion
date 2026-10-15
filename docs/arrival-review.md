@@ -48,7 +48,7 @@ undetectable direct path is absent.
 ## Saved evidence and UI
 
 New captures include an optional `impulse` report and `impulse_error` in the
-existing capture-report schema 2. Correlation diagnostics keep their original
+capture-report schema 3. Correlation diagnostics keep their original
 meaning and nullable timing fields. Impulse analysis failure does not turn a
 successful acquisition into a failed capture.
 
@@ -56,7 +56,11 @@ Saved-take review validates schema/protocol, identities, reference sequence,
 render completion, capture faults, WAV format/rate/length and analysis origin.
 It recomputes from samples instead of trusting saved peaks. It accepts completed
 acquisitions and the explicitly recognized schema-1 correlation ambiguity
-rejection; it refuses other rejected acquisitions. Sink-monitor provenance is
+rejection for impulse analysis. Completed rejected takes can also be inspected
+with [acquisition diagnostics](acquisition-diagnostics.md), with timing and
+impulse estimates withheld. Interrupted, faulty or inconsistent captures remain
+refused. Analysis-report schema 2 retains the original acceptance and rejection
+reason and makes timing optional. Sink-monitor provenance is
 preserved and displayed as digital routing evidence, not an acoustic measurement.
 
 Each invocation atomically writes a unique `analysis-*.json`, with no replacement

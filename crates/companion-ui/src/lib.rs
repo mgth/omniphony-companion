@@ -678,6 +678,7 @@ impl CompanionApp {
                 match &take.outcome {
                     Ok(outcome) => {
                         if take.settings.device.as_deref().is_some_and(|s| s.starts_with("pipewire:monitor:")) { ui.label(RichText::new("Sink monitor · not an acoustic microphone measurement").color(WARM)); }
+                        if let Some(report) = &outcome.diagnostics { draw_diagnostics(ui, report); }
                         if let Some(impulse) = &outcome.impulse { draw_impulse(ui, impulse); }
                         if let Some(error) = &outcome.impulse_error { ui.label(RichText::new(error).color(WARM)); }
                         if let Some(timing) = &outcome.timing {
@@ -731,7 +732,11 @@ impl CompanionApp {
             .max_height(650.0)
             .vscroll(true)
             .show(ctx, |ui| {
-                ui.label(RichText::new("Offline arrival review").size(20.0).strong());
+                ui.label(
+                    RichText::new("Offline measurement review")
+                        .size(20.0)
+                        .strong(),
+                );
                 ui.label(format!(
                     "{} · {} · Channel {}",
                     review.microphone_id, review.position_id, review.input_channel
@@ -746,6 +751,15 @@ impl CompanionApp {
                             .color(WARM),
                     );
                 }
+                if let Some(reason) = &review.original_rejection_reason {
+                    ui.label(
+                        RichText::new(format!("Original take rejected: {reason}")).color(WARM),
+                    );
+                }
+                draw_diagnostics(ui, &review.diagnostics);
+                if let Some(error) = &review.analysis_error {
+                    ui.label(RichText::new(error).color(WARM));
+                }
                 if let Some(impulse) = &review.impulse {
                     draw_impulse(ui, impulse);
                 }
@@ -753,10 +767,7 @@ impl CompanionApp {
                     ui.label(RichText::new(error).color(WARM));
                 }
                 ui.separator();
-                ui.label(format!(
-                    "Speaker signal / noise: {:.1} dB",
-                    review.timing.signal_to_noise_db[1]
-                ));
+
                 ui.label(RichText::new("New analysis report").small().color(MUTED));
                 ui.label(
                     RichText::new(review.report_file.display().to_string())
@@ -872,6 +883,55 @@ fn take_status(take: &Take) -> (&str, Color32) {
         Ok(_) => ("Take rejected · review report", WARM),
         Err(_) => ("Measurement failed", RED),
     }
+}
+
+fn draw_diagnostics(ui: &mut egui::Ui, report: &companion_service::review::AcquisitionDiagnostics) {
+    use companion_service::review::SegmentStatus;
+    ui.add_space(10.0);
+    let target = report.segments.as_ref().map(|s| s[1].status);
+    let title = match target {
+        Some(SegmentStatus::NoSweepDetected) => "No target sweep detected",
+        Some(SegmentStatus::Clipped) => "Target interval clipped",
+        _ => "Acquisition levels",
+    };
+    ui.label(RichText::new(title).strong());
+    ui.label(format!(
+        "Background: {:.1} dBFS · Analysis clipped samples: {}",
+        report.noise_rms_dbfs, report.total_clipped_samples
+    ));
+    if let Some(segments) = &report.segments {
+        egui::Grid::new("segment_diagnostics")
+            .spacing([16.0, 6.0])
+            .show(ui, |ui| {
+                for label in ["Interval", "RMS", "Signal / noise", "Peak", "Clipped"] {
+                    ui.label(RichText::new(label).small().color(MUTED));
+                }
+                ui.end_row();
+                for segment in segments {
+                    ui.label(segment.role);
+                    ui.monospace(format!("{:.1}", segment.rms_dbfs));
+                    ui.monospace(format!("{:.1} dB", segment.signal_to_noise_db));
+                    ui.monospace(format!("{:.1}", segment.peak_dbfs));
+                    ui.monospace(segment.clipped_samples.to_string());
+                    ui.end_row();
+                }
+            });
+        ui.label(
+            RichText::new("RMS and peak in dBFS · Approximate windows from the reference pair")
+                .small()
+                .color(MUTED),
+        );
+        ui.label(format!("Speaker: {}", segments[1].status.label()));
+    }
+    for message in &report.messages {
+        ui.label(RichText::new(message).color(WARM));
+    }
+    ui.label(
+        RichText::new("These levels diagnose acquisition; they are not speaker gain corrections.")
+            .small()
+            .color(MUTED),
+    );
+    ui.separator();
 }
 
 fn draw_impulse(ui: &mut egui::Ui, report: &ImpulseReport) {

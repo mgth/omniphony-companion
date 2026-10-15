@@ -81,6 +81,13 @@ validated direct-path observation or an automatic correction input. Representati
 levels, microphone-calibration application, hardware accuracy and profile
 conversion remain pending; see `docs/arrival-review.md`.
 
+A further acquisition increment diagnoses completed rejected takes using the two
+reference sweeps independently of the target. Per-interval levels distinguish
+clipping, missing target evidence and weak or uncorrelated sound. UI and CLI
+retain the original rejection and do not convert these levels into correction
+gains. Hardware routing verification and representative-level estimation remain
+pending; see `docs/acquisition-diagnostics.md`.
+
 ### Multiple microphones
 
 - Start with one microphone and guided measurements at successive positions.
