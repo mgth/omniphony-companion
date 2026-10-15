@@ -51,6 +51,14 @@ milestone 1 and exercises proposals and verification using simulated
 observations. It does not complete real acquisition or the acoustic analysis
 in milestones 3 and 4.
 
+The second increment implements milestone 2's software path: a shared versioned
+TCP/OSC contract, output discovery and snapshot revisions, an exclusive expiring
+session, finite sweeps, explicit stop/end and render-progress acknowledgements.
+The companion CLI exercises it and saves stimulus metadata and render reports.
+It is validated against real renderer code with discarded output buffers;
+physical output routing and acoustic behavior still require installation tests.
+Single-microphone acquisition is the next development milestone.
+
 ### Multiple microphones
 
 - Start with one microphone and guided measurements at successive positions.

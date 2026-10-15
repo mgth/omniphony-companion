@@ -1,3 +1,4 @@
+mod renderer;
 mod simulation;
 
 use std::error::Error;
@@ -17,7 +18,7 @@ type AppResult<T> = Result<T, Box<dyn Error>>;
 #[derive(Parser)]
 #[command(
     version,
-    about = "Offline Omniphony calibration prototype (no audio capture or live control)"
+    about = "Omniphony calibration prototype: offline analysis and renderer measurement control"
 )]
 struct Args {
     #[command(subcommand)]
@@ -26,6 +27,11 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Discover Omniphony outputs or play an identified measurement sweep.
+    Renderer {
+        #[command(subcommand)]
+        command: renderer::Command,
+    },
     /// Run a deterministic simulated measurement/apply/verification cycle.
     Demo {
         /// New directory for four JSON artifacts; existing paths are refused.
@@ -92,6 +98,7 @@ fn write_json(path: &Path, value: &impl Serialize) -> AppResult<()> {
 
 fn run(args: Args) -> AppResult<ExitCode> {
     match args.command {
+        Command::Renderer { command } => renderer::run(command)?,
         Command::Demo { out_dir } => {
             let (session, profile, measurements, report) = simulation::run()?;
             fs::create_dir_all(parent(&out_dir))?;

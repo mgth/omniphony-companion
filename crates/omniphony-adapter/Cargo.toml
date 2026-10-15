@@ -1,0 +1,17 @@
+[package]
+name = "omniphony-adapter"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+repository.workspace = true
+description = "Typed local measurement-session client for Omniphony"
+
+[dependencies]
+omniphony-osc-contract.workspace = true
+rosc = "0.11"
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

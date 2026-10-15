@@ -1,3 +1,5 @@
 /target/
 /sessions/
 *.tmp
+
+/renderer-snapshot*.json
