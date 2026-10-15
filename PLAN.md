@@ -65,6 +65,13 @@ prototype: real-interface repeatability and discontinuity tests remain open.
 It does not yet produce direct-arrival observations or calibration profiles.
 See `docs/capture-validation.md` for the next bench checks.
 
+A first milestone-6 interface now exposes the acquisition prototype in a native
+Rust/egui window: input/channel selection, renderer speaker discovery, a fixed
+reference, per-speaker Measure/Stop actions, progress and saved-take diagnostics.
+The shared service owns discovery, capture and cancellation outside the UI event
+loop. This does not yet add automatic correction, guided whole-system runs or
+loading previous sessions into the UI.
+
 ### Multiple microphones
 
 - Start with one microphone and guided measurements at successive positions.

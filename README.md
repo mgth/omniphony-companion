@@ -2,7 +2,7 @@
 
 Acoustic calibration companion for [Omniphony](https://github.com/mgth/Omniphony).
 
-**Status: single-microphone capture, timing diagnostics and an offline calibration core.**
+**Status: native desktop UI, single-microphone capture, timing diagnostics and an offline calibration core.**
 The companion discovers renderer outputs, plays finite measurement sequences,
 records a selected interface input channel and saves raw audio with quality reports.
 The offline core can propose gains/delays from already-estimated observations.
@@ -11,6 +11,57 @@ pending. The demonstration is explicitly simulated.
 
 The [development plan](PLAN.md) describes the first mission's seven milestones
 and later extensions: bass, subwoofers, reflections and overall refinement.
+
+## Native companion UI
+
+```sh
+cargo run --locked -p companion-ui
+```
+
+The Rust/egui desktop window lets you:
+
+- Refresh the available microphone inputs and choose an interface, input channel
+  and sample rate. Selecting an input does not start recording.
+- Connect to the local Omniphony address and list its physical speaker outputs,
+  including current gain, delay, mute and frequency limits.
+- Choose a fixed timing-reference speaker and a listening position.
+- Start a measurement for one speaker, follow progress and stop it.
+- Review diagnostics or rejection reasons and find the saved take folder.
+
+The **Measure** button becomes available when the renderer, microphone, channel,
+reference and sweep settings are usable. Each take plays a sweep on the reference,
+the selected speaker, then the reference again. It uses the same acquisition
+service as the CLI. A fresh renderer snapshot is checked before opening the input.
+No corrections or persistent renderer settings are applied.
+
+Connect to a build from the [Omniphony calibration PR](https://github.com/mgth/Omniphony/pull/862), normally
+`127.0.0.1:9000`; the dedicated calibration workflow uses port 9003.
+The UI does not launch Omniphony itself. Change the address and press **Connect**
+or **Refresh speakers** after changing its speaker layout or settings.
+
+Discovery and measurement run in background service workers. Minimizing the
+window does not pause keepalives or capture. Closing it during measurement requests
+cancellation and waits for cleanup so the rejected partial take can be saved.
+Results are kept in the window for the current run; raw WAVs and JSON reports
+remain in the recording folders. Loading a previous session into the UI is
+not implemented yet.
+
+To inspect the layout without an interface or renderer:
+
+```sh
+cargo run --locked -p companion-ui --example preview
+```
+
+This fixture window is labelled **UI PREVIEW · NO AUDIO**. Its speakers and
+microphone are synthetic; clicking Measure does not open hardware or create
+recordings.
+
+![Native companion layout with synthetic preview data](docs/images/companion-preview.png)
+
+The native frontend uses egui/eframe 0.32 with OpenGL to retain the workspace's
+Rust 1.89 minimum. This increment is validated on Linux; native packaging and
+hardware validation on Windows/macOS remain pending. Settings are not persisted
+between launches yet. See [the application boundaries](docs/ui-architecture.md).
 
 ## Try it
 
@@ -169,7 +220,10 @@ does not assess the entire listening area.
 
 - `crates/calibration-core`: models, validation, proposals and verification;
   no audio hardware, network, file access, timers or UI toolkit.
-- `crates/companion-cli`: commands, files, acquisition scheduling and the simulated rig.
+- `crates/companion-cli`: command parsing and the simulated rig.
+- `crates/companion-service`: discovery, readiness checks, background jobs,
+  cancellation, acquisition orchestration and persistence shared by CLI/UI.
+- `crates/companion-ui`: native egui views; no audio callback or protocol implementation.
 - `crates/measurement-capture`: bounded input capture, calibration-file parsing
   and offline timing diagnostics; no correction policy.
 - `crates/omniphony-adapter`: typed TCP requests, acknowledgements, session
@@ -183,8 +237,9 @@ The adapter's snapshots and render reports are separate from acoustic observatio
 sessions; renderer instance IDs are not permanent installation IDs.
 
 The next steps are real-interface validation, repeatability assessment and
-impulse-response/direct-arrival analysis. The graphical assistant, automatic
-iterations and advanced corrections follow after that.
+impulse-response/direct-arrival analysis. The native assistant can already launch
+individual takes; guided multi-speaker workflows, automatic iterations and
+advanced corrections follow after that.
 
 ## Development checks
 

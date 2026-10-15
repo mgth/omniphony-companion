@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/calibration-core", "crates/companion-cli", "crates/omniphony-adapter", "crates/measurement-capture"]
+members = ["crates/calibration-core", "crates/companion-cli", "crates/omniphony-adapter", "crates/measurement-capture", "crates/companion-service", "crates/companion-ui"]
 resolver = "2"
 
 [workspace.package]
