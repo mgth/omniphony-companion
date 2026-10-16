@@ -167,6 +167,7 @@ impl Default for Settings {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Job {
+    UpdateProposal,
     ManualLevels {
         output_id: String,
     },
@@ -268,6 +269,7 @@ impl LoadedAlignment {
 }
 
 enum Event {
+    ProposalUpdated(Box<Result<alignment::Alignment, String>>),
     ManualReading(manual_level::Reading),
     ManualFinished(Result<(), String>),
     PhysicalLevelsInvalidated(Box<alignment::Alignment>),
@@ -925,7 +927,7 @@ impl Controller {
         }
         self.state.job = if action == "verify" {
             Some(Job::Alignment {
-                output_ids: a.rows.iter().map(|r| r.output_id.clone()).collect(),
+                output_ids: a.corrected_output_ids(),
                 current: 0,
                 pass: 0,
             })
@@ -959,6 +961,22 @@ impl Controller {
             let _ = sender.send(Event::AlignmentUpdated(Box::new(a), result));
         });
     }
+    pub fn refresh_alignment_proposal(&mut self) {
+        if self.busy() {
+            return;
+        }
+        let Some(alignment) = self.state.alignment.clone() else {
+            return;
+        };
+        self.state.job = Some(Job::UpdateProposal);
+        self.state.error = None;
+        let sender = self.sender.clone();
+        std::thread::spawn(move || {
+            let result = catch_job(|| crate::alignment::refresh_proposal(&alignment));
+            let _ = sender.send(Event::ProposalUpdated(Box::new(result)));
+        });
+    }
+
     pub fn reanalyze_alignment(&mut self) {
         if self.busy() {
             return;
@@ -1128,6 +1146,14 @@ impl Controller {
                 self.state.workspace_revision = self.state.workspace_revision.wrapping_add(1);
             }
             match event {
+                Event::ProposalUpdated(result) => {
+                    match *result {
+                        Ok(a) => self.state.alignment = Some(a),
+                        Err(e) => self.state.error = Some(e),
+                    }
+                    self.state.job = None;
+                }
+
                 Event::ManualReading(reading) => {
                     if let Some(run) = &mut self.state.manual_run {
                         run.reading = Some(reading);

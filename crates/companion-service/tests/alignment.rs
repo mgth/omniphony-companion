@@ -25,6 +25,8 @@ struct Rig {
     bad_repeat: AtomicBool,
     silent_batch: AtomicBool,
     captures: AtomicUsize,
+    rejected: Mutex<std::collections::BTreeMap<String, String>>,
+    batches: Mutex<Vec<Vec<String>>>,
 }
 impl Rig {
     fn new() -> Self {
@@ -57,6 +59,8 @@ impl Rig {
             bad_repeat: AtomicBool::new(false),
             silent_batch: AtomicBool::new(false),
             captures: AtomicUsize::new(0),
+            rejected: Mutex::new(Default::default()),
+            batches: Mutex::new(vec![]),
         }
     }
 }
@@ -109,6 +113,7 @@ impl Backend for Rig {
         progress: &mut dyn FnMut(usize, MeasureProgress),
     ) -> Result<BatchOutcome, String> {
         assert_eq!(*self.snapshot.lock().unwrap(), args.snapshot);
+        self.batches.lock().unwrap().push(outputs.clone());
         let pass = self.captures.fetch_add(1, Ordering::Relaxed);
         if self.silent_batch.load(Ordering::Relaxed) {
             return Ok(BatchOutcome {
@@ -157,13 +162,14 @@ impl Backend for Rig {
             }
             let directory = args.out_dir.join(id);
             std::fs::create_dir(&directory).unwrap();
+            let rejection = self.rejected.lock().unwrap().get(id).cloned();
             takes.push((
                 id.clone(),
                 TakeOutcome {
                     directory,
-                    accepted: true,
+                    accepted: rejection.is_none(),
                     cancelled: false,
-                    rejection_reason: None,
+                    rejection_reason: rejection,
                     diagnostics: None,
                     timing: Some(timing),
                     impulse: Some(Arc::new(response)),
@@ -427,4 +433,130 @@ fn physical_level_adjustment_persists_staleness_but_keeps_digital_restoration() 
             .unwrap()
             .physical_levels_changed
     );
+}
+
+#[test]
+fn partial_proposal_preserves_excluded_outputs_through_apply_verify_reload_and_restore() {
+    let root = tempfile::tempdir().unwrap();
+    let rig = Rig::new();
+    let mut snapshot = rig.snapshot.lock().unwrap();
+    let mut fourth = snapshot.outputs[2].clone();
+    fourth.id = "Clipped".into();
+    fourth.name = fourth.id.clone();
+    fourth.index = 3;
+    snapshot.outputs.push(fourth);
+    snapshot.outputs[2].gain_db = -7.0;
+    snapshot.outputs[2].delay_ms = 12.0;
+    snapshot.outputs[3].gain_db = -4.0;
+    snapshot.outputs[3].delay_ms = 21.0;
+    let original = snapshot.clone();
+    drop(snapshot);
+    rig.rejected.lock().unwrap().insert(
+        "Unused".into(),
+        "integrated level-band signal/noise is 18.5 dB (minimum 20 dB for correction)".into(),
+    );
+    rig.rejected
+        .lock()
+        .unwrap()
+        .insert("Clipped".into(), "clipped recording".into());
+    let settings = Settings {
+        device: Some("test microphone".into()),
+        reference_output: Some("L".into()),
+        sweep: omniphony_adapter::Sweep {
+            duration_ms: 200,
+            ..Settings::default().sweep
+        },
+        ..Settings::default()
+    };
+    let request = alignment::request(
+        "127.0.0.1:9000".parse().unwrap(),
+        original.clone(),
+        &settings,
+        "L".into(),
+        root.path().join("partial"),
+    )
+    .unwrap();
+    let mut a = alignment::capture(
+        &rig,
+        request,
+        settings,
+        vec!["L".into(), "R".into(), "Unused".into(), "Clipped".into()],
+        &AtomicBool::new(false),
+        &mut |_, _, _| {},
+    )
+    .unwrap()
+    .alignment;
+    assert!(a.profile.is_some(), "{:?}", a.blockers);
+    assert!(a.blockers.is_empty());
+    assert_eq!(a.corrected_output_ids(), ["L", "R"]);
+    assert_eq!(a.rows.len(), 4);
+    assert!(a.rows[2].reason.as_ref().unwrap().contains("18.5"));
+    assert!(a.rows[3].reason.as_ref().unwrap().contains("clipped"));
+    assert_eq!(a.targets(false).unwrap().len(), 2);
+    let plan = std::fs::read(a.directory.join("alignment-plan.json")).unwrap();
+    // Upgrade a complete saved session made by the former all-or-nothing policy.
+    a.session = None;
+    a.profile = None;
+    alignment::save(&a).unwrap();
+    a = alignment::refresh_proposal(&alignment::load(&a.directory).unwrap()).unwrap();
+    assert_eq!(a.corrected_output_ids(), ["L", "R"]);
+    assert_eq!(
+        std::fs::read(a.directory.join("alignment-plan.json")).unwrap(),
+        plan
+    );
+    assert_eq!(rig.writes.load(Ordering::Relaxed), 0);
+    alignment::apply(&rig, &mut a, false).unwrap();
+    assert_eq!(
+        rig.snapshot.lock().unwrap().outputs[2..],
+        original.outputs[2..]
+    );
+    assert!(alignment::refresh_proposal(&a).is_err());
+    alignment::verify(&rig, &mut a, &AtomicBool::new(false), &mut |_, _, _| {}).unwrap();
+    assert!(
+        a.verification.as_ref().unwrap().passed,
+        "{:?}",
+        a.verification_note
+    );
+    assert_eq!(*rig.batches.lock().unwrap().last().unwrap(), ["L", "R"]);
+    // If one corrected speaker fails verification, do not verify a smaller set.
+    rig.rejected
+        .lock()
+        .unwrap()
+        .insert("R".into(), "clipped recording".into());
+    alignment::verify(&rig, &mut a, &AtomicBool::new(false), &mut |_, _, _| {}).unwrap();
+    assert!(a.verification.is_none());
+    assert!(
+        a.verification_note
+            .as_ref()
+            .unwrap()
+            .contains("R: invalid calibration data: clipped recording")
+    );
+    assert_eq!(a.corrected_output_ids(), ["L", "R"]);
+    let mut a = alignment::load(&a.directory).unwrap();
+    // Neither forging an exclusion nor editing the proposed membership is accepted.
+    let mut forged = a.clone();
+    forged.rows[0].qualified = None;
+    forged.rows[0].reason = Some("excluded".into());
+    assert!(forged.targets(false).is_err());
+    let mut forged = a.clone();
+    forged
+        .profile
+        .as_mut()
+        .unwrap()
+        .target_snapshot
+        .speakers
+        .push(a.profile.as_ref().unwrap().target_snapshot.speakers[0].clone());
+    assert!(forged.targets(false).is_err());
+    alignment::apply(&rig, &mut a, true).unwrap();
+    assert_eq!(rig.snapshot.lock().unwrap().outputs, original.outputs);
+    let mut diagnostic = a.clone();
+    diagnostic.profile = None;
+    diagnostic.session = None;
+    diagnostic
+        .blockers
+        .push("Offline diagnostic reanalysis".into());
+    assert!(alignment::refresh_proposal(&diagnostic).is_err());
+    diagnostic.blockers.clear();
+    diagnostic.physical_levels_changed = true;
+    assert!(alignment::refresh_proposal(&diagnostic).is_err());
 }

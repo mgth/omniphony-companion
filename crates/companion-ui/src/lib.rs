@@ -837,6 +837,12 @@ impl CompanionApp {
             });
             ui.add_space(10.0);
         }
+        if matches!(self.controller.state.job, Some(Job::UpdateProposal)) {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Updating correction proposal…");
+            });
+        }
         let mut alignment_action = None;
         if let Some(alignment) = &self.controller.state.alignment {
             card().show(ui, |ui| {
@@ -847,6 +853,8 @@ impl CompanionApp {
         if let Some(action) = alignment_action {
             if action == "reanalyze" {
                 self.controller.reanalyze_alignment();
+            } else if action == "proposal" {
+                self.controller.refresh_alignment_proposal();
             } else {
                 self.controller.alignment_action(action);
             }

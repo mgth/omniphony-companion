@@ -282,50 +282,99 @@ pub fn capture<B: Backend + ?Sized>(
     if cancel.load(Ordering::Relaxed) {
         alignment.blockers.push("Alignment cancelled.".into());
     }
-    for row in &mut alignment.rows {
-        match core::repeatability::qualify(&row.repeats) {
-            Ok(q) => row.qualified = Some(q),
-            Err(e) => row.reason = Some(e.to_string()),
-        }
-    }
-    let refs: Vec<_> = alignment
-        .rows
-        .iter()
-        .flat_map(|r| &r.repeats)
-        .filter_map(|r| r.reference_level_db)
-        .collect();
-    if !refs.is_empty()
-        && refs.iter().copied().fold(f64::NEG_INFINITY, f64::max)
-            - refs.iter().copied().fold(f64::INFINITY, f64::min)
-            > 0.5
-    {
-        alignment.blockers.push(
-            "Reference level changed across speakers; keep microphone and input gain fixed.".into(),
-        );
-    }
-    if alignment.blockers.is_empty() && alignment.rows.iter().all(|r| r.qualified.is_some()) {
-        match make_session(&alignment).and_then(|s| {
-            core::propose(
-                &s,
-                &core::CalibrationPolicy {
-                    maximum_delay_ms: alignment.snapshot.max_delay_ms as f64,
-                    ..Default::default()
-                },
-            )
-            .map(|p| (s, p))
-            .map_err(err)
-        }) {
-            Ok((s, p)) => {
-                alignment.session = Some(s);
-                alignment.profile = Some(p);
-            }
-            Err(e) => alignment.blockers.push(e),
-        }
-    }
+    build_proposal(&mut alignment);
     write_json(&request.out_dir.join("alignment-plan.json"), &alignment).map_err(err)?;
     save(&alignment)?;
     Ok(Outcome { alignment, takes })
 }
+/// Recompute membership from all repeated evidence; never drop rejected rows
+/// from the saved report or let them influence the corrected subset's targets.
+fn build_proposal(a: &mut Alignment) {
+    a.session = None;
+    a.profile = None;
+    let qualified =
+        core::repeatability::qualify_subset(a.rows.iter().map(|r| r.repeats.as_slice()));
+    for (row, result) in a.rows.iter_mut().zip(qualified.rows) {
+        match result {
+            Ok(q) => {
+                row.qualified = Some(q);
+                row.reason = None;
+            }
+            Err(reason) => {
+                row.qualified = None;
+                row.reason = Some(reason);
+            }
+        }
+    }
+    if a.blockers.is_empty() {
+        a.blockers.extend(qualified.blockers);
+    }
+    if a.blockers.is_empty() {
+        match make_session(a).and_then(|session| {
+            core::propose(
+                &session,
+                &core::CalibrationPolicy {
+                    maximum_delay_ms: a.snapshot.max_delay_ms as f64,
+                    ..Default::default()
+                },
+            )
+            .map(|profile| (session, profile))
+            .map_err(err)
+        }) {
+            Ok((session, profile)) => {
+                a.session = Some(session);
+                a.profile = Some(profile);
+            }
+            Err(e) => a.blockers.push(e),
+        }
+    }
+}
+
+/// Explicitly update an original, complete saved acquisition. Diagnostic-only
+/// reanalysis and stale physical setups keep their blockers and cannot be promoted.
+pub fn refresh_proposal(original: &Alignment) -> Result<Alignment, String> {
+    if original.applied_snapshot.is_some()
+        || original.application_uncertain
+        || original.physical_levels_changed
+    {
+        return Err("Restore any active alignment and capture fresh evidence after physical adjustments before updating a proposal.".into());
+    }
+    if original
+        .session
+        .as_ref()
+        .is_some_and(|s| s.baseline.origin != core::ObservationOrigin::Measured)
+        || original
+            .profile
+            .as_ref()
+            .is_some_and(|p| p.origin != core::ObservationOrigin::Measured)
+    {
+        return Err("Simulated observations cannot become a measured correction proposal.".into());
+    }
+    if !original.blockers.is_empty() {
+        return Err(format!(
+            "Proposal blocked: {}",
+            original.blockers.join("; ")
+        ));
+    }
+    if !original.pass_reports.as_ref().is_some_and(|p| {
+        p.len() == 2
+            && p.iter()
+                .all(|pass| pass.error.is_none() && pass.analyzed_speakers == original.rows.len())
+    }) {
+        return Err(
+            "Two complete original acquisition passes are required; capture a new alignment."
+                .into(),
+        );
+    }
+    let mut updated = original.clone();
+    build_proposal(&mut updated);
+    if updated.profile.is_some() {
+        updated.validate_evidence()?;
+    }
+    save(&updated)?;
+    Ok(updated)
+}
+
 /// Revisit retained raw audio without changing original verdicts or any renderer.
 /// The derived alignment is diagnostic only, even if its estimates qualify.
 pub fn reanalyze(original: &Alignment) -> Result<Alignment, String> {
@@ -427,7 +476,7 @@ pub fn reanalyze(original: &Alignment) -> Result<Alignment, String> {
 fn make_session(a: &Alignment) -> Result<core::Session, String> {
     let mut speakers = vec![];
     let mut observations = vec![];
-    for row in &a.rows {
+    for row in a.rows.iter().filter(|r| r.qualified.is_some()) {
         let q = row.qualified.as_ref().ok_or("unqualified speaker")?;
         let output = a
             .snapshot
@@ -489,6 +538,21 @@ fn make_session(a: &Alignment) -> Result<core::Session, String> {
     })
 }
 impl Alignment {
+    pub fn corrected_output_ids(&self) -> Vec<String> {
+        self.profile
+            .as_ref()
+            .map(|p| {
+                p.target_snapshot
+                    .speakers
+                    .iter()
+                    .map(|s| s.id.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    pub fn qualified_count(&self) -> usize {
+        self.rows.iter().filter(|r| r.qualified.is_some()).count()
+    }
     fn validate_evidence(&self) -> Result<(), String> {
         let session = self
             .session
@@ -506,14 +570,30 @@ impl Alignment {
         {
             return Err("Alignment does not contain eligible microphone observations.".into());
         }
-        for row in &self.rows {
-            let q = core::repeatability::qualify(&row.repeats).map_err(err)?;
-            if row.qualified.as_ref() != Some(&q)
-                || row.reason.is_some()
-                || row.take_folders.len() != 2
-                || row.take_folders[0] == row.take_folders[1]
+        let qualified =
+            core::repeatability::qualify_subset(self.rows.iter().map(|r| r.repeats.as_slice()));
+        if !qualified.blockers.is_empty() {
+            return Err(qualified.blockers.join("; "));
+        }
+        let mut ids = std::collections::HashSet::new();
+        for (row, qualification) in self.rows.iter().zip(qualified.rows) {
+            if !ids.insert(&row.output_id)
+                || !self.snapshot.outputs.iter().any(|o| o.id == row.output_id)
             {
-                return Err("Alignment repeat evidence is inconsistent.".into());
+                return Err("Alignment contains duplicate or unknown speaker IDs.".into());
+            }
+            match qualification {
+                Ok(q)
+                    if row.qualified.as_ref() == Some(&q)
+                        && row.reason.is_none()
+                        && row.take_folders.len() == 2
+                        && row.take_folders[0] != row.take_folders[1] => {}
+                Err(reason) if row.qualified.is_none() && row.reason.as_ref() == Some(&reason) => {}
+                _ => {
+                    return Err(
+                        "Alignment repeat evidence or subset membership is inconsistent.".into(),
+                    );
+                }
             }
         }
         let expected = make_session(self)?;
@@ -526,18 +606,6 @@ impl Alignment {
             || session.baseline.level_method_id != expected.baseline.level_method_id
         {
             return Err("Alignment observations differ from the measured evidence.".into());
-        }
-        let refs: Vec<_> = self
-            .rows
-            .iter()
-            .flat_map(|r| &r.repeats)
-            .filter_map(|r| r.reference_level_db)
-            .collect();
-        if refs.iter().copied().fold(f64::NEG_INFINITY, f64::max)
-            - refs.iter().copied().fold(f64::INFINITY, f64::min)
-            > 0.5
-        {
-            return Err("Reference level changed across the alignment.".into());
         }
         Ok(())
     }
@@ -674,11 +742,7 @@ pub fn verify<B: Backend + ?Sized>(
     if backend.discover(a.endpoint)? != snapshot {
         return Err("Renderer changed after application; verification refused.".into());
     }
-    let outputs = a
-        .rows
-        .iter()
-        .map(|r| r.output_id.clone())
-        .collect::<Vec<_>>();
+    let outputs = a.corrected_output_ids();
     let request = request(
         a.endpoint,
         snapshot,
@@ -695,14 +759,23 @@ pub fn verify<B: Backend + ?Sized>(
         progress,
     )?;
     a.verification_pass_reports = outcome.alignment.pass_reports.clone();
-    let Some(measured) = outcome.alignment.session.as_ref() else {
+    let measured = outcome.alignment.session.as_ref();
+    if outcome.alignment.corrected_output_ids() != a.corrected_output_ids() || measured.is_none() {
+        let mut reasons = outcome.alignment.blockers.clone();
+        reasons.extend(outcome.alignment.rows.iter().filter_map(|r| {
+            r.reason
+                .as_ref()
+                .map(|reason| format!("{}: {reason}", r.output_id))
+        }));
         a.verification_note = Some(format!(
-            "Verification evidence is unresolved. Review {}",
+            "Verification incomplete for the corrected subset: {}. Original targets are unchanged. Review {}",
+            reasons.join("; "),
             outcome.alignment.directory.display()
         ));
         save(a)?;
         return Ok(outcome);
-    };
+    }
+    let measured = measured.ok_or("missing verification evidence")?;
     let session = a.session.as_ref().ok_or("missing baseline")?;
     let profile = a.profile.as_ref().ok_or("missing profile")?;
     if !omniphony_adapter::same_configuration(&outcome.alignment.snapshot, &a.expected_target()?) {

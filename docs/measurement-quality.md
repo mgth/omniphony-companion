@@ -81,7 +81,9 @@ Displaying a value does not qualify it. Repeated alignment additionally requires
 - Two independent target captures agreeing within 0.15 ms and 0.50 dB.
 - Existing waveform, clock, identity, renderer revision and correction bounds.
 
-Every selected speaker must qualify; unresolved outputs are not silently omitted.
+Only qualified speakers receive targets, with at least two required. Excluded
+outputs remain visible with their reasons and keep their existing settings. Shared
+reference and session integrity remain required for the whole corrected subset.
 These thresholds are experimental policy and can be revisited with bench evidence.
 No automatic gain increase, playback or correction is introduced by this feature.
 
