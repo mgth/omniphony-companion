@@ -118,7 +118,7 @@ pub fn arrival_review() -> companion_service::review::SavedReview {
             .collect(),
     };
     SavedReview {
-        schema_version: 1,
+        schema_version: 2,
         directory: "sessions/synthetic-preview".into(),
         report_file: "sessions/synthetic-preview/analysis-preview.json".into(),
         origin: "microphone_capture".into(),
@@ -131,7 +131,19 @@ pub fn arrival_review() -> companion_service::review::SavedReview {
         capture_sample_rate: 48000,
         render_sample_rate: 48000,
         signal: companion_service::controller::Settings::default().sweep,
-        timing: TimingReport {
+        original_accepted_for_analysis: true,
+        original_rejection_reason: None,
+        diagnostics: measurement_capture::diagnostics::AcquisitionDiagnostics {
+            method: "synthetic-preview",
+            noise_rms_dbfs: -50.0,
+            total_clipped_samples: 0,
+            reference_start_frames: None,
+            segments: None,
+            messages: vec![],
+            valid_for_correction: false,
+        },
+        analysis_error: None,
+        timing: Some(TimingReport {
             method: "synthetic-preview",
             reference_start_frames: [10000.0, 154000.0],
             target_start_frame: 82000.0,
@@ -144,7 +156,7 @@ pub fn arrival_review() -> companion_service::review::SavedReview {
             sweep_rms_dbfs: [-22.0; 3],
             noise_rms_dbfs: -50.0,
             valid_for_correction: false,
-        },
+        }),
         impulse: Some(Arc::new(ImpulseReport {
             method: "synthetic-preview",
             bands_hz: [[300.0, 9000.0], [300.0, 2500.0], [2500.0, 9000.0]],
@@ -160,4 +172,33 @@ pub fn arrival_review() -> companion_service::review::SavedReview {
         impulse_error: None,
         valid_for_correction: false,
     }
+}
+
+pub fn missing_target_review() -> companion_service::review::SavedReview {
+    use companion_service::review::{SegmentDiagnostics, SegmentStatus};
+    let mut review = arrival_review();
+    review.original_accepted_for_analysis = false;
+    review.original_rejection_reason =
+        Some("three reliable timing references were not found".into());
+    review.timing = None;
+    review.impulse = None;
+    review.analysis_error = Some("Original acquisition rejected; diagnostics only. Record a new take after resolving its cause.".into());
+    review.diagnostics.reference_start_frames = Some([24000.0, 168000.0]);
+    review.diagnostics.segments = Some(std::array::from_fn(|i| SegmentDiagnostics {
+        role: ["Reference before", "Speaker", "Reference after"][i],
+        body_start_frame: 36000 + i * 72000,
+        body_end_frame: 84000 + i * 72000,
+        rms_dbfs: if i == 1 { -50.0 } else { -26.0 },
+        signal_to_noise_db: if i == 1 { 0.0 } else { 24.0 },
+        peak_dbfs: if i == 1 { -38.0 } else { -14.0 },
+        clipped_samples: 0,
+        normalized_correlation: if i == 1 { 0.01 } else { 0.5 },
+        status: if i == 1 {
+            SegmentStatus::NoSweepDetected
+        } else {
+            SegmentStatus::Detected
+        },
+    }));
+    review.diagnostics.messages = vec!["The reference sweeps were found, but no target sweep was detected above background. Check the selected speaker's output route, mute, amplifier and connection. Increasing the overall volume is not the first step.".into()];
+    review
 }

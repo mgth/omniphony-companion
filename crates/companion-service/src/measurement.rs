@@ -2,7 +2,7 @@ use crate::{
     AppResult,
     files::{parent, write_json},
 };
-use measurement_capture::{Capture, MAX_SECONDS, calibration, impulse, timing};
+use measurement_capture::{Capture, MAX_SECONDS, calibration, diagnostics, impulse, timing};
 use omniphony_adapter::{Client, Progress, SignalState, Snapshot, Sweep};
 use std::{
     fs,
@@ -50,6 +50,7 @@ pub struct TakeOutcome {
     pub accepted: bool,
     pub cancelled: bool,
     pub rejection_reason: Option<String>,
+    pub diagnostics: Option<diagnostics::AcquisitionDiagnostics>,
     pub timing: Option<timing::TimingReport>,
     pub impulse: Option<Arc<impulse::ImpulseReport>>,
     pub impulse_error: Option<String>,
@@ -163,7 +164,7 @@ pub fn measure(
             write_json(
                 &args.out_dir.join("capture-report.json"),
                 &serde_json::json!({
-                    "schema_version": 2, "origin": origin, "accepted_for_analysis": false,
+                    "schema_version": 3, "origin": origin, "accepted_for_analysis": false,
                     "valid_for_correction": false, "recording_file": null, "rejection_reason": error.to_string(),
                 }),
             )?;
@@ -172,6 +173,7 @@ pub fn measure(
                 accepted: false,
                 cancelled: false,
                 rejection_reason: Some(error.to_string()),
+                diagnostics: None,
                 timing: None,
                 impulse: None,
                 impulse_error: None,
@@ -269,6 +271,20 @@ pub fn measure(
     if was_cancelled {
         result = Err("capture cancelled by user".into());
     }
+    let diagnostics = if acquisition.is_ok()
+        && ended.is_ok()
+        && !was_cancelled
+        && recording.metadata.fault_flags == 0
+    {
+        recording
+            .samples
+            .get(analysis_start_frame..)
+            .and_then(|samples| {
+                diagnostics::analyze(samples, args.sample_rate, snapshot.sample_rate, sweep).ok()
+            })
+    } else {
+        None
+    };
     let response = result.as_ref().ok().map(|timing| {
         impulse::analyze(
             &recording.samples[analysis_start_frame..],
@@ -287,12 +303,12 @@ pub fn measure(
     write_json(
         &args.out_dir.join("capture-report.json"),
         &serde_json::json!({
-            "schema_version": 2, "origin": origin, "capture": recording.metadata,
+            "schema_version": 3, "origin": origin, "capture": recording.metadata,
             "renderer_progress": acquisition.as_ref().ok(),
             "analysis_start_frame": analysis_start_frame,
             "timing_frame_origin": "analysis_start_frame_in_recording_wav",
             "timing": result.as_ref().ok(), "rejection_reason": result.as_ref().err(),
-            "impulse": impulse, "impulse_error": impulse_error,
+            "impulse": impulse, "impulse_error": impulse_error, "diagnostics": diagnostics,
             "timing_warning": result.as_ref().ok().and_then(|report| report.timing_warning()),
             "accepted_for_analysis": result.is_ok(), "valid_for_correction": false,
             "calibration_applied": false,
@@ -303,6 +319,7 @@ pub fn measure(
         accepted: result.is_ok(),
         cancelled: was_cancelled,
         rejection_reason: result.as_ref().err().cloned(),
+        diagnostics,
         timing: result.ok(),
         impulse,
         impulse_error,

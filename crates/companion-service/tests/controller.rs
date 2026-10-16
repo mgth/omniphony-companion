@@ -95,6 +95,7 @@ impl Backend for Bench {
         }
         self.finished.store(true, Ordering::Relaxed);
         Ok(TakeOutcome {
+            diagnostics: None,
             directory: request.out_dir,
             accepted: false,
             cancelled: cancel.load(Ordering::Relaxed),

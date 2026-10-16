@@ -27,9 +27,9 @@ pub struct TimingReport {
     pub valid_for_correction: bool,
 }
 #[derive(Clone, Copy)]
-struct Peak {
-    position: f64,
-    score: f64,
+pub(crate) struct Peak {
+    pub(crate) position: f64,
+    pub(crate) score: f64,
 }
 
 struct Located {
@@ -164,6 +164,15 @@ pub(crate) fn resample(source: &[f32], ratio: f64) -> Vec<f32> {
         .collect()
 }
 fn locate(samples: &[f32], template: &[f32], spacing: f64, rate: f64) -> Result<Located, String> {
+    let scores = correlation_scores(samples, template)?;
+    let candidates = peak_candidates(&scores, spacing);
+    locate_triple(&scores, &candidates, spacing, rate)
+}
+
+pub(crate) fn correlation_scores(samples: &[f32], template: &[f32]) -> Result<Vec<f64>, String> {
+    if template.is_empty() || samples.len() < template.len() {
+        return Err("recording is shorter than the correlation template".into());
+    }
     let count = samples
         .len()
         .checked_add(template.len())
@@ -207,12 +216,16 @@ fn locate(samples: &[f32], template: &[f32], spacing: f64, rate: f64) -> Result<
         };
         scores.push(score.min(1.0));
     }
+    Ok(scores)
+}
+
+pub(crate) fn peak_candidates(scores: &[f64], spacing: f64) -> Vec<Peak> {
     // Find a unique sequence independently of whether the room response has
     // competing arrivals inside each sweep. Arrival ambiguity is reported after
     // clock compensation; it does not mean the sweeps were not recorded.
     let guard = (spacing * 0.4) as usize;
     let mut candidates = Vec::new();
-    let mut masked = scores.clone();
+    let mut masked = scores.to_vec();
     for _ in 0..12 {
         let Some((i, &score)) = masked.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)) else {
             break;
@@ -239,6 +252,15 @@ fn locate(samples: &[f32], template: &[f32], spacing: f64, rate: f64) -> Result<
         masked[i.saturating_sub(guard)..end].fill(0.0);
     }
     candidates.sort_by(|a, b| a.position.total_cmp(&b.position));
+    candidates
+}
+
+fn locate_triple(
+    scores: &[f64],
+    candidates: &[Peak],
+    spacing: f64,
+    rate: f64,
+) -> Result<Located, String> {
     let mut triples = Vec::new();
     for (i, &first) in candidates.iter().enumerate() {
         for (j, &middle) in candidates.iter().enumerate().skip(i + 1) {

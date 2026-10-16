@@ -27,7 +27,8 @@ The Rust/egui desktop window lets you:
   including current gain, delay, mute and frequency limits.
 - Choose a fixed timing-reference speaker and a listening position.
 - Start a measurement for one speaker, follow progress and stop it.
-- Review diagnostics or rejection reasons and find the saved take folder.
+- Review reference/target levels, clipping, missing sweep diagnostics and arrival evidence.
+- Reanalyze completed rejected takes without playing audio; the original verdict is retained.
 - Reanalyze saved recordings without playback; view impulse envelopes and
   frequency-band arrival candidates even while disconnected from Omniphony.
 
@@ -63,6 +64,7 @@ To inspect the layout without an interface or renderer:
 ```sh
 cargo run --locked -p companion-ui --example preview
 cargo run --locked -p companion-ui --example preview -- --arrival-review
+cargo run --locked -p companion-ui --example preview -- --missing-target-review
 ```
 
 This fixture window is labelled **UI PREVIEW · NO AUDIO**. Its speakers and
@@ -206,7 +208,7 @@ missing or ambiguous sweep sequences, poor SNR or unstable reference levels. Lim
 level change) are prototype gates, not hardware accuracy guarantees.
 Competing arrival peaks within an otherwise valid sweep sequence produce a
 timing warning. Acquisition and level diagnostics remain available, while delay
-and clock drift are withheld. Capture-report schema version 2 records
+and clock drift are withheld. Capture-report schema version 3 records
 `timing.ambiguous_peaks`, the competing-peak ratios and background RMS; its
 `relative_peak_delay_ms` and `clock_drift_ppm` fields are nullable.
 `accepted_for_analysis` confirms acquisition checks, not validated arrival timing.
@@ -230,7 +232,7 @@ clock drift, inverted polarity, noise, missing references, clipping and strong
 competing reflections. Real interface/microphone repeatability remains to be
 measured. See [the capture validation checklist](docs/capture-validation.md).
 
-## Offline impulse-response review
+## Offline measurement review
 
 ```sh
 cargo run --locked -p companion-cli -- capture review --take sessions/first-capture
@@ -241,8 +243,10 @@ renderer connection is opened. A new `analysis-*.json` is saved beside the sourc
 files; `recording.wav`, `stimulus.json`, `snapshot.json` and the original capture
 report are never overwritten. The command returns success when review completes,
 even if arrival timing remains unresolved; malformed or faulty acquisitions return
-an error. Legacy takes rejected only for competing correlation peaks can be
-reviewed. Interrupted, clipped, mismatched or otherwise rejected takes cannot be
+an error. Completed takes rejected for clipping or missing sweeps can now be
+inspected as diagnostics only. Their original rejection remains visible and
+timing/impulse estimates are withheld. Legacy correlation-ambiguity takes retain
+their documented exception. Interrupted, faulty or mismatched takes cannot be
 promoted by reanalysis.
 
 The analyzer reconstructs the emitted sweep, compensates its candidate constant
@@ -263,6 +267,10 @@ This increment targets broadband speakers, not subwoofer alignment. Microphone
 calibration, representative level estimation, nonlinear clock validation and
 hardware accuracy assessment remain pending. See [the analysis method and
 validation](docs/arrival-review.md) for the versioned algorithm, gates and limits.
+
+See [acquisition diagnostics](docs/acquisition-diagnostics.md) for reference-pair
+windows, per-interval levels and their limits. Raw sweep RMS is not a calibration
+gain estimate.
 
 ![Saved-take arrival review with synthetic preview data](docs/images/arrival-review-preview.png)
 
