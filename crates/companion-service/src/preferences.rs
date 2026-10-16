@@ -29,6 +29,7 @@ pub enum ResultPlot {
 #[serde(default)]
 pub struct ViewPreferences {
     pub plot: ResultPlot,
+    /// Legacy tab preference retained for compatibility; alignment now lives in speaker rows.
     pub show_alignment: bool,
     pub saved_selected: bool,
     pub selected_take: Option<PathBuf>,

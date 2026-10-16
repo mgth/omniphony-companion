@@ -114,7 +114,9 @@ eligibility. Excited-band SNR avoids unrelated out-of-band noise, and common-ban
 level SNR uses integrated power without dropping weak frequencies. UI and CLI
 retain available low-confidence results with acquisition/timing/level grades.
 Saved two-pass alignments can be reanalyzed into a separate diagnostic report;
-source verdicts remain intact. See `docs/measurement-quality.md`.
+source verdicts remain intact. Two-pass estimates and proposals now appear in each
+speaker row, with session actions above the list; the lower panel stays dedicated
+to individual measurements. See `docs/measurement-quality.md`.
 
 ### Multiple microphones
 

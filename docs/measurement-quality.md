@@ -10,7 +10,11 @@ the software does not manufacture a delay from noise.
 The result panel shows separate **Acquisition**, **Timing** and **Level** grades.
 Hover over a grade or expand **Measurement quality details** for measured ratios,
 faults and unresolved reasons. Alignment rows retain estimates from each pass
-even when they cannot qualify; their Quality column shows the weakest grade.
+even when they cannot qualify; the Quality badge in each speaker row shows the
+weakest grade. Grades use a green circle/check (Good), amber warning triangle
+(Limited), red circle/cross (Poor), and grey circle/dash (Unavailable or Not rated).
+Each badge keeps its readable label and tooltip. Icons are drawn as vectors and
+remain distinct without colour or emoji-font support.
 
 | Grade | Meaning |
 | --- | --- |
@@ -84,7 +88,8 @@ No automatic gain increase, playback or correction is introduced by this feature
 ## Existing recordings
 
 Loading saved state does not silently rerun analysis. Use **Reanalyze this take**
-for one result, or **Reanalyze saved passes** in the Alignment tab for both passes.
+for one result, or **Reanalyze saved passes** in the alignment session controls
+above the speaker rows for both passes.
 The corresponding commands are:
 
 ```sh

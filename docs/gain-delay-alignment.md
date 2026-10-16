@@ -73,7 +73,11 @@ no measurement or mutation occurs on startup or load. A restarted renderer has a
 new identity/revision and invalidates the saved application state.
 
 Workers own acquisition, analysis, persistence and network requests. The UI only
-submits actions and displays rows in the existing bounded, scrollable result panel.
+submits actions and displays the two-pass arrival, level, repeat spread, quality,
+qualification reason and proposed absolute settings inside each speaker row.
+Session actions and expandable diagnostics sit above the rows in the speaker
+scroll area. The lower panel is reserved for the selected speaker's individual
+measurement and graphs; there is no separate Alignment tab.
 The two passes keep the shared-reference optimization within each pass. Calibration
 and verification do not automatically change output level, repeat forever, or
 continue after cancellation.

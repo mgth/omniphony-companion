@@ -70,14 +70,22 @@ and level quality indicators; correction qualification remains separate. The
 shared service owns reference-pair detection and classification; panels only
 display the result.
 
-Saved-take review has separate controller state and does not populate the current
-speaker's measurement status or change acquisition settings. It requires no live
+Saved-take review has separate controller state. Saved analyses are indexed by
+exact take folder and measurement identity so the matching speaker row and
+individual result share the latest diagnostic status. Reanalysis does not change
+acquisition settings or qualify corrections by itself. It requires no live
 renderer/input. File validation, FFT work and unique report publication live in
 the service worker; the UI draws bounded envelope data and shared impulse reports.
 A reanalysis error remains visible when the saved-take panel is collapsed.
 
-Live results and saved analyses share a resizable panel below the speaker list,
-with separate selection and scrolling. They never open floating result windows.
+Live results and saved analyses share one selection in a resizable panel below
+the speaker list. The individual result scrolls independently of the speaker list;
+background completion cannot replace the selected speaker. Results never open
+floating windows. Clicking a speaker card selects its latest result; nested
+checkboxes and Measure/Stop controls retain their independent actions. The selected
+speaker has a persistent tint and outline. Selecting an unmeasured speaker clears
+the previous result and shows an explicit empty state. Quality badges share vector
+symbols, colours, text labels and detail tooltips across rows and individual results.
 Signed-waveform and virtual-burst traces are computed on the existing analysis
 worker and saved in the report. UI frequency selection only chooses precomputed
 traces, each bounded to 1600 signed min/max buckets. Panel clipping keeps speaker
@@ -107,8 +115,13 @@ pending; see the capture validation checklist.
 The alignment action owns two complete acquisition passes on a service worker.
 Each target keeps its own repeated evidence. The pure core qualifies repeatability
 and creates proposals; the capture crate estimates the common-band transfer level.
-The alignment tab reads bounded rows and emits Apply/Verify/Restore actions only.
-It shares the inline result panel and keeps capture progress inside speaker rows.
+Each speaker card reads its matching bounded alignment row and displays arrival,
+level, repeat spread, quality, qualification warnings and proposed absolute settings.
+The session toolbar above the cards emits Reanalyze/Apply/Verify/Restore actions;
+extended diagnostics are collapsible. The entire speaker workspace scrolls within
+its panel so session controls cannot squeeze the rows out of view. Capture progress
+stays in the active speaker row. Alignment never replaces the individual results
+in the lower panel; legacy saved tab preferences are ignored.
 
 Profile application uses the adapter's absolute, revision-checked settings command.
 The worker persists an uncertain state before mutation and confirms readback before
