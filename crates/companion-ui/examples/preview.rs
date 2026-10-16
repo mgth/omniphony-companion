@@ -19,6 +19,36 @@ fn main() -> eframe::Result {
             if std::env::args().any(|a| a == "--missing-target-review") {
                 controller.state.review = Some(support::missing_target_review());
             }
+            if std::env::args().any(|a| a == "--batch-progress") {
+                let outputs: Vec<_> = controller
+                    .state
+                    .snapshot
+                    .as_ref()
+                    .unwrap()
+                    .outputs
+                    .iter()
+                    .filter(|o| !o.muted)
+                    .map(|o| o.id.clone())
+                    .collect();
+                let signal = controller.settings.sweep;
+                controller.state.job = Some(companion_service::controller::Job::Batch {
+                    output_ids: outputs.clone(),
+                    current: 0,
+                });
+                controller.state.progress =
+                    Some(companion_service::measurement::MeasureProgress::Playing(
+                        omniphony_adapter::Progress {
+                            signal_id: 1,
+                            output_id: outputs[0].clone(),
+                            reference_output_id: Some(outputs[0].clone()),
+                            sequence_outputs: outputs.clone(),
+                            signal,
+                            state: omniphony_adapter::SignalState::Rendering,
+                            rendered_frames: 180000,
+                            total_frames: signal.frames(48000) * (outputs.len() as u64 * 2 + 1),
+                        },
+                    ));
+            }
             Ok(Box::new(companion_ui::CompanionApp::preview(
                 &cc.egui_ctx,
                 controller,

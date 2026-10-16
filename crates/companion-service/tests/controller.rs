@@ -19,6 +19,7 @@ struct Bench {
     discover_fails: AtomicBool,
     blocked: AtomicBool,
     requests: Mutex<Vec<MeasureRequest>>,
+    batch_outputs: Mutex<Vec<String>>,
 }
 impl Bench {
     fn new() -> Self {
@@ -28,6 +29,7 @@ impl Bench {
             discover_fails: AtomicBool::new(false),
             blocked: AtomicBool::new(false),
             requests: Mutex::new(Vec::new()),
+            batch_outputs: Mutex::new(Vec::new()),
         }
     }
 }
@@ -56,6 +58,29 @@ fn snapshot() -> Snapshot {
     }
 }
 impl Backend for Bench {
+    fn measure_batch(
+        &self,
+        request: MeasureRequest,
+        outputs: Vec<String>,
+        cancel: &AtomicBool,
+        progress: &mut dyn FnMut(usize, MeasureProgress),
+    ) -> Result<companion_service::batch::BatchOutcome, String> {
+        *self.batch_outputs.lock().unwrap() = outputs.clone();
+        let outcome = self.measure(request.clone(), cancel, &mut |p| progress(0, p))?;
+        Ok(companion_service::batch::BatchOutcome {
+            directory: request.out_dir,
+            takes: if outcome.cancelled {
+                vec![]
+            } else {
+                outputs
+                    .into_iter()
+                    .map(|id| (id, outcome.clone()))
+                    .collect()
+            },
+            cancelled: outcome.cancelled,
+            error: outcome.cancelled.then(|| "cancelled".into()),
+        })
+    }
     fn inputs(&self) -> Result<Vec<InputDevice>, String> {
         Ok(vec![InputDevice {
             name: "Test interface".into(),
@@ -144,6 +169,45 @@ fn selection_and_speaker_constraints_gate_recording() {
     c.settings.reference_output = Some("Left".into());
     c.settings.device = None;
     assert!(c.can_measure("Right").is_err());
+}
+
+#[test]
+fn batch_uses_checked_eligible_outputs_and_preserves_fixed_settings() {
+    let b = Arc::new(Bench::new());
+    let mut c = ready(b.clone());
+    assert_eq!(c.batch_outputs().unwrap(), ["Left", "Right"]);
+    c.excluded_outputs.insert("Left".into());
+    assert_eq!(c.batch_outputs().unwrap(), ["Right"]);
+    c.start_batch();
+    settled(&mut c);
+    assert_eq!(*b.batch_outputs.lock().unwrap(), ["Right"]);
+    assert_eq!(b.requests.lock().unwrap()[0].reference_output, "Left");
+    assert!(c.current_take("Right").is_some());
+    assert!(c.current_take("Left").is_none());
+}
+
+#[test]
+fn batch_stop_and_drop_cancel_the_worker_without_painting() {
+    for drop_controller in [false, true] {
+        let b = Arc::new(Bench::new());
+        b.blocked.store(true, Ordering::Relaxed);
+        let mut c = ready(b.clone());
+        c.start_batch();
+        assert!(c.measuring());
+        if drop_controller {
+            drop(c);
+        } else {
+            c.cancel();
+            settled(&mut c);
+            assert!(c.state.takes.is_empty());
+            assert!(c.state.error.as_ref().unwrap().contains("Saved batch"));
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !b.finished.load(Ordering::Relaxed) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(b.finished.load(Ordering::Relaxed));
+    }
 }
 
 #[test]

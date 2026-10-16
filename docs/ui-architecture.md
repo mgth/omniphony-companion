@@ -28,6 +28,14 @@ closure request cancellation; window closure waits for measurement cleanup.
 The renderer retains its own lease/deadline protection if the process disappears.
 The progress display does not drive the audio or transport clock.
 
+A batch is one worker, one input stream and one renderer measurement session.
+Its ordered output list is frozen at start; checkboxes affect future runs only.
+The renderer schedules all segments without UI or network gaps between them.
+The service saves the full recording and derives overlapping per-speaker windows;
+shared references contain exactly the same raw samples. Panels draw progress in
+a fixed-height speaker status row. Stop cancels the entire batch and retains the
+partial raw recording; it never automatically starts another speaker.
+
 A new connection attempt discards the prior displayed snapshot immediately.
 Measurement readiness checks the selected input format/rate/channel, reference,
 speaker mute/band/level limits and metadata. The acquisition service performs
@@ -63,7 +71,8 @@ a diagnostic take as a completed calibration.
 - Controller tests cover input constraints, single-job ownership, cancellation
   independent of painting, failed refresh, stale result contexts and unique paths.
 - Headless egui interaction tests click input/channel selectors and per-speaker
-  buttons, check unavailable states and verify the minimum window layout.
+  buttons, check unavailable states and verify the minimum window layout and
+  unchanged speaker-row positions during single and batch acquisition.
 - The preview is rendered through the native OpenGL frontend for visual review.
 - Shared CLI, protocol, persistence and signal-analysis regressions remain active.
 

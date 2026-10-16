@@ -1,4 +1,5 @@
 //! Shared application services. No UI toolkit or frontend event loop dependency.
+pub mod batch;
 pub mod controller;
 pub mod files;
 pub mod measurement;

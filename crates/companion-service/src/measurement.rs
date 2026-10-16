@@ -56,7 +56,7 @@ pub struct TakeOutcome {
     pub impulse_error: Option<String>,
 }
 
-fn save_wav(path: &Path, samples: &[f32], rate: u32) -> AppResult<()> {
+pub(crate) fn save_wav(path: &Path, samples: &[f32], rate: u32) -> AppResult<()> {
     let mut pending = tempfile::NamedTempFile::new_in(parent(path))?;
     {
         let mut writer = hound::WavWriter::new(
@@ -77,7 +77,7 @@ fn save_wav(path: &Path, samples: &[f32], rate: u32) -> AppResult<()> {
     pending.persist_noclobber(path)?;
     Ok(())
 }
-fn read_calibration(path: &Path) -> AppResult<String> {
+pub(crate) fn read_calibration(path: &Path) -> AppResult<String> {
     let mut text = String::new();
     fs::File::open(path)?
         .take(1024 * 1024 + 1)
@@ -242,6 +242,34 @@ pub fn measure(
     };
     drop(client);
     let recording = capture.finish();
+    let acquisition = acquisition
+        .map_err(|e| e.to_string())
+        .and_then(|p| ended.map(|()| p));
+    finish_take(
+        &args,
+        recording,
+        analysis_start_frame,
+        acquisition,
+        cancelled.load(Ordering::Relaxed),
+        &mut on_progress,
+    )
+}
+
+pub(crate) fn finish_take(
+    args: &MeasureRequest,
+    recording: measurement_capture::Recording,
+    analysis_start_frame: usize,
+    acquisition: Result<Progress, String>,
+    was_cancelled: bool,
+    on_progress: &mut dyn FnMut(MeasureProgress),
+) -> AppResult<TakeOutcome> {
+    let snapshot = &args.snapshot;
+    let sweep = args.sweep;
+    let origin = if recording.metadata.is_monitor {
+        "sink_monitor_capture"
+    } else {
+        "microphone_capture"
+    };
     on_progress(MeasureProgress::Saving);
     save_wav(
         &args.out_dir.join("recording.wav"),
@@ -249,17 +277,14 @@ pub fn measure(
         args.sample_rate,
     )?;
     on_progress(MeasureProgress::Analyzing);
-    let mut result: Result<_, String> = match (&acquisition, &ended) {
-        (Err(error), _) => Err(error.to_string()),
-        (_, Err(error)) => Err(error.clone()),
-        (Ok(_), Ok(())) if recording.metadata.fault_flags != 0 => Err(format!(
+    let mut result: Result<_, String> = match &acquisition {
+        Err(error) => Err(error.to_string()),
+        Ok(_) if recording.metadata.fault_flags != 0 => Err(format!(
             "capture fault flags: {}",
             recording.metadata.fault_flags
         )),
-        (Ok(_), Ok(())) if recording.metadata.clipped_samples != 0 => {
-            Err("clipped recording".into())
-        }
-        (Ok(_), Ok(())) => recording
+        Ok(_) if recording.metadata.clipped_samples != 0 => Err("clipped recording".into()),
+        Ok(_) => recording
             .samples
             .get(analysis_start_frame..)
             .ok_or_else(|| "missing quiet lead-in".to_owned())
@@ -267,24 +292,21 @@ pub fn measure(
                 timing::analyze(samples, args.sample_rate, snapshot.sample_rate, sweep)
             }),
     };
-    let was_cancelled = cancelled.load(Ordering::Relaxed);
     if was_cancelled {
         result = Err("capture cancelled by user".into());
     }
-    let diagnostics = if acquisition.is_ok()
-        && ended.is_ok()
-        && !was_cancelled
-        && recording.metadata.fault_flags == 0
-    {
-        recording
-            .samples
-            .get(analysis_start_frame..)
-            .and_then(|samples| {
-                diagnostics::analyze(samples, args.sample_rate, snapshot.sample_rate, sweep).ok()
-            })
-    } else {
-        None
-    };
+    let diagnostics =
+        if acquisition.is_ok() && !was_cancelled && recording.metadata.fault_flags == 0 {
+            recording
+                .samples
+                .get(analysis_start_frame..)
+                .and_then(|samples| {
+                    diagnostics::analyze(samples, args.sample_rate, snapshot.sample_rate, sweep)
+                        .ok()
+                })
+        } else {
+            None
+        };
     let response = result.as_ref().ok().map(|timing| {
         impulse::analyze(
             &recording.samples[analysis_start_frame..],
@@ -315,7 +337,7 @@ pub fn measure(
         }),
     )?;
     Ok(TakeOutcome {
-        directory: args.out_dir,
+        directory: args.out_dir.clone(),
         accepted: result.is_ok(),
         cancelled: was_cancelled,
         rejection_reason: result.as_ref().err().cloned(),
@@ -326,14 +348,18 @@ pub fn measure(
     })
 }
 
-fn check_cancelled(cancelled: &AtomicBool) -> AppResult<()> {
+pub(crate) fn check_cancelled(cancelled: &AtomicBool) -> AppResult<()> {
     if cancelled.load(Ordering::Relaxed) {
         Err("capture cancelled by user".into())
     } else {
         Ok(())
     }
 }
-fn drain_for(capture: &mut Capture, duration: Duration, cancelled: &AtomicBool) -> AppResult<()> {
+pub(crate) fn drain_for(
+    capture: &mut Capture,
+    duration: Duration,
+    cancelled: &AtomicBool,
+) -> AppResult<()> {
     let until = Instant::now() + duration;
     while Instant::now() < until {
         check_cancelled(cancelled)?;

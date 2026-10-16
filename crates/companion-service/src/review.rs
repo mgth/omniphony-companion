@@ -32,6 +32,7 @@ pub struct SavedReview {
     pub capture_sample_rate: u32,
     pub render_sample_rate: u32,
     pub signal: Sweep,
+    pub sequence_window: Option<crate::batch::SequenceWindow>,
     pub original_accepted_for_analysis: bool,
     pub original_rejection_reason: Option<String>,
     pub diagnostics: diagnostics::AcquisitionDiagnostics,
@@ -54,6 +55,8 @@ struct Stimulus {
     signal: Sweep,
     segment_start_render_frames: [u64; 3],
     calibration_applied: bool,
+    #[serde(default)]
+    sequence_window: Option<crate::batch::SequenceWindow>,
 }
 #[derive(Deserialize)]
 struct CaptureReport {
@@ -85,9 +88,9 @@ pub fn saved_take(directory: &Path) -> AppResult<SavedReview> {
     let stimulus: Stimulus = read_json(&directory.join("stimulus.json"))?;
     let capture: CaptureReport = read_json(&directory.join("capture-report.json"))?;
     let snapshot: Snapshot = read_json(&directory.join("snapshot.json"))?;
-    if stimulus.schema_version != 1
+    if !matches!(stimulus.schema_version, 1 | 2)
         || !(1..=3).contains(&capture.schema_version)
-        || stimulus.protocol_version != protocol::VERSION
+        || !matches!(stimulus.protocol_version, 2 | protocol::VERSION)
         || capture.timing_frame_origin != "analysis_start_frame_in_recording_wav"
     {
         return Err("unsupported take schema, protocol or timing origin".into());
@@ -120,13 +123,71 @@ pub fn saved_take(directory: &Path) -> AppResult<SavedReview> {
     stimulus.signal.validate(capture.capture.sample_rate)?;
     let frames = stimulus.signal.frames(snapshot.sample_rate);
     let progress = &capture.renderer_progress;
+    let expected_frames = if let Some(window) = &stimulus.sequence_window {
+        if stimulus.schema_version != 2
+            || stimulus.protocol_version != protocol::VERSION
+            || progress.sequence_outputs.get(window.target_index) != Some(&stimulus.output_id)
+            || window
+                .source_end_frame
+                .checked_sub(window.source_start_frame)
+                != Some(capture.capture.frames)
+            || capture.analysis_start_frame != 0
+        {
+            return Err("inconsistent sequence window".into());
+        }
+        let mut seen = std::collections::HashSet::new();
+        if progress.sequence_outputs.first() != Some(&progress.output_id)
+            || progress
+                .sequence_outputs
+                .iter()
+                .any(|id| !seen.insert(id) || !snapshot.outputs.iter().any(|o| &o.id == id))
+        {
+            return Err("invalid sequence output identities".into());
+        }
+        let batch: serde_json::Value = read_json(
+            &directory
+                .parent()
+                .ok_or("missing batch folder")?
+                .join("batch-report.json"),
+        )?;
+        if batch["renderer_progress"] != serde_json::to_value(progress)?
+            || batch["error"] != serde_json::Value::Null
+            || batch["cancelled"] != false
+            || batch["capture"]["frames"]
+                .as_u64()
+                .is_none_or(|n| n < window.source_end_frame as u64)
+        {
+            return Err("sequence source report differs from the derived take".into());
+        }
+        protocol::sequence_frames(
+            stimulus.signal,
+            snapshot.sample_rate,
+            progress.sequence_outputs.len(),
+        )?
+    } else {
+        if stimulus.schema_version != 1
+            || !progress.sequence_outputs.is_empty()
+            || progress.output_id != stimulus.output_id
+        {
+            return Err("inconsistent single-speaker take".into());
+        }
+        frames * 3
+    };
+    let segment_offset = stimulus
+        .sequence_window
+        .as_ref()
+        .map_or(0, |w| w.target_index as u64 * 2 * frames);
     if progress.state != SignalState::Completed
-        || progress.rendered_frames != frames * 3
-        || progress.total_frames != frames * 3
+        || progress.rendered_frames != expected_frames
+        || progress.total_frames != expected_frames
         || progress.signal != stimulus.signal
-        || progress.output_id != stimulus.output_id
         || progress.reference_output_id.as_ref() != Some(&stimulus.reference_output_id)
-        || stimulus.segment_start_render_frames != [0, frames, frames * 2]
+        || stimulus.segment_start_render_frames
+            != [
+                segment_offset,
+                segment_offset + frames,
+                segment_offset + frames * 2,
+            ]
         || capture.capture.fault_flags != 0
         || capture.capture.input_channel == 0
         || capture.capture.input_channel > capture.capture.stream_channels
@@ -160,6 +221,31 @@ pub fn saved_take(directory: &Path) -> AppResult<SavedReview> {
     let samples = wav.samples::<f32>().collect::<Result<Vec<_>, _>>()?;
     if samples.len() != count || samples.iter().any(|x| !x.is_finite()) {
         return Err("recording is truncated or nonfinite".into());
+    }
+    if let Some(window) = &stimulus.sequence_window {
+        let mut source = hound::WavReader::open(
+            directory
+                .parent()
+                .ok_or("missing batch folder")?
+                .join("recording.wav"),
+        )?;
+        if source.spec() != spec
+            || source.duration() as usize > measurement_capture::sequence::MAX_BATCH_FRAMES
+            || window.source_end_frame > source.duration() as usize
+        {
+            return Err("invalid source sequence recording".into());
+        }
+        source.seek(window.source_start_frame as u32)?;
+        let mut raw = source.samples::<f32>();
+        for sample in &samples {
+            if raw
+                .next()
+                .transpose()?
+                .is_none_or(|v| v.to_bits() != sample.to_bits())
+            {
+                return Err("derived take differs from its raw sequence window".into());
+            }
+        }
     }
     let clipped = samples.iter().filter(|x| x.abs() >= 0.999).count();
     if clipped != capture.capture.clipped_samples {
@@ -215,6 +301,7 @@ pub fn saved_take(directory: &Path) -> AppResult<SavedReview> {
         capture_sample_rate: spec.sample_rate,
         render_sample_rate: snapshot.sample_rate,
         signal: stimulus.signal,
+        sequence_window: stimulus.sequence_window,
         original_accepted_for_analysis: capture.accepted_for_analysis,
         original_rejection_reason: capture.rejection_reason,
         diagnostics,

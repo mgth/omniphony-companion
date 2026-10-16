@@ -202,7 +202,7 @@ fn active_measurement_progress_stays_finite_across_frames_and_window_sizes() {
             for _ in 0..3 {
                 let output = frame(&mut app, &ctx, vec![], size);
                 let text = labels(&output);
-                assert!(text.iter().any(|(s, _)| s == "Stop measurement"));
+                assert!(text.iter().any(|(s, _)| s == "Stop"));
                 assert!(text.iter().all(|(_, rect)| rect.is_finite()));
             }
         }
@@ -340,5 +340,56 @@ fn rejected_target_review_explains_routing_evidence_without_fabricating_a_delay(
         assert!(!text.iter().any(|(t, _)| t.contains("Arrival candidate  ")));
         assert!(text.iter().all(|(_, r)| r.is_finite()));
         assert_eq!(starts.load(Ordering::Relaxed), 0);
+    }
+}
+
+#[test]
+fn capture_progress_keeps_speaker_rows_in_place_for_single_and_batch_capture() {
+    use companion_service::{controller::Job, measurement::MeasureProgress};
+    for size in [Vec2::new(850.0, 640.0), Vec2::new(1160.0, 800.0)] {
+        let ctx = egui::Context::default();
+        let (controller, _) = support::ready();
+        let mut app = CompanionApp::preview(&ctx, controller);
+        for _ in 0..3 {
+            frame(&mut app, &ctx, vec![], size);
+        }
+        let baseline = labels(&frame(&mut app, &ctx, vec![], size));
+        let rows: Vec<_> = baseline
+            .iter()
+            .filter(|(s, r)| r.left() > 310.0 && (s == "Front left" || s == "Front right"))
+            .cloned()
+            .collect();
+        for batch in [false, true] {
+            app.controller.state.job = Some(if batch {
+                Job::Batch {
+                    output_ids: vec!["Front left".into(), "Front right".into()],
+                    current: 0,
+                }
+            } else {
+                Job::Measure {
+                    output_id: "Front left".into(),
+                }
+            });
+            for phase in [
+                MeasureProgress::OpeningInput,
+                MeasureProgress::LeadIn,
+                MeasureProgress::Analyzing,
+            ] {
+                app.controller.state.progress = Some(phase);
+                let text = labels(&frame(&mut app, &ctx, vec![], size));
+                for (name, rect) in &rows {
+                    let now = text
+                        .iter()
+                        .find(|(s, r)| s == name && r.left() > 310.0)
+                        .unwrap()
+                        .1;
+                    assert!(
+                        (now.top() - rect.top()).abs() < 0.1,
+                        "row {name} moved: {rect:?} -> {now:?}"
+                    );
+                }
+                assert!(text.iter().any(|(s, _)| s == "Stop"));
+            }
+        }
     }
 }

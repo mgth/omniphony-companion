@@ -143,6 +143,36 @@ fn sink_monitor_origin_survives_review() {
 }
 
 #[test]
+fn sequence_child_checks_parent_progress_and_keeps_local_timing() {
+    let root = tempfile::tempdir().unwrap();
+    let child = root.path().join("take-001");
+    fs::create_dir(&child).unwrap();
+    fixture(&child);
+    change(&child, "stimulus.json", |s| {
+        s["schema_version"] = json!(2);
+        s["sequence_window"] =
+            json!({"target_index":0,"source_start_frame":0,"source_end_frame":270000});
+    });
+    change(&child, "capture-report.json", |r| {
+        r["renderer_progress"]["sequence_outputs"] = json!(["R"])
+    });
+    let capture: Value =
+        serde_json::from_slice(&fs::read(child.join("capture-report.json")).unwrap()).unwrap();
+    write_json(&root.path().join("batch-report.json"),&json!({"renderer_progress":capture["renderer_progress"],"capture":{"frames":270000},"error":null,"cancelled":false})).unwrap();
+    fs::copy(
+        child.join("recording.wav"),
+        root.path().join("recording.wav"),
+    )
+    .unwrap();
+    let review = saved_take(&child).unwrap();
+    assert!((review.timing.unwrap().relative_peak_delay_ms.unwrap() - 5.0).abs() < 0.1);
+    change(root.path(), "batch-report.json", |r| {
+        r["renderer_progress"]["sequence_outputs"] = json!(["L"])
+    });
+    assert!(saved_take(&child).is_err());
+}
+
+#[test]
 fn rejected_missing_and_clipped_target_takes_are_diagnosed_without_promotion() {
     use measurement_capture::diagnostics::SegmentStatus;
     for clipped in [false, true] {

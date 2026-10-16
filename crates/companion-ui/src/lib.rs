@@ -463,8 +463,10 @@ impl CompanionApp {
             }
         });
         ui.label(
-            RichText::new("Measure one speaker at a time from your listening position.")
-                .color(MUTED),
+            RichText::new(
+                "Measure individually or capture all checked speakers with shared references.",
+            )
+            .color(MUTED),
         );
         ui.label(
             RichText::new(
@@ -474,10 +476,41 @@ impl CompanionApp {
             .color(MUTED),
         );
         ui.add_space(18.0);
-        if self.controller.measuring() {
-            self.progress(ui);
-            ui.add_space(12.0);
-        }
+        ui.horizontal(|ui| {
+            let readiness = self.controller.batch_outputs();
+            if ui
+                .add_enabled(
+                    readiness.is_ok(),
+                    egui::Button::new("Measure all checked").min_size(Vec2::new(155.0, 30.0)),
+                )
+                .on_disabled_hover_text(readiness.as_ref().err().map(String::as_str).unwrap_or(""))
+                .clicked()
+            {
+                self.controller.start_batch();
+            }
+            if ui
+                .add_enabled(
+                    self.controller.measuring() && !self.controller.state.stopping,
+                    egui::Button::new(RichText::new("Stop").color(RED))
+                        .min_size(Vec2::new(60.0, 30.0)),
+                )
+                .clicked()
+            {
+                self.controller.cancel();
+            }
+            let text = match &self.controller.state.job {
+                Some(Job::Batch {
+                    output_ids,
+                    current,
+                }) => format!("Speaker {} / {}", current + 1, output_ids.len()),
+                _ => readiness
+                    .as_ref()
+                    .map(|o| format!("{} selected", o.len()))
+                    .unwrap_or_default(),
+            };
+            ui.add(egui::Label::new(RichText::new(text).small().color(MUTED)).truncate());
+        });
+        ui.add_space(12.0);
         if let Some(error) = &self.controller.state.error {
             card().show(ui, |ui| {
                 ui.label(RichText::new(error).color(RED));
@@ -529,11 +562,15 @@ impl CompanionApp {
                     for output in outputs {
                         let readiness = self.controller.can_measure(&output.id);
                         let take = self.controller.current_take(&output.id).cloned();
-                        let active = matches!(&self.controller.state.job, Some(Job::Measure { output_id }) if output_id == &output.id);
+                        let active = self.controller.active_output() == Some(output.id.as_str());
                         card().show(ui, |ui| {
                             ui.set_min_width(ui.available_width());
                             ui.horizontal(|ui| {
-                                let (icon, _) = ui.allocate_exact_size(Vec2::new(33.0, 44.0), egui::Sense::hover());
+                                let mut included=!self.controller.excluded_outputs.contains(&output.id) && self.controller.output_readiness(&output.id).is_ok();
+                                if ui.add_enabled(!self.controller.busy() && readiness.is_ok(),egui::Checkbox::without_text(&mut included)).on_hover_text("Include in whole-system capture. Uncheck unwired speakers.").changed() {
+                                    if included {self.controller.excluded_outputs.remove(&output.id);} else {self.controller.excluded_outputs.insert(output.id.clone());}
+                                }
+                                let (icon, _) = ui.allocate_exact_size(Vec2::new(24.0, 44.0), egui::Sense::hover());
                                 let ink = if output.muted { MUTED } else { ACCENT };
                                 ui.painter().rect_stroke(icon.shrink2(Vec2::new(6.0, 4.0)), 4.0, Stroke::new(1.3_f32, ink), egui::StrokeKind::Inside);
                                 ui.painter().circle_stroke(icon.center()+Vec2::new(0.0, 6.0), 5.0, Stroke::new(1.3_f32, ink));
@@ -560,23 +597,24 @@ impl CompanionApp {
                                     caption(ui, "DELAY");
                                     ui.label(RichText::new(format!("{:.2} ms", output.delay_ms)).monospace());
                                 });
-                                let button = ui.add_enabled(readiness.is_ok(), egui::Button::new(
-                                    RichText::new(if active { "Recording…" } else { "Measure" }).color(if readiness.is_ok() { BG } else { MUTED }))
+                                let button = ui.add_enabled(if active { !self.controller.state.stopping } else { readiness.is_ok() }, egui::Button::new(
+                                    RichText::new(if active { "Stop" } else { "Measure" }).color(if readiness.is_ok() { BG } else { MUTED }))
                                     .fill(if readiness.is_ok() { ACCENT } else { PANEL })
                                     .min_size(Vec2::new(92.0, 34.0)));
-                                if button.clicked() { self.controller.start(&output.id); }
+                                if button.clicked() { if active {self.controller.cancel();} else { self.controller.start(&output.id); } }
                                 if let Err(reason) = &readiness { button.on_disabled_hover_text(reason); }
                             });
                             ui.add_space(5.0);
-                            ui.horizontal(|ui| {
+                            let (status_rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 25.0), egui::Sense::hover());
+                            ui.scope_builder(egui::UiBuilder::new().max_rect(status_rect).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
                                 if output.muted { badge(ui, "MUTED", WARM); }
                                 if self.controller.settings.reference_output.as_ref() == Some(&output.id) {
                                     badge(ui, "TIMING REFERENCE", ACCENT);
                                 }
-                                if active { ui.spinner(); ui.label(RichText::new("Measurement in progress").small().color(ACCENT)); }
+                                if active { self.row_progress(ui); }
                                 else if let Some(take) = &take {
                                     let (text, color) = take_status(take);
-                                    ui.label(RichText::new(text).small().color(color));
+                                    ui.add(egui::Label::new(RichText::new(text).small().color(color)).truncate());
                                     if ui.small_button("View result").clicked() {
                                         self.selected_result = Some(take.clone());
                                     }
@@ -603,62 +641,49 @@ impl CompanionApp {
         });
     }
 
-    fn progress(&mut self, ui: &mut egui::Ui) {
-        card()
-            .stroke(Stroke::new(1.0_f32, ACCENT.gamma_multiply(0.4)))
-            .show(ui, |ui| {
-                let output = match &self.controller.state.job {
-                    Some(Job::Measure { output_id }) => output_id.clone(),
-                    _ => String::new(),
-                };
-                let (phase, fraction) = match &self.controller.state.progress {
-                    Some(MeasureProgress::Preparing) => {
-                        ("Checking the renderer configuration", 0.0)
-                    }
-                    Some(MeasureProgress::OpeningInput) => ("Opening microphone input", 0.0),
-                    Some(MeasureProgress::LeadIn) => ("Recording a quiet lead-in", 0.0),
-                    Some(MeasureProgress::Playing(p)) => (
-                        "Playing reference, speaker, then reference",
+    fn row_progress(&self, ui: &mut egui::Ui) {
+        let (phase, fraction) = match &self.controller.state.progress {
+            Some(MeasureProgress::Preparing) => ("Checking configuration", 0.0),
+            Some(MeasureProgress::OpeningInput) => ("Opening microphone", 0.0),
+            Some(MeasureProgress::LeadIn) => ("Quiet lead-in", 0.0),
+            Some(MeasureProgress::Playing(p)) => {
+                if p.sequence_outputs.is_empty() {
+                    (
+                        "Reference / speaker / reference",
                         p.rendered_frames as f32 / p.total_frames.max(1) as f32,
-                    ),
-                    Some(MeasureProgress::Tail) => ("Recording the acoustic tail", 1.0),
-                    Some(MeasureProgress::Saving) => ("Saving the recording", 1.0),
-                    Some(MeasureProgress::Analyzing) => ("Checking quality and timing", 1.0),
-                    None => ("Preparing measurement", 0.0),
-                };
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(RichText::new(format!("Measuring {output}")).strong());
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .add_enabled(
-                                !self.controller.state.stopping,
-                                egui::Button::new(RichText::new("Stop measurement").color(RED)),
-                            )
-                            .clicked()
-                        {
-                            self.controller.cancel();
-                        }
-                    });
-                });
-                ui.label(
-                    RichText::new(if self.closing {
-                        "Stopping and saving the take before closing…"
-                    } else if self.controller.state.stopping {
-                        "Stopping and saving the take…"
-                    } else {
-                        phase
-                    })
-                    .small()
-                    .color(MUTED),
-                );
-                ui.add_space(8.0);
-                ui.add(
-                    egui::ProgressBar::new(fraction)
-                        .fill(ACCENT)
-                        .desired_width(ui.available_width()),
-                );
-            });
+                    )
+                } else {
+                    let count = p.sequence_outputs.len();
+                    let segment = p.total_frames / (count as u64 * 2 + 1);
+                    let index = companion_service::batch::active_target(p).min(count - 1);
+                    let local = p.rendered_frames.saturating_sub(index as u64 * 2 * segment);
+                    (
+                        if (p.rendered_frames / segment.max(1)).is_multiple_of(2) {
+                            "Reference sweep"
+                        } else {
+                            "Speaker sweep"
+                        },
+                        (local as f32 / (segment * 3).max(1) as f32).clamp(0.0, 1.0),
+                    )
+                }
+            }
+            Some(MeasureProgress::Tail) => ("Acoustic tail", 1.0),
+            Some(MeasureProgress::Saving) => ("Saving recording", 1.0),
+            Some(MeasureProgress::Analyzing) => ("Analyzing recording", 1.0),
+            None => ("Preparing", 0.0),
+        };
+        let label = if self.controller.state.stopping {
+            "Stopping and saving…"
+        } else {
+            phase
+        };
+        ui.add(
+            egui::ProgressBar::new(fraction)
+                .desired_width(ui.available_width())
+                .desired_height(20.0)
+                .text(label)
+                .fill(ACCENT.gamma_multiply(0.45)),
+        );
     }
 
     fn result_window(&mut self, ctx: &egui::Context) {
