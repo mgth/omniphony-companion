@@ -10,7 +10,7 @@ description = "UI-independent discovery and acquisition services for Omniphony C
 [dependencies]
 omniphony-adapter.workspace = true
 measurement-capture = { path = "../measurement-capture" }
-serde.workspace = true
+serde = { workspace = true, features = ["rc"] }
 serde_json.workspace = true
 hound = "3.5"
 tempfile = "3.23"

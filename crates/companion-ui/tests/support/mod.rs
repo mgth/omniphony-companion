@@ -88,3 +88,76 @@ pub fn ready() -> (Controller, Arc<AtomicUsize>) {
     c.settings.reference_output = Some("Front left".into());
     (c, starts)
 }
+
+pub fn arrival_review() -> companion_service::review::SavedReview {
+    use companion_service::review::{ImpulseReport, ImpulseSegment, SavedReview};
+    use measurement_capture::timing::TimingReport;
+    let segment = ImpulseSegment {
+        role: "speaker",
+        correlation_start_frame: 10000.0,
+        candidate_start_frame: Some(9760.0),
+        band_candidate_offset_ms: [Some(-5.0), Some(-5.1), Some(-4.9)],
+        threshold_candidate_offset_ms: [[Some(-5.0); 3], [Some(-5.1); 3], [Some(-4.9); 3]],
+        candidate_offset_ms: Some(-5.0),
+        sensitivity_ms: Some(0.3),
+        noise_db_relative_peak: -55.0,
+        response_start_ms: -100.0,
+        response_step_ms: 0.02,
+        response: Vec::new(),
+        envelope_step_ms: 0.2,
+        envelope_db: (0..1250)
+            .map(|i| {
+                let ms = i as f32 * 0.2 - 100.0;
+                let onset = -5.0;
+                if ms < onset {
+                    (-55.0 + 2.0 * (ms * 3.0).sin()).max(-80.0)
+                } else {
+                    (-0.7 * (ms - onset) - 8.0 * (ms * 1.2).sin().abs()).max(-80.0)
+                }
+            })
+            .collect(),
+    };
+    SavedReview {
+        schema_version: 1,
+        directory: "sessions/synthetic-preview".into(),
+        report_file: "sessions/synthetic-preview/analysis-preview.json".into(),
+        origin: "microphone_capture".into(),
+        output_id: "Front right".into(),
+        reference_output_id: "Front left".into(),
+        microphone_id: "Synthetic microphone".into(),
+        position_id: "Preview seat".into(),
+        input_channel: 1,
+        analysis_start_frame: 0,
+        capture_sample_rate: 48000,
+        render_sample_rate: 48000,
+        signal: companion_service::controller::Settings::default().sweep,
+        timing: TimingReport {
+            method: "synthetic-preview",
+            reference_start_frames: [10000.0, 154000.0],
+            target_start_frame: 82000.0,
+            clock_drift_ppm: None,
+            relative_peak_delay_ms: None,
+            ambiguous_peaks: true,
+            competing_peak_ratio: [0.9; 3],
+            normalized_correlation: [0.4; 3],
+            signal_to_noise_db: [28.0; 3],
+            sweep_rms_dbfs: [-22.0; 3],
+            noise_rms_dbfs: -50.0,
+            valid_for_correction: false,
+        },
+        impulse: Some(Arc::new(ImpulseReport {
+            method: "synthetic-preview",
+            bands_hz: [[300.0, 9000.0], [300.0, 2500.0], [2500.0, 9000.0]],
+            segments: [segment.clone(), segment.clone(), segment],
+            reference_similarity: Some(0.98),
+            reference_alignment_residual_ms: Some(0.01),
+            relative_arrival_ms: Some(2.4),
+            clock_drift_ppm: Some(-20.0),
+            uncertainty_ms: Some(0.61),
+            unresolved_reasons: vec![],
+            valid_for_correction: false,
+        })),
+        impulse_error: None,
+        valid_for_correction: false,
+    }
+}

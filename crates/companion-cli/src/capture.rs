@@ -15,6 +15,11 @@ use std::{
 pub enum Command {
     /// List audio input names and supported configurations. Does not record.
     Devices,
+    /// Reanalyze a saved microphone take without opening audio or the renderer.
+    Review {
+        #[arg(long)]
+        take: PathBuf,
+    },
     /// Record one microphone channel with reference/target/reference playback.
     Measure(Box<Measure>),
 }
@@ -65,6 +70,23 @@ pub fn run(command: Command) -> AppResult<()> {
             serde_json::to_string_pretty(&measurement_capture::devices()?)?
         ),
         Command::Measure(args) => measure(*args)?,
+        Command::Review { take } => {
+            let review = companion_service::review::saved_take(&take)?;
+            println!(
+                "Offline review: {} (reference {})",
+                review.output_id, review.reference_output_id
+            );
+            if review.origin == "sink_monitor_capture" {
+                println!(
+                    "Sink monitor: digital routing evidence, not an acoustic microphone measurement."
+                );
+            }
+            print_impulse(review.impulse.as_deref(), review.impulse_error.as_deref());
+            println!("Review report: {}", review.report_file.display());
+            println!(
+                "Original recording and capture report preserved. No audio played; no correction applied."
+            );
+        }
     }
     Ok(())
 }
@@ -100,18 +122,46 @@ fn measure(args: Measure) -> AppResult<()> {
     if let Some(reason) = outcome.rejection_reason {
         return Err(format!("take rejected: {reason}; see saved report").into());
     }
+    print_impulse(outcome.impulse.as_deref(), outcome.impulse_error.as_deref());
     if let Some(report) = outcome.timing {
         println!(
             "Acquisition signal / noise: {:.1} dB. No correction proposed.",
             report.signal_to_noise_db[1]
         );
-        if let Some(warning) = report.timing_warning() {
-            println!("Captured; timing unresolved. {warning}");
-        } else if let (Some(delay), Some(drift)) =
-            (report.relative_peak_delay_ms, report.clock_drift_ppm)
-        {
-            println!("Timing diagnostic: relative peak {delay:.3} ms; clock drift {drift:.1} ppm.");
+        if outcome.impulse.is_none() {
+            if let Some(warning) = report.timing_warning() {
+                println!("Captured; timing unresolved. {warning}");
+            } else if let (Some(delay), Some(drift)) =
+                (report.relative_peak_delay_ms, report.clock_drift_ppm)
+            {
+                println!(
+                    "Timing diagnostic: relative peak {delay:.3} ms; clock drift {drift:.1} ppm."
+                );
+            }
         }
     }
     Ok(())
+}
+
+fn print_impulse(report: Option<&companion_service::review::ImpulseReport>, error: Option<&str>) {
+    if let Some(report) = report {
+        if let (Some(delay), Some(bound), Some(drift)) = (
+            report.relative_arrival_ms,
+            report.uncertainty_ms,
+            report.clock_drift_ppm,
+        ) {
+            println!(
+                "Arrival candidate: {delay:+.3} ms; sensitivity bound ±{bound:.3} ms; clock drift {drift:+.1} ppm."
+            );
+            println!("Repeatable candidate, not a validated direct path or correction.");
+        } else {
+            println!("Impulse response available; arrival unresolved:");
+            for reason in &report.unresolved_reasons {
+                println!("  {reason}");
+            }
+        }
+    }
+    if let Some(error) = error {
+        println!("Impulse response unavailable: {error}");
+    }
 }

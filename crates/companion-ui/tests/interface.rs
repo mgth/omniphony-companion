@@ -224,6 +224,8 @@ fn captured_sweeps_with_ambiguous_arrivals_show_levels_and_withhold_timing() {
             accepted: true,
             cancelled: false,
             rejection_reason: None,
+            impulse: None,
+            impulse_error: None,
             timing: Some(TimingReport {
                 method: "synthetic-ui-fixture",
                 reference_start_frames: [24000.0, 168000.0],
@@ -262,4 +264,51 @@ fn captured_sweeps_with_ambiguous_arrivals_show_levels_and_withhold_timing() {
     );
     assert!(!text.iter().any(|(t, _)| t.contains("Take rejected")));
     assert!(text.iter().all(|(_, rect)| rect.is_finite()));
+}
+
+#[test]
+fn offline_arrival_review_renders_without_a_renderer_and_keeps_geometry_finite() {
+    let ctx = egui::Context::default();
+    let (mut controller, starts) = support::ready();
+    controller.disconnect();
+    controller.state.review = Some(support::arrival_review());
+    let mut app = CompanionApp::preview(&ctx, controller);
+    for size in [Vec2::new(850.0, 640.0), Vec2::new(1160.0, 800.0)] {
+        for _ in 0..3 {
+            frame(&mut app, &ctx, vec![], size);
+        }
+        let output = frame(&mut app, &ctx, vec![], size);
+        let text = labels(&output);
+        assert!(
+            text.iter()
+                .any(|(t, _)| t.contains("Arrival candidate  +2.400 ms"))
+        );
+        assert!(text.iter().any(|(t, _)| t.contains("Impulse envelope")));
+        assert!(text.iter().all(|(_, r)| r.is_finite()));
+        assert_eq!(starts.load(Ordering::Relaxed), 0);
+    }
+}
+
+#[test]
+fn unresolved_impulse_review_shows_reasons_instead_of_a_delay() {
+    let ctx = egui::Context::default();
+    let (mut controller, _) = support::ready();
+    let mut review = support::arrival_review();
+    let report = std::sync::Arc::make_mut(review.impulse.as_mut().unwrap());
+    report.relative_arrival_ms = None;
+    report.clock_drift_ppm = None;
+    report.uncertainty_ms = None;
+    report.unresolved_reasons = vec!["speaker: detection thresholds disagree".into()];
+    controller.state.review = Some(review);
+    let mut app = CompanionApp::preview(&ctx, controller);
+    let size = Vec2::new(1160.0, 800.0);
+    frame(&mut app, &ctx, vec![], size);
+    frame(&mut app, &ctx, vec![], size);
+    let output = frame(&mut app, &ctx, vec![], size);
+    let text = labels(&output);
+    assert!(
+        text.iter()
+            .any(|(t, _)| t == "speaker: detection thresholds disagree")
+    );
+    assert!(!text.iter().any(|(t, _)| t.contains("Arrival candidate  ")));
 }

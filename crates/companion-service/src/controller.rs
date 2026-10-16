@@ -1,5 +1,8 @@
 //! Frontend-neutral state and background jobs. No device/network I/O in paint calls.
-use crate::measurement::{self, MeasureProgress, MeasureRequest, TakeOutcome};
+use crate::{
+    measurement::{self, MeasureProgress, MeasureRequest, TakeOutcome},
+    review::{self, SavedReview},
+};
 use measurement_capture::InputDevice;
 use omniphony_adapter::{Client, Snapshot, Sweep};
 use std::{
@@ -14,6 +17,10 @@ use std::{
 };
 
 pub trait Backend: Send + Sync + 'static {
+    fn review(&self, directory: PathBuf) -> Result<SavedReview, String> {
+        let _ = directory;
+        Err("Saved-take review is unavailable in this backend.".into())
+    }
     fn inputs(&self) -> Result<Vec<InputDevice>, String>;
     fn discover(&self, endpoint: SocketAddr) -> Result<Snapshot, String>;
     fn measure(
@@ -25,6 +32,9 @@ pub trait Backend: Send + Sync + 'static {
 }
 pub struct LiveBackend;
 impl Backend for LiveBackend {
+    fn review(&self, directory: PathBuf) -> Result<SavedReview, String> {
+        review::saved_take(&directory).map_err(|e| e.to_string())
+    }
     fn inputs(&self) -> Result<Vec<InputDevice>, String> {
         measurement_capture::devices().map_err(|e| e.to_string())
     }
@@ -78,6 +88,7 @@ impl Default for Settings {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Job {
+    Review,
     Inputs,
     Discover,
     Measure { output_id: String },
@@ -93,6 +104,8 @@ pub struct Take {
 
 #[derive(Default)]
 pub struct State {
+    pub review: Option<SavedReview>,
+    pub review_error: Option<String>,
     pub inputs: Vec<InputDevice>,
     pub input_error: Option<String>,
     pub endpoint: Option<SocketAddr>,
@@ -105,6 +118,7 @@ pub struct State {
     pub error: Option<String>,
 }
 enum Event {
+    Reviewed(Box<Result<SavedReview, String>>),
     Inputs(Result<Vec<InputDevice>, String>),
     Discovered(SocketAddr, Result<Snapshot, String>),
     Progress(MeasureProgress),
@@ -142,6 +156,27 @@ impl Controller {
     }
     pub fn measuring(&self) -> bool {
         matches!(self.state.job, Some(Job::Measure { .. }))
+    }
+
+    /// Offline analysis uses the same worker boundary as acquisition. No renderer needed.
+    pub fn review_saved(&mut self, directory: &str) {
+        if self.busy() {
+            return;
+        }
+        self.state.review = None;
+        self.state.review_error = None;
+        if directory.trim().is_empty() {
+            self.state.review_error = Some("Enter a saved take folder.".into());
+            return;
+        }
+        self.state.job = Some(Job::Review);
+        let path = PathBuf::from(directory.trim());
+        let backend = self.backend.clone();
+        let sender = self.sender.clone();
+        std::thread::spawn(move || {
+            let result = catch_job(|| backend.review(path));
+            let _ = sender.send(Event::Reviewed(Box::new(result)));
+        });
     }
 
     pub fn refresh_inputs(&mut self) {
@@ -354,6 +389,14 @@ impl Controller {
     pub fn poll(&mut self) {
         while let Ok(event) = self.receiver.try_recv() {
             match event {
+                Event::Reviewed(result) => {
+                    match *result {
+                        Ok(review) => self.state.review = Some(review),
+                        Err(error) => self.state.review_error = Some(error),
+                    }
+                    self.state.job = None;
+                }
+
                 Event::Inputs(result) => {
                     match result {
                         Ok(inputs) => {

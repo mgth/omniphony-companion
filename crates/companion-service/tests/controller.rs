@@ -100,6 +100,8 @@ impl Backend for Bench {
             cancelled: cancel.load(Ordering::Relaxed),
             rejection_reason: Some("Test backend: no recording".into()),
             timing: None,
+            impulse: None,
+            impulse_error: None,
         })
     }
 }
@@ -236,4 +238,26 @@ fn dropping_controller_cancels_its_worker() {
         std::thread::sleep(Duration::from_millis(2));
     }
     assert!(b.finished.load(Ordering::Relaxed));
+}
+
+#[test]
+fn offline_review_does_not_require_a_connection_or_trigger_capture() {
+    let b = Arc::new(Bench::new());
+    let mut c = Controller::new(b.clone());
+    c.review_saved("synthetic-take");
+    assert_eq!(c.state.job, Some(Job::Review));
+    c.start("Right");
+    settled(&mut c);
+    assert_eq!(b.calls.load(Ordering::Relaxed), 0);
+    assert!(c.state.snapshot.is_none());
+    assert!(
+        c.state
+            .review_error
+            .as_ref()
+            .unwrap()
+            .contains("unavailable in this backend")
+    );
+    c.review_saved("");
+    assert!(!c.busy());
+    assert!(c.state.review_error.is_some());
 }
