@@ -154,6 +154,7 @@ pub fn arrival_review() -> companion_service::review::SavedReview {
             .collect(),
     };
     SavedReview {
+        quality: None,
         schema_version: 2,
         directory: "sessions/synthetic-preview".into(),
         report_file: "sessions/synthetic-preview/analysis-preview.json".into(),
@@ -165,12 +166,14 @@ pub fn arrival_review() -> companion_service::review::SavedReview {
         input_channel: 1,
         analysis_start_frame: 0,
         capture_sample_rate: 48000,
+        capture_clipped_samples: 0,
         render_sample_rate: 48000,
         signal: companion_service::controller::Settings::default().sweep,
         sequence_window: None,
         original_accepted_for_analysis: true,
         original_rejection_reason: None,
         diagnostics: measurement_capture::diagnostics::AcquisitionDiagnostics {
+            band_noise: None,
             method: "synthetic-preview".into(),
             noise_rms_dbfs: -50.0,
             total_clipped_samples: 0,
@@ -181,6 +184,8 @@ pub fn arrival_review() -> companion_service::review::SavedReview {
         },
         analysis_error: None,
         timing: Some(TimingReport {
+            band_noise: None,
+            warnings: vec![],
             method: "synthetic-preview".into(),
             reference_start_frames: [10000.0, 154000.0],
             target_start_frame: 82000.0,

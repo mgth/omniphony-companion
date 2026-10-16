@@ -6,9 +6,10 @@ on the acquisition worker, never in an audio callback or UI paint call.
 
 ## Method: regularized-sweep-arrival-review-v2
 
-1. Reuse the acquisition gates and sequence anchors from
-   `repeated-reference-correlation-v3`: complete reference/speaker/reference
-   sequence, finite unclipped samples, sufficient SNR and stable reference levels.
+1. Reuse the sequence anchors from `repeated-reference-correlation-v4`: a
+   complete reference/speaker/reference sequence with bounded finite samples.
+   Low SNR and unstable reference levels now produce quality warnings. Completed
+   clipped recordings can be inspected but remain ineligible for correction.
 2. Reconstruct the exact finite swept sine from the pinned renderer contract,
    including fades and settling silence. Resample that template with the
    candidate constant capture/render clock ratio from the reference spacing.
@@ -56,10 +57,11 @@ successful acquisition into a failed capture.
 Saved-take review validates schema/protocol, identities, reference sequence,
 render completion, capture faults, WAV format/rate/length and analysis origin.
 It recomputes from samples instead of trusting saved peaks. It accepts completed
-acquisitions and the explicitly recognized schema-1 correlation ambiguity
-rejection for impulse analysis. Completed rejected takes can also be inspected
-with [acquisition diagnostics](acquisition-diagnostics.md), with timing and
-impulse estimates withheld. Interrupted, faulty or inconsistent captures remain
+acquisitions and completed low-SNR, reference-level-change, clipped or legacy
+correlation-ambiguity rejections for diagnostic impulse analysis. Other completed
+rejections can be inspected with [acquisition diagnostics](acquisition-diagnostics.md);
+unavailable timing remains explicit. [Quality grades](measurement-quality.md)
+separate inspectable results from correction qualification. Interrupted, faulty or inconsistent captures remain
 refused. Analysis-report schema 2 retains the original acceptance and rejection
 reason and makes timing optional. Sink-monitor provenance is
 preserved and displayed as digital routing evidence, not an acoustic measurement.

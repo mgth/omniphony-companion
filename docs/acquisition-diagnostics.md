@@ -5,7 +5,7 @@ clipping or a missing sweep prevented timing analysis. They preserve the origina
 recording and verdict. These diagnostics cannot establish a direct arrival,
 identify the actual loudspeaker, or generate correction gains.
 
-## Method: reference-pair-acquisition-v2
+## Method: reference-pair-acquisition-v3
 
 The offline analyzer correlates the recording against the exact finite sweep.
 It looks for two reference candidates separated by two segments, independently
@@ -13,10 +13,9 @@ of target detection. A second pass compensates the template's clock ratio.
 Candidates require normalized correlation of at least 0.2; another plausible
 pair within 80% of the best pair's weakest score makes the sequence ambiguous.
 The final reference spacing must remain within 2000 ppm of the nominal clock
-ratio. Reference levels below 20 dB SNR remain visible as diagnostic evidence
-but do not pass acquisition. Missing, ambiguous or truncated references leave
-per-interval results absent;
-it does not imply a silent target.
+ratio. Reference levels below 20 dB excited-band SNR remain visible with a
+quality warning; they no longer prevent analysis. Missing, ambiguous or truncated
+references leave per-interval results absent; this does not imply a silent target.
 
 Reference correlation peaks anchor the three approximate sweep-body windows.
 A detected target match anchors its body window; otherwise the midpoint predicts
@@ -29,6 +28,12 @@ If reference localization fails, whole-take diagnostics retain the initial
 100 ms background estimate. Values use a -200 dBFS
 floor for finite serialization of silence. Total clipping counts cover the
 analysis slice; original capture metadata retains whole-recording counts.
+
+The additive `band_noise` field measures the sweep body and background through
+identical fourth-order Butterworth high/low passes at the sweep boundaries.
+Classification uses this excited-band ratio; original broadband RMS and ratios
+are still stored and explicitly labeled. No filtering is applied to the samples
+used for correlation or deconvolution. See [measurement quality](measurement-quality.md).
 
 The interval classification, in priority order, is:
 
@@ -53,14 +58,17 @@ reference levels and reference clipping are reported separately.
 Capture-report schema 3 adds optional diagnostics. Saved review reads capture
 schemas 1–3 and writes a new analysis-report schema 2 with the original acceptance
 and rejection reason, diagnostics and optional timing/impulse results. Completed
-rejected takes receive diagnostics only, except the existing explicitly
-recognized schema-1 correlation-ambiguity case. No rejection is removed.
+low-SNR, reference-level-change, clipped and legacy correlation-ambiguity takes
+can receive timing/impulse results when anchors are available. Missing target
+signals remain explicit, without invented delays. No original rejection is removed.
 Interrupted, faulty, identity-mismatched, nonfinite or inconsistent recordings
 remain refused. Diagnostic input is also bounded to absolute sample values of
 16 to keep malformed float WAVs out of the FFT. Clipping counts are recomputed and checked against metadata.
 
-Live acquisition uses the same diagnostic code after saving raw audio. It does
-not relax acquisition gates. No audio callback or renderer behavior changes.
+Live acquisition uses the same diagnostic code after saving raw audio. SNR and
+reference-level changes produce warnings for inspection; correction qualification
+has separate bounds. Clipping remains a capture fault even if diagnostic curves
+are available. No audio callback or renderer behavior changes.
 
 ## Interpretation and next checks
 
@@ -72,8 +80,9 @@ response; higher volume does not resolve competing arrivals.
 
 Whole-sweep RMS includes room response, frequency weighting from the stimulus,
 and approximate window alignment. It is not a representative-band level estimate
-and must not become an automatic gain adjustment. Microphone calibration,
-validated level bands/windows and hardware repeatability remain future work.
+and must not become an automatic gain adjustment. Repeated alignment uses a
+separate common-band transfer estimate.
+Microphone calibration and hardware accuracy validation remain future work.
 
 Deterministic tests cover missing targets and references, unequal rates and
 clock drift, clipping, weak sweeps, unrelated loud sound, ambiguous sequences and

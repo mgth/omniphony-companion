@@ -29,13 +29,17 @@ pub(super) fn draw(ui: &mut egui::Ui, report: &SpectralReport, mode: ResultPlot)
         "Group delay vs frequency · ms"
     };
     ui.label(RichText::new(title).strong());
-    ui.label(RichText::new(if response {
-        "Peak = 0 dB · 1/12-octave power smoothing · Not SPL or anechoic response"
-    } else if arrival {
-        "Strongest energy in overlapping 1/3-octave bands · Amber points have competing peaks"
-    } else {
-        "Phase-slope delay · 1/12-octave energy weighting · Gaps withhold weak or unstable values"
-    }).small().color(MUTED));
+    ui.label(
+        RichText::new(if response {
+            "Peak = 0 dB · Amber: estimated S/N below 20 dB · Not SPL or anechoic response"
+        } else if arrival {
+            "Strongest energy in overlapping 1/3-octave bands · Amber points have competing peaks"
+        } else {
+            "Phase-slope delay · Amber: weak evidence · Gaps: unstable or unavailable values"
+        })
+        .small()
+        .color(MUTED),
+    );
     let [low_hz, high_hz] = report.frequency_bounds_hz;
     if !low_hz.is_finite() || !high_hz.is_finite() || low_hz <= 0.0 || high_hz <= low_hz {
         return;
@@ -135,7 +139,7 @@ pub(super) fn draw(ui: &mut egui::Ui, report: &SpectralReport, mode: ResultPlot)
         }
         if let Some(v) = value(p) {
             let point = map(p.frequency_hz, v);
-            let uncertain = arrival && p.ambiguous_peak;
+            let uncertain = p.estimated_snr_db < 20.0 || (arrival && p.ambiguous_peak);
             if !uncertain && let Some(last) = previous {
                 painter.line_segment([last, point], Stroke::new(1.6_f32, ACCENT));
             }

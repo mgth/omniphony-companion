@@ -182,9 +182,8 @@ pub fn analyze(
         }
         points.push(SpectralPoint {
             frequency_hz: hz,
-            magnitude_db: (supported && snr >= 10.0 && mean_power > 1e-30)
-                .then(|| 10.0 * mean_power.log10()),
-            group_delay_ms: (strong
+            magnitude_db: (supported && mean_power > 1e-30).then(|| 10.0 * mean_power.log10()),
+            group_delay_ms: (supported
                 && minimum_power > mean_power * 0.01
                 && gd.is_finite()
                 && gd.abs() <= 100.0)
@@ -196,7 +195,7 @@ pub fn analyze(
         });
     }
     Ok(SpectralReport {
-        method: "windowed-transfer-and-band-energy-v1".into(),
+        method: "windowed-transfer-and-band-energy-v2".into(),
         frequency_bounds_hz: bounds,
         response_window_ms: [
             -(anchor as f64) / rate * 1000.0,
@@ -326,7 +325,7 @@ mod tests {
         assert!((p.peak_time_ms.unwrap() - 2.5).abs() < 0.05);
     }
     #[test]
-    fn noise_and_invalid_windows_do_not_create_delay_curves() {
+    fn noise_has_only_low_confidence_diagnostic_phase_and_no_arrival() {
         assert!(analyze(&[], 48000.0, 0, sweep()).is_err());
         let mut h = vec![0.0; 12001];
         assert!(analyze(&h, 48000.0, 2400, sweep()).is_err());
@@ -339,10 +338,7 @@ mod tests {
             *v = (seed as f64 / u32::MAX as f64 - 0.5) * 1e-4;
         }
         let r = analyze(&h, 48000.0, 4800, sweep()).unwrap();
-        assert!(
-            r.points
-                .iter()
-                .all(|p| p.peak_time_ms.is_none() && p.group_delay_ms.is_none())
-        );
+        assert!(r.points.iter().all(|p| p.peak_time_ms.is_none()
+            && (p.group_delay_ms.is_none() || p.estimated_snr_db < 20.0)));
     }
 }

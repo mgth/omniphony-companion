@@ -171,7 +171,8 @@ never read or write personal settings. See [the application boundaries](docs/ui-
    power weighting over 500–2000 Hz, including the room response. They are transfer
    dB, not sweep RMS, calibrated SPL or microphone-corrected levels.
 4. A proposal requires all selected speakers to pass acquisition/arrival checks,
-   20 dB estimated SNR across the level band, at most 0.15 ms arrival variation and
+   15 dB excited-band acquisition SNR, 20 dB integrated estimated SNR over the
+   complete level band, at most 0.15 ms arrival variation and
    0.50 dB level variation between independent target captures, and stable reference
    levels. These are prototype gates, not certified accuracy. Ambiguous speakers
    remain unresolved; they are never silently omitted.
@@ -320,10 +321,14 @@ continuity checking uses chunk flags and callback cadence, not device timestamps
 small discontinuities and all upstream clock behavior are not established by
 this check. Hardware validation remains necessary.
 
-Takes are rejected on stream errors, queue overflow, detected timing gaps, clipping,
-missing or ambiguous sweep sequences, poor SNR or unstable reference levels. Limits
-(20 dB SNR, 2000 ppm linear drift and 1 dB reference
-level change) are prototype gates, not hardware accuracy guarantees.
+Stream errors, queue overflow, detected timing gaps, clipping and missing or
+ambiguous sweep sequences remain capture faults. Completed low-SNR or unstable
+reference-level captures now retain results with quality warnings. Even clipped
+takes may have diagnostic response curves, without qualifying a correction.
+Excited-band SNR grades are Good (at least 20 dB), Limited (15–20 dB), or Poor
+(below 15 dB); missing evidence is Unavailable. Timing still needs a synchronized
+sequence within 2000 ppm linear drift. These are prototype indicators, not
+hardware accuracy guarantees. See [measurement quality](docs/measurement-quality.md).
 Competing arrival peaks within an otherwise valid sweep sequence produce a
 timing warning. Acquisition and level diagnostics remain available, while delay
 and clock drift are withheld. Capture-report schema version 3 records
@@ -363,10 +368,21 @@ files; `recording.wav`, `stimulus.json`, `snapshot.json` and the original captur
 report are never overwritten. The command returns success when review completes,
 even if arrival timing remains unresolved; malformed or faulty acquisitions return
 an error. Completed takes rejected for clipping or missing sweeps can now be
-inspected as diagnostics only. Their original rejection remains visible and
-timing/impulse estimates are withheld. Legacy correlation-ambiguity takes retain
-their documented exception. Interrupted, faulty or mismatched takes cannot be
-promoted by reanalysis.
+inspected with quality indicators. Available results are retained for completed
+low-SNR, clipped and legacy ambiguity cases; a missing target does not receive an
+invented delay. Original rejection reasons remain visible. Interrupted, faulty or
+mismatched takes cannot be promoted by reanalysis.
+
+For a saved two-pass alignment, choose **Reanalyze saved passes** in the Alignment
+tab, or run:
+
+```sh
+cargo run --locked -p companion-cli -- capture review-alignment --session sessions/example-alignment
+```
+
+This writes a separate `alignment-review-*` report with updated estimates and
+quality grades. It never opens an audio device or contacts the renderer, and
+cannot apply a profile. Start a fresh alignment for application and verification.
 
 The analyzer reconstructs the emitted sweep, compensates its candidate constant
 clock ratio and performs regularized, band-limited deconvolution. It retains three

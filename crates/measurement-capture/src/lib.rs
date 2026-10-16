@@ -5,6 +5,7 @@ pub mod diagnostics;
 pub mod impulse;
 pub mod input;
 pub mod level;
+pub mod noise;
 #[cfg(target_os = "linux")]
 mod pipewire_capture;
 pub mod sequence;

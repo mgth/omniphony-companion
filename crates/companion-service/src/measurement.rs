@@ -47,7 +47,7 @@ pub enum MeasureProgress {
 #[derive(Debug, Clone)]
 pub struct TakeOutcome {
     pub directory: PathBuf,
-    /// Passed acquisition checks; arrival timing may still need review.
+    /// Complete valid acquisition with located sweeps; confidence is reported separately.
     pub accepted: bool,
     pub cancelled: bool,
     pub rejection_reason: Option<String>,
@@ -55,6 +55,17 @@ pub struct TakeOutcome {
     pub timing: Option<timing::TimingReport>,
     pub impulse: Option<Arc<impulse::ImpulseReport>>,
     pub impulse_error: Option<String>,
+}
+
+impl TakeOutcome {
+    pub fn quality(&self) -> crate::quality::Report {
+        crate::quality::assess(
+            self.timing.as_ref(),
+            self.impulse.as_deref(),
+            self.diagnostics.as_ref(),
+            self.rejection_reason.as_deref(),
+        )
+    }
 }
 
 pub(crate) fn save_wav(path: &Path, samples: &[f32], rate: u32) -> AppResult<()> {
@@ -283,24 +294,30 @@ pub(crate) fn finish_take(
         args.sample_rate,
     )?;
     on_progress(MeasureProgress::Analyzing);
-    let mut result: Result<_, String> = match &acquisition {
+    // Analysis is inspectable even when clipping prevents qualification. Hardware
+    // faults and incomplete/cancelled acquisition cannot establish timing anchors.
+    let inspected = if acquisition.is_ok() && !was_cancelled && recording.metadata.fault_flags == 0
+    {
+        recording
+            .samples
+            .get(analysis_start_frame..)
+            .ok_or_else(|| "missing quiet lead-in".to_owned())
+            .and_then(|samples| {
+                timing::inspect(samples, args.sample_rate, snapshot.sample_rate, sweep)
+            })
+    } else {
+        Err("Incomplete or faulty acquisition; synchronized analysis unavailable.".into())
+    };
+    let result = match &acquisition {
         Err(error) => Err(error.to_string()),
+        Ok(_) if was_cancelled => Err("capture cancelled by user".into()),
         Ok(_) if recording.metadata.fault_flags != 0 => Err(format!(
             "capture fault flags: {}",
             recording.metadata.fault_flags
         )),
         Ok(_) if recording.metadata.clipped_samples != 0 => Err("clipped recording".into()),
-        Ok(_) => recording
-            .samples
-            .get(analysis_start_frame..)
-            .ok_or_else(|| "missing quiet lead-in".to_owned())
-            .and_then(|samples| {
-                timing::analyze(samples, args.sample_rate, snapshot.sample_rate, sweep)
-            }),
+        Ok(_) => inspected.clone(),
     };
-    if was_cancelled {
-        result = Err("capture cancelled by user".into());
-    }
     let diagnostics =
         if acquisition.is_ok() && !was_cancelled && recording.metadata.fault_flags == 0 {
             recording
@@ -313,8 +330,8 @@ pub(crate) fn finish_take(
         } else {
             None
         };
-    let response = result.as_ref().ok().map(|timing| {
-        impulse::analyze(
+    let response = inspected.as_ref().ok().map(|timing| {
+        impulse::inspect(
             &recording.samples[analysis_start_frame..],
             args.sample_rate,
             snapshot.sample_rate,
@@ -335,9 +352,10 @@ pub(crate) fn finish_take(
             "renderer_progress": acquisition.as_ref().ok(),
             "analysis_start_frame": analysis_start_frame,
             "timing_frame_origin": "analysis_start_frame_in_recording_wav",
-            "timing": result.as_ref().ok(), "rejection_reason": result.as_ref().err(),
+            "timing": inspected.as_ref().ok(), "rejection_reason": result.as_ref().err(),
+            "quality": crate::quality::assess(inspected.as_ref().ok(), impulse.as_deref(), diagnostics.as_ref(), result.as_ref().err().map(String::as_str)),
             "impulse": impulse, "impulse_error": impulse_error, "diagnostics": diagnostics,
-            "timing_warning": result.as_ref().ok().and_then(|report| report.timing_warning()),
+            "timing_warning": inspected.as_ref().ok().and_then(|report| report.timing_warning()),
             "accepted_for_analysis": result.is_ok(), "valid_for_correction": false,
             "calibration_applied": false,
         }),
@@ -348,7 +366,7 @@ pub(crate) fn finish_take(
         cancelled: was_cancelled,
         rejection_reason: result.as_ref().err().cloned(),
         diagnostics,
-        timing: result.ok(),
+        timing: inspected.ok(),
         impulse,
         impulse_error,
     })

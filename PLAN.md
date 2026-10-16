@@ -39,7 +39,7 @@ direct arrival of a full-range speaker.
 | --- | --- | --- |
 | 1. Foundation and sessions | UI-independent core; models for installations, microphones, positions, measurements and profiles; versioned persistence; CLI and simulated test rig. | A session can be saved, reloaded and analyzed without a renderer or audio hardware. |
 | 2. Omniphony contract | Discover physical outputs and their limits; capture initial settings; emit finite, identified signals; acknowledge commands; start, finish and stop sessions. | The correct output emits the correct signal, and the renderer independently stops an abandoned measurement. |
-| 3. Single-microphone acquisition | Audio input, microphone calibration file, level checks, raw capture, timing reference and independent clock handling. | Repeatability is measured; clipped, interrupted, unsynchronized or excessively noisy acquisitions are rejected. |
+| 3. Single-microphone acquisition | Audio input, microphone calibration file, level checks, raw capture, timing reference and independent clock handling. | Repeatability and quality are reported; available diagnostics survive poor quality, while clipped, interrupted, unsynchronized or excessively noisy evidence cannot qualify corrections. |
 | 4. Delay/level analysis | Impulse response, direct-arrival and representative-level estimation, uncertainty indicators and bounded setting proposals. | Validation against known signals and a real installation; ambiguous arrivals are detected and reported. |
 | 5. Application and verification | Apply a consistent profile, read back actual settings, acquire again, compare results and make bounded adjustments. | New measurements confirm the result; reapplying a profile does not accumulate corrections. |
 | 6. User assistant | Preparation, progress, targeted retries, before/after results, level-matched listening comparisons, saving and restoration. | The complete workflow requires no manual commands; closing or minimizing the window does not affect stop deadlines. |
@@ -108,6 +108,13 @@ clipping, missing target evidence and weak or uncorrelated sound. UI and CLI
 retain the original rejection and do not convert these levels into correction
 gains. Repeated alignment now adds a separate common-band transfer-level estimator;
 hardware routing validation remains necessary. See `docs/acquisition-diagnostics.md`.
+
+Experimental measurement quality now separates result availability from correction
+eligibility. Excited-band SNR avoids unrelated out-of-band noise, and common-band
+level SNR uses integrated power without dropping weak frequencies. UI and CLI
+retain available low-confidence results with acquisition/timing/level grades.
+Saved two-pass alignments can be reanalyzed into a separate diagnostic report;
+source verdicts remain intact. See `docs/measurement-quality.md`.
 
 ### Multiple microphones
 

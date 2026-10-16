@@ -22,6 +22,8 @@ pub struct Row {
     pub output_id: String,
     pub take_folders: Vec<PathBuf>,
     pub repeats: Vec<RepeatEstimate>,
+    #[serde(default)]
+    pub quality: Vec<crate::quality::Report>,
     pub qualified: Option<QualifiedEstimate>,
     pub reason: Option<String>,
 }
@@ -84,7 +86,23 @@ fn estimate(take: &TakeOutcome) -> RepeatEstimate {
                 .clone()
                 .unwrap_or("capture did not complete".into()),
         );
-        return result;
+    }
+    if let Some(t) = &take.timing {
+        let snr = t
+            .band_noise
+            .as_ref()
+            .map(|b| &b.signal_to_noise_db)
+            .unwrap_or(&t.signal_to_noise_db);
+        if let Err(e) = core::repeatability::qualify_acquisition(
+            snr.iter().copied().fold(f64::INFINITY, f64::min),
+            (t.sweep_rms_dbfs[0] - t.sweep_rms_dbfs[2]).abs(),
+        ) {
+            result.reasons.push(e.to_string());
+        }
+    } else {
+        result
+            .reasons
+            .push("missing synchronized timing evidence".into());
     }
     let Some(ir) = &take.impulse else {
         result.reasons.push(
@@ -115,7 +133,7 @@ fn estimate(take: &TakeOutcome) -> RepeatEstimate {
             result.minimum_snr_db = Some(
                 bands
                     .iter()
-                    .map(|b| b.minimum_snr_db)
+                    .map(|b| b.band_snr_db)
                     .fold(f64::INFINITY, f64::min),
             );
             result.reference_level_db = Some((bands[0].level_db + bands[2].level_db) * 0.5);
@@ -171,6 +189,7 @@ pub fn capture<B: Backend + ?Sized>(
                 output_id: id.clone(),
                 take_folders: vec![],
                 repeats: vec![],
+                quality: vec![],
                 qualified: None,
                 reason: None,
             })
@@ -249,6 +268,7 @@ pub fn capture<B: Backend + ?Sized>(
             for (row, (_, take)) in alignment.rows.iter_mut().zip(&batch.takes) {
                 row.take_folders.push(take.directory.clone());
                 row.repeats.push(estimate(take));
+                row.quality.push(take.quality());
             }
         }
         takes.extend(batch.takes);
@@ -303,6 +323,104 @@ pub fn capture<B: Backend + ?Sized>(
     save(&alignment)?;
     Ok(Outcome { alignment, takes })
 }
+/// Revisit retained raw audio without changing original verdicts or any renderer.
+/// The derived alignment is diagnostic only, even if its estimates qualify.
+pub fn reanalyze(original: &Alignment) -> Result<Alignment, String> {
+    if original.applied_snapshot.is_some() || original.application_uncertain {
+        return Err(
+            "Keep the applied alignment available for restoration; reanalyze after restoring it."
+                .into(),
+        );
+    }
+    if original.rows.len() > 32 {
+        return Err("too many saved speakers".into());
+    }
+    let mut reviewed = original.clone();
+    reviewed.directory = crate::files::parent(&crate::workspace::absolute(&original.directory))
+        .join(format!("alignment-review-{}", stamp()));
+    reviewed.session = None;
+    reviewed.profile = None;
+    reviewed.verification = None;
+    reviewed.verification_note = None;
+    reviewed.verification_pass_reports = None;
+    reviewed.blockers = vec!["Offline diagnostic reanalysis. Original reports are preserved; capture a fresh alignment before applying corrections.".into()];
+    for row in &mut reviewed.rows {
+        row.repeats.clear();
+        row.quality.clear();
+        row.qualified = None;
+        row.reason = None;
+        if row.take_folders.len() > 2 {
+            return Err("unexpected repeat count".into());
+        }
+        for folder in &mut row.take_folders {
+            *folder = crate::workspace::absolute(folder);
+            let analyze = || -> Result<crate::review::SavedReview, String> {
+                let snapshot: Snapshot = read_json(&folder.join("snapshot.json")).map_err(err)?;
+                if snapshot != original.snapshot {
+                    return Err("saved take belongs to a different renderer configuration".into());
+                }
+                let review = crate::review::saved_take(folder).map_err(err)?;
+                if review.output_id != row.output_id
+                    || review.microphone_id != original.settings.microphone_id
+                    || review.position_id != original.settings.position_id
+                    || review.signal != original.settings.sweep
+                    || Some(&review.reference_output_id)
+                        != original.settings.reference_output.as_ref()
+                {
+                    return Err("saved take identity differs from this alignment".into());
+                }
+                Ok(review)
+            };
+            match analyze() {
+                Ok(review) => {
+                    let valid_analysis =
+                        review.analysis_error.is_none() && review.capture_clipped_samples == 0;
+                    let take = TakeOutcome {
+                        directory: folder.clone(),
+                        accepted: valid_analysis,
+                        cancelled: false,
+                        rejection_reason: review.analysis_error.clone().or_else(|| {
+                            (review.capture_clipped_samples > 0).then(|| "clipped recording".into())
+                        }),
+                        diagnostics: Some(review.diagnostics),
+                        timing: review.timing,
+                        impulse: review.impulse,
+                        impulse_error: review.impulse_error,
+                    };
+                    row.repeats.push(estimate(&take));
+                    let mut quality = take.quality();
+                    if let Some(reason) = review.original_rejection_reason {
+                        quality
+                            .acquisition
+                            .details
+                            .push(format!("Original verdict retained: {reason}"));
+                    }
+                    row.quality.push(quality);
+                }
+                Err(e) => {
+                    row.quality
+                        .push(crate::quality::assess(None, None, None, Some(&e)));
+                    row.repeats.push(RepeatEstimate {
+                        arrival_ms: None,
+                        level_db: None,
+                        minimum_snr_db: None,
+                        reference_level_db: None,
+                        reasons: vec![e],
+                    });
+                }
+            }
+        }
+        match core::repeatability::qualify(&row.repeats) {
+            Ok(q) => row.qualified = Some(q),
+            Err(e) => row.reason = Some(e.to_string()),
+        }
+    }
+    std::fs::create_dir(&reviewed.directory).map_err(err)?;
+    write_json(&reviewed.directory.join("alignment-plan.json"), &reviewed).map_err(err)?;
+    save(&reviewed)?;
+    Ok(reviewed)
+}
+
 fn make_session(a: &Alignment) -> Result<core::Session, String> {
     let mut speakers = vec![];
     let mut observations = vec![];

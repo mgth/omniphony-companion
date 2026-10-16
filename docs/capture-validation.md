@@ -24,9 +24,10 @@ of microphone or installation performance.
    reference-pair diagnostics identify a target interval near background, retain
    the rejection and provide no delay. Reconnect before retrying. Missing
    references must leave interval diagnostics unavailable.
-8. Check clipping and low-SNR rejection at the input; record the actual accepted
-   operating range. Keep raw takes outside Git.
-8. Check that competing arrival peaks remain visible in the correlation diagnostics:
+8. Check clipping and low-SNR quality warnings at the input. Completed weak
+   captures should retain inspectable results; clipped captures must never qualify
+   a correction. Record the actual useful operating range. Keep raw takes outside Git.
+9. Check that competing arrival peaks remain visible in the correlation diagnostics:
    level diagnostics remain visible, delay/drift are withheld, and
    `valid_for_correction` stays false. Raising playback level is not a remedy
    for arrival ambiguity. Missing or competing complete sweep sequences still

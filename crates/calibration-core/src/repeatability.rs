@@ -18,6 +18,18 @@ pub struct QualifiedEstimate {
     pub arrival_repeat_spread_ms: f64,
     pub level_repeat_spread_db: f64,
 }
+/// Low-SNR estimates remain displayable; this minimum is only for correction.
+pub fn qualify_acquisition(minimum_band_snr_db: f64, reference_rms_spread_db: f64) -> Result<()> {
+    require(
+        minimum_band_snr_db.is_finite() && minimum_band_snr_db >= 15.0,
+        "excited-band acquisition signal/noise below 15 dB; diagnostic result only",
+    )?;
+    require(
+        reference_rms_spread_db.is_finite() && (0.0..=1.0).contains(&reference_rms_spread_db),
+        "reference levels changed by more than 1 dB during the take",
+    )
+}
+
 pub fn qualify(repeats: &[RepeatEstimate]) -> Result<QualifiedEstimate> {
     require(
         repeats.len() == 2,
@@ -52,7 +64,9 @@ pub fn qualify(repeats: &[RepeatEstimate]) -> Result<QualifiedEstimate> {
         )?;
         require(
             noise.is_finite() && noise >= 20.0,
-            "insufficient signal/noise",
+            format!(
+                "integrated level-band signal/noise is {noise:.1} dB (minimum 20 dB for correction)"
+            ),
         )?;
         arrivals.push(arrival);
         levels.push(level);
@@ -94,6 +108,13 @@ mod tests {
             reference_level_db: Some(-1.0),
             reasons: vec![],
         }
+    }
+    #[test]
+    fn acquisition_confidence_only_blocks_correction_below_its_floor() {
+        assert!(qualify_acquisition(15.0, 0.1).is_ok());
+        assert!(qualify_acquisition(14.99, 0.1).is_err());
+        assert!(qualify_acquisition(25.0, 1.01).is_err());
+        assert!(qualify_acquisition(f64::NAN, 0.1).is_err());
     }
     #[test]
     fn long_signed_delays_are_advisory_but_changes_still_fail() {

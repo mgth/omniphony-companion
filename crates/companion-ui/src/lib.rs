@@ -390,7 +390,11 @@ impl CompanionApp {
                                     });
                             }
                             if let Some(action) = action {
-                                self.controller.alignment_action(action);
+                                if action == "reanalyze" {
+                                    self.controller.reanalyze_alignment();
+                                } else {
+                                    self.controller.alignment_action(action);
+                                }
                             }
                         } else {
                             self.results(ui);
@@ -1125,6 +1129,7 @@ impl CompanionApp {
                 ui.label(RichText::new(format!("{} · {} · Channel {} · Reference: {}", take.settings.microphone_id, take.settings.position_id, take.settings.input_channel, take.settings.reference_output.as_deref().unwrap_or("—"))).small().color(MUTED));
                 match &take.outcome {
                     Ok(outcome) => {
+                        draw_quality(ui, &outcome.quality());
                         if take.settings.device.as_deref().is_some_and(|s| s.starts_with("pipewire:monitor:")) { ui.label(RichText::new("Sink monitor · not an acoustic microphone measurement").color(WARM)); }
                         if let Some(impulse) = &outcome.impulse { draw_impulse(ui, impulse, &mut self.result_plot, &mut self.waveform_view); }
                         if let Some(error) = &outcome.impulse_error { ui.label(RichText::new(error).color(WARM)); }
@@ -1138,7 +1143,7 @@ impl CompanionApp {
                                 ui.label("Relative peak delay"); ui.monospace(timing.relative_peak_delay_ms.map_or_else(|| "Unresolved".into(), |v| format!("{v:+.3} ms"))); ui.end_row();
                                 ui.label("Clock drift"); ui.monospace(timing.clock_drift_ppm.map_or_else(|| "Unresolved".into(), |v| format!("{v:+.1} ppm"))); ui.end_row();
                                 }
-                                ui.label("Speaker signal / noise"); ui.monospace(format!("{:.1} dB", timing.signal_to_noise_db[1])); ui.end_row();
+                                ui.label("Speaker signal / noise (broadband)"); ui.monospace(format!("{:.1} dB", timing.signal_to_noise_db[1])); ui.end_row();
                                 ui.label("Speaker sweep RMS"); ui.monospace(format!("{:.1} dBFS", timing.sweep_rms_dbfs[1])); ui.end_row();
                                 ui.label("Background RMS"); ui.monospace(format!("{:.1} dBFS", timing.noise_rms_dbfs)); ui.end_row();
                             });
@@ -1197,6 +1202,15 @@ impl CompanionApp {
             if let Some(error) = &review.analysis_error {
                 ui.label(RichText::new(error).color(WARM));
             }
+            let quality = review.quality.clone().unwrap_or_else(|| {
+                companion_service::quality::assess(
+                    review.timing.as_ref(),
+                    review.impulse.as_deref(),
+                    Some(&review.diagnostics),
+                    review.analysis_error.as_deref(),
+                )
+            });
+            draw_quality(ui, &quality);
             if let Some(impulse) = &review.impulse {
                 draw_impulse(ui, impulse, &mut self.result_plot, &mut self.waveform_view);
             }
@@ -1304,6 +1318,10 @@ fn truncate(text: &str, limit: usize) -> String {
 }
 fn take_status(take: &Take) -> (&str, Color32) {
     match &take.outcome {
+        Ok(o) if !o.accepted && o.timing.is_some() => ("Results available · capture fault", WARM),
+        Ok(o) if o.accepted && o.timing.as_ref().is_some_and(|t| !t.warnings.is_empty()) => {
+            ("Results available · quality warning", WARM)
+        }
         Ok(outcome) if outcome.cancelled => ("Cancelled · recording retained", WARM),
         Ok(outcome)
             if outcome.accepted
@@ -1327,9 +1345,42 @@ fn take_status(take: &Take) -> (&str, Color32) {
             ("Captured · timing unresolved", WARM)
         }
         Ok(outcome) if outcome.accepted => ("Recorded · diagnostics available", ACCENT),
-        Ok(_) => ("Take rejected · review report", WARM),
+        Ok(_) => ("Recorded · timing unavailable", WARM),
         Err(_) => ("Measurement failed", RED),
     }
+}
+
+fn draw_quality(ui: &mut egui::Ui, report: &companion_service::quality::Report) {
+    use companion_service::quality::Grade;
+    ui.horizontal_wrapped(|ui| {
+        for (name, indicator) in [
+            ("Acquisition", &report.acquisition),
+            ("Timing", &report.timing),
+            ("Level", &report.level),
+        ] {
+            let color = match indicator.grade {
+                Grade::Good => ACCENT,
+                Grade::Limited => WARM,
+                Grade::Poor => RED,
+                Grade::Unavailable => MUTED,
+            };
+            ui.colored_label(color, format!("{name}: {}", indicator.grade.label()))
+                .on_hover_text(indicator.details.join("\n"));
+        }
+    });
+    if let Some(level) = report.level_db {
+        ui.label(format!(
+            "500–2000 Hz level: {level:+.2} dB relative · Band S/N: {:.1} dB",
+            report.level_band_snr_db.unwrap_or_default()
+        ));
+    }
+    egui::CollapsingHeader::new("Measurement quality details").show(ui, |ui| {
+        ui.label("Experimental quality grades, not probabilities or calibrated accuracy. Correction requires two consistent passes.");
+        for (name, indicator) in [("Acquisition", &report.acquisition), ("Timing", &report.timing), ("Level", &report.level)] {
+            ui.strong(name);
+            for detail in &indicator.details { ui.label(detail); }
+        }
+    });
 }
 
 fn draw_diagnostics(ui: &mut egui::Ui, report: &companion_service::review::AcquisitionDiagnostics) {
@@ -1346,11 +1397,14 @@ fn draw_diagnostics(ui: &mut egui::Ui, report: &companion_service::review::Acqui
         "Background: {:.1} dBFS · Analysis clipped samples: {}",
         report.noise_rms_dbfs, report.total_clipped_samples
     ));
+    if let Some(band) = &report.band_noise {
+        ui.label(format!("Excited-band S/N ({:.0}–{:.0} Hz): reference {:.1} / speaker {:.1} / reference {:.1} dB", band.band_hz[0], band.band_hz[1], band.signal_to_noise_db[0], band.signal_to_noise_db[1], band.signal_to_noise_db[2]));
+    }
     if let Some(segments) = &report.segments {
         egui::Grid::new("segment_diagnostics")
             .spacing([16.0, 6.0])
             .show(ui, |ui| {
-                for label in ["Interval", "RMS", "Signal / noise", "Peak", "Clipped"] {
+                for label in ["Interval", "RMS", "Broadband S/N", "Peak", "Clipped"] {
                     ui.label(RichText::new(label).small().color(MUTED));
                 }
                 ui.end_row();

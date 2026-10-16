@@ -16,9 +16,12 @@ before starting; unresolved selected speakers block the whole proposal.
 The level estimate uses the unnormalized, regularized transfer response, sampled
 on the same 25-point logarithmic grid for every segment. Magnitude in dB is
 interpolated in log frequency; powers are averaged with trapezoidal endpoint
-weights. All surrounding spectral samples must have at least 20 dB estimated SNR.
-Weak bands are not silently dropped. The response includes room energy within the
-existing impulse window. A microphone amplitude file is preserved but not applied;
+weights. Level qualification requires at least 20 dB integrated estimated SNR
+over this complete band for the target and both references. Weak individual
+frequencies remain in the estimate with unchanged weights and a visible warning.
+Acquisition qualification separately requires at least 15 dB SNR over the excited
+sweep band; the former broadband 20 dB cutoff no longer hides results. The response
+includes room energy within the existing impulse window. A microphone amplitude file is preserved but not applied;
 the method ID explicitly identifies this uncalibrated relative weighting. It is
 not sweep RMS, absolute SPL, or an isolated direct-sound level.
 
@@ -74,6 +77,12 @@ submits actions and displays rows in the existing bounded, scrollable result pan
 The two passes keep the shared-reference optimization within each pass. Calibration
 and verification do not automatically change output level, repeat forever, or
 continue after cancellation.
+
+**Reanalyze saved passes** recomputes the two passes from retained WAV files and
+shows new estimates, repeatability and quality grades. It writes a separate
+`alignment-review-*` directory, preserves every original report and cannot apply
+a profile. Applied or uncertain sessions retain their restoration context and
+cannot be replaced by this action. See [measurement quality](measurement-quality.md).
 
 ## Validation
 
