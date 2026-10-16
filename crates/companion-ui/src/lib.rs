@@ -2,6 +2,7 @@
 use companion_service::{
     controller::{Controller, Job, Take},
     measurement::MeasureProgress,
+    preferences::{self, PreferenceStore},
     review::ImpulseReport,
 };
 use eframe::egui::{self, Color32, FontId, RichText, Stroke, Vec2};
@@ -23,11 +24,41 @@ pub struct CompanionApp {
     selected_result: Option<Take>,
     preview: bool,
     review_path: String,
+    preferences: Option<PreferenceStore>,
+    preferences_error: Option<String>,
 }
 
 impl CompanionApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        Self::with_controller(&cc.egui_ctx, Controller::default(), true)
+        match preferences::default_path().and_then(PreferenceStore::open) {
+            Ok(store) => Self::with_preferences(&cc.egui_ctx, Controller::default(), store),
+            Err(error) => {
+                let mut app = Self::with_controller(&cc.egui_ctx, Controller::default(), true);
+                app.preferences_error = Some(format!(
+                    "Settings could not be restored; automatic saving is disabled and the existing file was kept: {error}"
+                ));
+                app
+            }
+        }
+    }
+
+    /// Restore preferences before device enumeration or renderer discovery.
+    pub fn with_preferences(
+        ctx: &egui::Context,
+        mut controller: Controller,
+        store: PreferenceStore,
+    ) -> Self {
+        let prefs = store.preferences().clone();
+        let reconnect = store.loaded();
+        controller.settings = prefs.settings;
+        controller.excluded_outputs = prefs.excluded_outputs;
+        let mut app = Self::with_controller(ctx, controller, false);
+        app.endpoint = prefs.endpoint;
+        app.review_path = prefs.review_path;
+        app.preferences = Some(store);
+        app.controller
+            .initialize(reconnect.then(|| app.endpoint.clone()));
+        app
     }
     /// Inject a service for deterministic UI tests; the live app never installs fake devices.
     pub fn with_controller(
@@ -46,6 +77,8 @@ impl CompanionApp {
             selected_result: None,
             preview: false,
             review_path: String::new(),
+            preferences: None,
+            preferences_error: None,
         }
     }
 
@@ -161,6 +194,16 @@ impl CompanionApp {
                 if let Some(error) = &self.controller.state.connection_error {
                     ui.label(RichText::new(error).small().color(RED));
                 }
+                let save_error = self.preferences.as_ref().and_then(PreferenceStore::error);
+                if let Some(error) = self.preferences_error.as_ref().or(save_error.as_ref()) {
+                    ui.label(RichText::new(error).small().color(WARM));
+                    if save_error.is_some()
+                        && ui.small_button("Retry saving settings").clicked()
+                        && let Some(store) = &self.preferences
+                    {
+                        store.retry();
+                    }
+                }
             });
         egui::TopBottomPanel::bottom("footer")
             .frame(egui::Frame::new().fill(BG).inner_margin(egui::Margin::symmetric(24, 10)))
@@ -192,6 +235,18 @@ impl CompanionApp {
             .show(ctx, |ui| self.speakers(ui));
         self.result_window(ctx);
         self.review_window(ctx);
+        self.persist_preferences();
+    }
+
+    fn persist_preferences(&mut self) {
+        if let Some(store) = &mut self.preferences {
+            store.update(
+                &self.controller.settings,
+                &self.endpoint,
+                &self.controller.excluded_outputs,
+                &self.review_path,
+            );
+        }
     }
 
     fn setup(&mut self, ui: &mut egui::Ui) {
@@ -223,7 +278,8 @@ impl CompanionApp {
                 .controller
                 .selected_input()
                 .map(|input| input.label())
-                .unwrap_or_else(|| "Choose an input…".into());
+                .unwrap_or_else(|| self.controller.settings.device.clone()
+                    .unwrap_or_else(|| "Choose an input…".into()));
             egui::ComboBox::from_id_salt("device")
                 .width(ui.available_width())
                 .truncate()
@@ -248,6 +304,9 @@ impl CompanionApp {
                 })
                 .response
                 .on_hover_text(&selected);
+            if self.controller.settings.device.is_some() && self.controller.selected_input().is_none() && !busy {
+                ui.label(RichText::new("Selected input unavailable. Reconnect it and refresh, or choose another input.").small().color(WARM));
+            }
             if self.controller.selected_input().is_some_and(|input| input.is_monitor) {
                 ui.label(RichText::new("Sink monitor: records a digital output. Choose a microphone source to measure sound in the room.").small().color(WARM));
             }
@@ -349,6 +408,10 @@ impl CompanionApp {
                         }
                     }
                 });
+            if let (Some(id), Some(snapshot)) = (&self.controller.settings.reference_output, &self.controller.state.snapshot)
+                && !snapshot.outputs.iter().any(|o| &o.id == id && !o.muted) {
+                ui.label(RichText::new("Selected reference is missing or muted. Restore it or choose another speaker.").small().color(WARM));
+            }
         });
         ui.add_space(6.0);
         ui.label(
@@ -813,6 +876,12 @@ impl CompanionApp {
         if !open {
             self.controller.state.review = None;
         }
+    }
+}
+
+impl Drop for CompanionApp {
+    fn drop(&mut self) {
+        self.persist_preferences();
     }
 }
 

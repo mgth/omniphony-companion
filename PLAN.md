@@ -71,9 +71,11 @@ reference, per-speaker Measure/Stop actions, progress and saved-take diagnostics
 The shared service owns discovery, capture and cancellation outside the UI event
 loop. Whole-system acquisition now adds selectable outputs and a continuous
 reference–speaker–reference sequence whose intervening references are shared.
-Progress stays in the active speaker row. This does not yet add automatic
-correction, guided microphone positioning or restoring previous acquisition
-settings into the UI. See `docs/batch-capture.md`.
+Progress stays in the active speaker row. Acquisition preferences and speaker
+checkboxes now persist locally, with startup device enumeration and renderer
+reconnection. Unavailable saved choices remain selected and block acquisition.
+Automatic correction and guided microphone positioning remain pending.
+See `docs/batch-capture.md`.
 
 An initial milestone-4 increment now reconstructs band-limited impulse responses,
 checks early arrival candidates across bands/thresholds and compares the two

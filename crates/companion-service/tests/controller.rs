@@ -17,6 +17,7 @@ struct Bench {
     calls: AtomicUsize,
     finished: AtomicBool,
     discover_fails: AtomicBool,
+    inputs_fail: AtomicBool,
     blocked: AtomicBool,
     requests: Mutex<Vec<MeasureRequest>>,
     batch_outputs: Mutex<Vec<String>>,
@@ -27,6 +28,7 @@ impl Bench {
             calls: AtomicUsize::new(0),
             finished: AtomicBool::new(false),
             discover_fails: AtomicBool::new(false),
+            inputs_fail: AtomicBool::new(false),
             blocked: AtomicBool::new(false),
             requests: Mutex::new(Vec::new()),
             batch_outputs: Mutex::new(Vec::new()),
@@ -82,6 +84,9 @@ impl Backend for Bench {
         })
     }
     fn inputs(&self) -> Result<Vec<InputDevice>, String> {
+        if self.inputs_fail.load(Ordering::Relaxed) {
+            return Err("interface disconnected".into());
+        }
         Ok(vec![InputDevice {
             name: "Test interface".into(),
             description: "Test interface".into(),
@@ -169,6 +174,42 @@ fn selection_and_speaker_constraints_gate_recording() {
     c.settings.reference_output = Some("Left".into());
     c.settings.device = None;
     assert!(c.can_measure("Right").is_err());
+}
+
+#[test]
+fn startup_refresh_retains_missing_input_channel_and_reference_without_starting_audio() {
+    let b = Arc::new(Bench::new());
+    let mut c = Controller::new(b.clone());
+    c.settings.device = Some("Missing interface".into());
+    c.settings.input_channel = 2;
+    c.settings.reference_output = Some("Missing speaker".into());
+    c.initialize(Some("127.0.0.1:9003".into()));
+    settled(&mut c);
+    assert_eq!(c.state.endpoint, Some("127.0.0.1:9003".parse().unwrap()));
+    assert_eq!(c.settings.device.as_deref(), Some("Missing interface"));
+    assert_eq!(c.settings.input_channel, 2);
+    assert_eq!(
+        c.settings.reference_output.as_deref(),
+        Some("Missing speaker")
+    );
+    assert!(c.can_measure("Right").unwrap_err().contains("unavailable"));
+    c.settings.device = Some("Test interface".into());
+    b.inputs_fail.store(true, Ordering::Relaxed);
+    c.refresh_inputs();
+    settled(&mut c);
+    assert_eq!(c.settings.device.as_deref(), Some("Test interface"));
+    assert!(c.selected_input().is_none());
+    b.inputs_fail.store(false, Ordering::Relaxed);
+    c.refresh_inputs();
+    settled(&mut c);
+    assert!(c.selected_input().is_some());
+    assert!(c.can_measure("Right").unwrap_err().contains("absent"));
+    c.settings.reference_output = Some("Sub".into());
+    c.connect("127.0.0.1:9003");
+    settled(&mut c);
+    assert_eq!(c.settings.reference_output.as_deref(), Some("Sub"));
+    assert!(c.can_measure("Right").unwrap_err().contains("muted"));
+    assert_eq!(b.calls.load(Ordering::Relaxed), 0);
 }
 
 #[test]
