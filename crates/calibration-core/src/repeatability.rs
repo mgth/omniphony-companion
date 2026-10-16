@@ -40,7 +40,7 @@ pub fn qualify(repeats: &[RepeatEstimate]) -> Result<QualifiedEstimate> {
             ));
         };
         require(
-            arrival.is_finite() && arrival.abs() <= 100.0,
+            arrival.is_finite() && arrival.abs() <= 10_000.0,
             "invalid relative arrival",
         )?;
         require(
@@ -94,6 +94,20 @@ mod tests {
             reference_level_db: Some(-1.0),
             reasons: vec![],
         }
+    }
+    #[test]
+    fn long_signed_delays_are_advisory_but_changes_still_fail() {
+        for delay in [-160.0, 160.0] {
+            let mut a = estimate();
+            a.arrival_ms = Some(delay);
+            assert_eq!(qualify(&[a.clone(), a.clone()]).unwrap().arrival_ms, delay);
+            assert!(crate::long_delay_warning(delay).is_some());
+            let mut b = a.clone();
+            b.arrival_ms = Some(delay + 21.0);
+            assert!(qualify(&[a, b]).is_err());
+        }
+        assert!(crate::long_delay_warning(100.0).is_none());
+        assert!(crate::long_delay_warning(f64::NAN).is_none());
     }
     #[test]
     fn independent_repeat_gates_reject_ambiguous_unstable_and_nonfinite_evidence() {

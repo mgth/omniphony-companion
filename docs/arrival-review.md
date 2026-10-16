@@ -4,10 +4,10 @@ This is the first analysis increment of mission 1. It produces inspectable arriv
 candidates, not calibrated observations or gain/delay proposals. It runs offline
 on the acquisition worker, never in an audio callback or UI paint call.
 
-## Method: regularized-sweep-arrival-review-v1
+## Method: regularized-sweep-arrival-review-v2
 
 1. Reuse the acquisition gates and sequence anchors from
-   `repeated-reference-correlation-v2`: complete reference/speaker/reference
+   `repeated-reference-correlation-v3`: complete reference/speaker/reference
    sequence, finite unclipped samples, sufficient SNR and stable reference levels.
 2. Reconstruct the exact finite swept sine from the pinned renderer contract,
    including fades and settling silence. Resample that template with the
@@ -32,7 +32,8 @@ on the acquisition worker, never in an audio callback or UI paint call.
    reference agreement can be displayed even when the target remains unresolved.
 7. Require the candidate-arrival clock ratio to agree with the template ratio
    within 100 ppm and remain within the existing 2000 ppm limit. Compute relative
-   target arrival against the reference midpoint, bounded to ±100 ms. Withhold
+   target arrival against the reference midpoint. Long stable route latency is
+   advisory, rather than rejected at ±100 ms. Withhold
    relative arrival, drift and sensitivity bound if any required gate fails.
 
 These are explicit prototype gates, not acoustic accuracy specifications. The

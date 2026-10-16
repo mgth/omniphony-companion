@@ -415,3 +415,22 @@ fn application_requires_complete_readback_and_never_replays_an_uncertain_write()
         handle.join().unwrap();
     }
 }
+
+#[test]
+fn discovery_uses_advertised_delay_capacity_and_refuses_unsettled_capacities() {
+    for capacity in [100.0, 250.0, -1.0, 251.0] {
+        let (endpoint, join) = server(move |mut stream| {
+            let request = receive(&mut stream);
+            let mut snapshot = snapshot();
+            snapshot.max_delay_ms = capacity;
+            send(
+                &mut stream,
+                request.request_id,
+                Reply::Snapshot { snapshot },
+            );
+        });
+        let mut client = Client::connect(endpoint, Duration::from_secs(2)).unwrap();
+        assert_eq!(client.discover().is_ok(), (0.0..=250.0).contains(&capacity));
+        join.join().unwrap();
+    }
+}

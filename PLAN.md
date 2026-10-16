@@ -195,6 +195,9 @@ still required before calling mission 1 complete. See `docs/gain-delay-alignment
 Input preparation now includes an explicit ten-second microphone meter and a fresh
 pre-playback activity check on every capture. Digital silence is reported directly,
 and alignment retains pass completion/failure summaries. See `docs/microphone-check.md`.
+Long device latency is now advisory above 100 ms; live proposals use the renderer's
+advertised capacity. Continuous batches retain a tail guard and check every shared
+reference for timing discontinuities. See `docs/long-latency-alignment.md`.
 Keep the microphone fixed at the reference seat. Preserve uncertainty: repeatability
 alone does not establish an unobstructed direct path. Subwoofer integration remains
 outside this mission. No tonal EQ or spatial sensor work should displace this priority.

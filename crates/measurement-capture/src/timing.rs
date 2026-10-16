@@ -102,14 +102,11 @@ pub fn analyze(
     let relative_ms = (peaks[1].position - (peaks[0].position + peaks[2].position) * 0.5)
         / effective_rate
         * 1000.0;
-    if relative_ms.abs() > 100.0 {
-        return Err("relative peak delay exceeds 100 ms".into());
-    }
     let quiet_len = (capture_rate / 10) as usize;
     if peaks[0].position < quiet_len as f64 {
         return Err("capture lacks a quiet lead-in for the noise check".into());
     }
-    let noise = rms(&samples[..quiet_len]).max(1e-10);
+    let noise = reference_noise(samples, peaks[0].position, effective_rate)?;
     let padding = effective_rate * SETTLE_MS as f64 / 1000.0;
     let body = effective_rate * sweep.duration_ms as f64 / 1000.0;
     let mut snr = [0.0; 3];
@@ -125,7 +122,7 @@ pub fn analyze(
         snr[i] = 20.0 * (signal_rms / noise).log10();
         if snr[i] < 20.0 {
             return Err(format!(
-                "sweep {} signal-to-noise ratio is {:.1} dB, below the 20 dB acquisition limit",
+                "sweep {} signal-to-noise ratio is {:.2} dB, below the 20 dB acquisition limit",
                 i + 1,
                 snr[i]
             ));
@@ -135,7 +132,7 @@ pub fn analyze(
         return Err("reference levels changed by more than 1 dB during the take".into());
     }
     Ok(TimingReport {
-        method: "repeated-reference-correlation-v2",
+        method: "repeated-reference-correlation-v3",
         reference_start_frames: [peaks[0].position, peaks[2].position],
         target_start_frame: peaks[1].position,
         clock_drift_ppm: (!ambiguous_peaks).then_some(ppm),
@@ -150,6 +147,20 @@ pub fn analyze(
         valid_for_correction: false,
     })
 }
+/// Use the final quiet part of the reference pre-padding. The beginning of a
+/// batch excerpt can still contain the preceding delayed target's decay.
+pub(crate) fn reference_noise(samples: &[f32], reference: f64, rate: f64) -> Result<f64, String> {
+    let end = (reference + rate * (SETTLE_MS as f64 / 1000.0 - 0.02)).floor() as usize;
+    let count = (rate * 0.1).ceil() as usize;
+    let start = end
+        .checked_sub(count)
+        .ok_or("missing quiet reference padding")?;
+    let window = samples
+        .get(start..end)
+        .ok_or("missing quiet reference padding")?;
+    Ok(rms(window).max(1e-10))
+}
+
 fn rms(samples: &[f32]) -> f64 {
     (samples.iter().map(|&x| (x as f64).powi(2)).sum::<f64>() / samples.len().max(1) as f64).sqrt()
 }
@@ -262,6 +273,12 @@ pub(crate) fn peak_candidates_bounded(scores: &[f64], spacing: f64, limit: usize
     candidates
 }
 
+// Stay inside the target's own slot, with a guard before either reference.
+// This is an identity bound, not a 100 ms acoustic-distance assumption.
+pub(crate) fn target_search_radius(spacing: f64) -> f64 {
+    spacing * 0.45
+}
+
 fn locate_triple(
     scores: &[f64],
     candidates: &[Peak],
@@ -274,7 +291,7 @@ fn locate_triple(
             for &last in candidates.iter().skip(j + 1) {
                 if ((last.position - first.position) / (2.0 * spacing) - 1.0).abs() > 0.004
                     || (middle.position - (first.position + last.position) * 0.5).abs()
-                        > spacing * 0.2
+                        > target_search_radius(spacing)
                 {
                     continue;
                 }
@@ -359,6 +376,8 @@ mod tests {
             (48000, 0.0, 7.5),
             (44100, 300.0, -4.0),
             (48000, -250.0, 12.0),
+            (48000, 0.0, 160.0),
+            (44100, 300.0, -160.0),
         ] {
             let report = analyze(&fixture(rate, ppm, delay), rate, 48000, spec()).unwrap();
             assert!(

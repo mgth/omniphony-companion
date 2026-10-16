@@ -29,6 +29,8 @@ message reports this limit. Input capture and renderer callbacks remain bounded;
 FFT analysis runs on the service worker after recording stops.
 
 The outer references locate the sequence and estimate its overall clock ratio.
+Intermediate references must also match that constant-clock model within 2 ms;
+a discontinuity retains the raw batch without assigning speaker windows.
 Each speaker's overlapping reference–target–reference window then passes through
 the same local timing, clipping, level and impulse checks as a single capture.
 A missing or clipped target can reject that speaker without rejecting unrelated

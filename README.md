@@ -316,7 +316,7 @@ this check. Hardware validation remains necessary.
 
 Takes are rejected on stream errors, queue overflow, detected timing gaps, clipping,
 missing or ambiguous sweep sequences, poor SNR or unstable reference levels. Limits
-(20 dB SNR, 2000 ppm linear drift, 100 ms relative peak delay and 1 dB reference
+(20 dB SNR, 2000 ppm linear drift and 1 dB reference
 level change) are prototype gates, not hardware accuracy guarantees.
 Competing arrival peaks within an otherwise valid sweep sequence produce a
 timing warning. Acquisition and level diagnostics remain available, while delay
@@ -454,3 +454,20 @@ Changes go through a dedicated branch and a PR for review.
 
 All repository content and project communication must be in English. See
 [the development agreement](AGENTS.md).
+
+### Long-latency outputs
+
+Stable device latency above 100 ms is accepted and shown as a **Long delay**
+warning in arrival review and repeated alignment. A slow projector or other
+processed output can participate: earlier outputs receive the required delay.
+This adds audio latency and may require audio/video sync adjustment. Repeats,
+SNR, clipping and reference-agreement gates still apply. Timing candidates must
+remain distinguishable within their sequence slot; the warning does not certify
+a direct acoustic path.
+
+Live proposals use the renderer's advertised delay capacity. The companion
+accepts version-4 renderers advertising up to 250 ms (the sweep settling time);
+older 100 ms renderers remain usable but cannot apply a larger correction.
+The dedicated renderer change increases the actual delay rings to 250 ms.
+Measurements are retained even when an older renderer cannot apply their proposal.
+See `docs/long-latency-alignment.md` for bounds and validation.

@@ -43,14 +43,14 @@ pub fn windows(
         return Err(crate::input::NO_SIGNAL.into());
     }
     let nominal = capture_rate as f64 / render_rate as f64;
-    let first = endpoints(
+    let (first, _) = endpoints(
         samples,
         &resample(&source, nominal),
         source.len() as f64 * nominal,
         targets,
     )?;
     let ratio = (first[1].position - first[0].position) / (2 * targets * source.len()) as f64;
-    let pair = endpoints(
+    let (pair, scores) = endpoints(
         samples,
         &resample(&source, ratio),
         source.len() as f64 * ratio,
@@ -61,7 +61,29 @@ pub fn windows(
         return Err("sequence reference spacing exceeds the clock-drift limit".into());
     }
     let spacing = source.len() as f64 * ratio;
-    let margin = capture_rate as f64 * 0.15;
+    // Endpoint drift cannot explain a dropped block or a route latency change.
+    // Inspect every shared reference before assigning target windows.
+    for i in 1..targets {
+        let expected = pair[0].position + i as f64 * 2.0 * spacing;
+        let radius = spacing * 0.15;
+        let lo = (expected - radius).floor().max(0.0) as usize;
+        let hi = ((expected + radius).ceil() as usize).min(scores.len());
+        let (offset, &score) = scores[lo..hi]
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(b.1))
+            .ok_or("missing shared reference")?;
+        let residual_ms = (lo as f64 + offset as f64 - expected) / capture_rate as f64 * 1000.0;
+        if score < 0.2 || residual_ms.abs() > 2.0 {
+            return Err(format!(
+                "shared reference {} has inconsistent timing ({residual_ms:+.2} ms from the clock model); raw batch retained. Check playback/capture continuity and repeat",
+                i + 1
+            ));
+        }
+    }
+    // Extra real audio beyond the 150 ms IR tail tolerates local anchor
+    // rounding and small differences between local/global clock estimates.
+    let margin = capture_rate as f64 * 0.20;
     let mut ranges = Vec::with_capacity(targets);
     for i in 0..targets {
         let start = pair[0].position + i as f64 * 2.0 * spacing - margin;
@@ -79,7 +101,7 @@ fn endpoints(
     template: &[f32],
     spacing: f64,
     targets: usize,
-) -> Result<[Peak; 2], String> {
+) -> Result<([Peak; 2], Vec<f64>), String> {
     let scores = correlation_scores(samples, template)?;
     let peaks = peak_candidates_bounded(&scores, spacing, targets * 2 + 5);
     let distance = targets as f64 * 2.0 * spacing;
@@ -102,12 +124,69 @@ fn endpoints(
     {
         return Err("ambiguous outer sequence references; raw batch retained".into());
     }
-    Ok(best)
+    Ok((best, scores))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn shared_windows_keep_delayed_targets_quiet_noise_and_complete_ir_tails() {
+        let sweep = Sweep {
+            duration_ms: 1000,
+            peak_dbfs: -24.0,
+            start_hz: 200.0,
+            end_hz: 10000.0,
+        };
+        let source = sweep.samples(48000).unwrap();
+        let mut audio = vec![0.0; source.len() * 7 + 48000];
+        for i in 0..7 {
+            // Tiny local reference changes exercise rounding at the IR tail.
+            let shift = if i % 2 == 1 {
+                7680
+            } else if i == 2 {
+                2
+            } else {
+                0
+            };
+            let start = 24000 + i * source.len() + shift;
+            for (dst, src) in audio[start..].iter_mut().zip(&source) {
+                *dst += src;
+            }
+        }
+        let ranges = windows(&audio, 48000, 48000, sweep, 3).unwrap();
+        for range in ranges {
+            let samples = &audio[range];
+            let timing = crate::timing::analyze(samples, 48000, 48000, sweep).unwrap();
+            assert!((timing.relative_peak_delay_ms.unwrap() - 160.0).abs() < 0.1);
+            let ir = crate::impulse::analyze(samples, 48000, 48000, sweep, &timing).unwrap();
+            assert!(
+                ir.relative_arrival_ms.is_some(),
+                "{:?}",
+                ir.unresolved_reasons
+            );
+            let diagnostics = crate::diagnostics::analyze(samples, 48000, 48000, sweep).unwrap();
+            assert_eq!(
+                diagnostics.segments.unwrap()[1].status,
+                crate::diagnostics::SegmentStatus::Detected
+            );
+        }
+        // A dropped capture block near the last target must not become linear drift.
+        let mut audio = vec![0.0; source.len() * 13 + 48000];
+        for i in 0..13 {
+            let start = 24000 + i * source.len();
+            for (dst, src) in audio[start..].iter_mut().zip(&source) {
+                *dst += src;
+            }
+        }
+        let at = 24000 + 11 * source.len();
+        audio.drain(at..at + 1024);
+        assert!(
+            windows(&audio, 48000, 48000, sweep, 6)
+                .unwrap_err()
+                .contains("inconsistent timing")
+        );
+    }
     #[test]
     fn zero_batch_is_reported_as_missing_input_not_missing_references() {
         let sweep = Sweep {

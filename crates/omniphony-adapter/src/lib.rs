@@ -394,7 +394,8 @@ fn validate_snapshot(snapshot: &Snapshot) -> std::result::Result<(), String> {
         || snapshot.revision.len() > 128
         || snapshot.outputs.len() > 512
         || !snapshot.master_gain_db.is_finite()
-        || snapshot.max_delay_ms != protocol::MAX_DELAY_MS
+        || !snapshot.max_delay_ms.is_finite()
+        || !(0.0..=protocol::SETTLE_MS as f32).contains(&snapshot.max_delay_ms)
     {
         return Err("invalid renderer snapshot".into());
     }
