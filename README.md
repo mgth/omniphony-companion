@@ -37,13 +37,22 @@ The Rust/egui desktop window lets you:
   frequency-band arrival candidates even while disconnected from Omniphony.
 - Inspect frequency response, peak-energy arrival versus frequency and group
   delay in the result graphs. Reanalyze an old accepted take to add these views.
+- Inspect signed impulse waveforms and predicted six-cycle tone bursts at
+  selectable frequencies, including source overlays and relative phase.
+- Browse results in a resizable, scrollable panel below the speaker list.
 
 **Captured · arrival candidate** means the new impulse analysis found a repeatable
-early peak. **Captured · arrival needs review** means the impulse responses are
+early peak. **Captured · arrival unresolved** means the impulse responses are
 available but the timing evidence disagrees. Both are acquisition successes;
 neither authorizes correction. The older correlation diagnostics remain in the saved report and may still
 show **Unresolved**. Increasing volume does not resolve
 arrival ambiguity.
+
+There is no manual approval step for an unresolved arrival. Expand **Arrival
+diagnostics** below the graphs to inspect the reasons. The new **Signed waveform**
+and **Virtual burst** tabs provide experimental inspection views. Virtual bursts
+are derived from the measured impulse response; no new burst is played. See
+[signed waveforms and virtual bursts](docs/virtual-bursts.md).
 
 The **Arrival / frequency** view helps inspect timing differences across a
 speaker's frequency range. **Group delay** also includes crossover phase and room
@@ -89,6 +98,8 @@ cargo run --locked -p companion-ui --example preview -- --batch-progress
 cargo run --locked -p companion-ui --example preview -- --frequency-response
 cargo run --locked -p companion-ui --example preview -- --energy-arrival
 cargo run --locked -p companion-ui --example preview -- --group-delay
+cargo run --locked -p companion-ui --example preview -- --signed-waveform
+cargo run --locked -p companion-ui --example preview -- --tone-burst
 ```
 
 This fixture window is labelled **UI PREVIEW · NO AUDIO**. Its speakers and

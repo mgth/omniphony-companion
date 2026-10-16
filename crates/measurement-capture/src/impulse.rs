@@ -51,6 +51,7 @@ pub struct ImpulseSegment {
     pub envelope_step_ms: f64,
     pub spectral: Option<crate::spectral::SpectralReport>,
     pub spectral_error: Option<String>,
+    pub waveforms: Option<crate::waveform::WaveformReport>,
 }
 
 /// The timing report must come from `timing::analyze` on these same samples.
@@ -240,6 +241,9 @@ pub fn analyze(
                         .log10()) as f32
             })
             .collect();
+        let waveforms = spectral.as_ref().ok().and_then(|s| {
+            crate::waveform::analyze(&full_response, rate, pre, s, candidate.or(candidates[0]))
+        });
         segments.push(ImpulseSegment {
             role,
             correlation_start_frame: peak,
@@ -257,6 +261,7 @@ pub fn analyze(
             envelope_step_ms: bucket as f64 / rate * 1000.0,
             spectral: spectral.as_ref().ok().cloned(),
             spectral_error: spectral.err(),
+            waveforms,
         });
         analysis_responses.push(wide);
     }

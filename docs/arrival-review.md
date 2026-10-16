@@ -74,8 +74,9 @@ Use **Review a saved take · no playback → Analyze saved take** in the UI or:
 cargo run --locked -p companion-cli -- capture review --take sessions/example-take
 ```
 
-The result dialog lets you select reference-before, speaker or reference-after.
+The results panel lets you select reference-before, speaker or reference-after.
 Its graph tabs also offer [frequency response and frequency-dependent timing](spectral-timing.md).
+It also includes [signed waveforms and virtual bursts](virtual-bursts.md).
 Plot time is relative to that segment's correlation peak; it is not absolute
 propagation delay. Markers can remain visible while the combined arrival estimate
 is withheld. The source microphone/position/reference are shown, without changing

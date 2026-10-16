@@ -92,6 +92,18 @@ pub fn ready() -> (Controller, Arc<AtomicUsize>) {
 pub fn arrival_review() -> companion_service::review::SavedReview {
     use companion_service::review::{ImpulseReport, ImpulseSegment, SavedReview};
     use measurement_capture::timing::TimingReport;
+    let mut h = vec![0.0; 12001];
+    h[4560] = -0.7;
+    h[4944] = 0.35;
+    let spectral = measurement_capture::spectral::analyze(
+        &h,
+        48000.0,
+        4800,
+        companion_service::controller::Settings::default().sweep,
+    )
+    .unwrap();
+    let waveforms =
+        measurement_capture::waveform::analyze(&h, 48000.0, 4800, &spectral, Some(-5.0));
     let segment = ImpulseSegment {
         role: "speaker",
         correlation_start_frame: 10000.0,
@@ -128,6 +140,7 @@ pub fn arrival_review() -> companion_service::review::SavedReview {
                 .collect(),
         }),
         spectral_error: None,
+        waveforms,
         envelope_db: (0..1250)
             .map(|i| {
                 let ms = i as f32 * 0.2 - 100.0;

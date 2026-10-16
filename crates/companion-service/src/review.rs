@@ -8,6 +8,7 @@ pub use measurement_capture::diagnostics::{
 };
 pub use measurement_capture::impulse::{ImpulseReport, ImpulseSegment};
 pub use measurement_capture::spectral::{SpectralPoint, SpectralReport};
+pub use measurement_capture::waveform::{BurstResponse, SignedTrace, TracePair, WaveformReport};
 use measurement_capture::{MAX_SECONDS, diagnostics, impulse, timing};
 use omniphony_adapter::{Progress, SignalState, Snapshot, Sweep, protocol};
 use serde::{Deserialize, Serialize};

@@ -70,6 +70,44 @@ fn click(app: &mut CompanionApp, ctx: &egui::Context, pos: Pos2, size: Vec2) {
     );
 }
 
+fn scroll_results(app: &mut CompanionApp, ctx: &egui::Context, size: Vec2, delta: f32) {
+    let pos = Pos2::new(size.x - 70.0, size.y - 85.0);
+    frame(
+        app,
+        ctx,
+        vec![
+            Event::PointerMoved(pos),
+            Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: Vec2::new(0.0, delta),
+                modifiers: Default::default(),
+            },
+        ],
+        size,
+    );
+    for _ in 0..20 {
+        frame(app, ctx, vec![], size);
+    }
+}
+
+fn find_result_text(app: &mut CompanionApp, ctx: &egui::Context, size: Vec2, needle: &str) -> Rect {
+    scroll_results(app, ctx, size, 10000.0);
+    for _ in 0..30 {
+        let output = frame(app, ctx, vec![], size);
+        if let Some((_, rect)) = labels(&output).into_iter().find(|(t, r)| {
+            (if needle == "Arrival diagnostics" {
+                t == needle
+            } else {
+                t.contains(needle)
+            }) && r.bottom() < size.y - 30.0
+        }) {
+            return rect;
+        }
+        scroll_results(app, ctx, size, -100.0);
+    }
+    panic!("Result text not reachable by scrolling: {needle}");
+}
+
 #[test]
 fn speaker_rows_and_controls_fit_the_minimum_window_and_measure_dispatches() {
     let ctx = egui::Context::default();
@@ -341,14 +379,15 @@ fn offline_arrival_review_renders_without_a_renderer_and_keeps_geometry_finite()
         for _ in 0..3 {
             frame(&mut app, &ctx, vec![], size);
         }
-        let output = frame(&mut app, &ctx, vec![], size);
-        let text = labels(&output);
-        assert!(
-            text.iter()
-                .any(|(t, _)| t.contains("Arrival candidate  +2.400 ms"))
-        );
-        assert!(text.iter().any(|(t, _)| t.contains("Impulse envelope")));
+        find_result_text(&mut app, &ctx, size, "Impulse envelope");
+        let toggle = find_result_text(&mut app, &ctx, size, "Arrival diagnostics");
+        // Each size uses the same UI state; close after inspecting it below.
+        click(&mut app, &ctx, toggle.center(), size);
+        find_result_text(&mut app, &ctx, size, "Arrival candidate  +2.400 ms");
+        let text = labels(&frame(&mut app, &ctx, vec![], size));
         assert!(text.iter().all(|(_, r)| r.is_finite()));
+        let toggle = find_result_text(&mut app, &ctx, size, "Arrival diagnostics");
+        click(&mut app, &ctx, toggle.center(), size);
         assert_eq!(starts.load(Ordering::Relaxed), 0);
     }
 }
@@ -423,6 +462,14 @@ fn unresolved_impulse_review_shows_reasons_instead_of_a_delay() {
     let size = Vec2::new(1160.0, 800.0);
     frame(&mut app, &ctx, vec![], size);
     frame(&mut app, &ctx, vec![], size);
+    let toggle = find_result_text(&mut app, &ctx, size, "Arrival diagnostics");
+    click(&mut app, &ctx, toggle.center(), size);
+    find_result_text(
+        &mut app,
+        &ctx,
+        size,
+        "speaker: detection thresholds disagree",
+    );
     let output = frame(&mut app, &ctx, vec![], size);
     let text = labels(&output);
     assert!(
@@ -430,6 +477,49 @@ fn unresolved_impulse_review_shows_reasons_instead_of_a_delay() {
             .any(|(t, _)| t == "speaker: detection thresholds disagree")
     );
     assert!(!text.iter().any(|(t, _)| t.contains("Arrival candidate  ")));
+}
+
+#[test]
+fn signed_and_virtual_burst_views_stay_below_speakers_and_never_play_audio() {
+    for size in [Vec2::new(850.0, 640.0), Vec2::new(1160.0, 800.0)] {
+        let ctx = egui::Context::default();
+        let (mut controller, starts) = support::ready();
+        controller.state.review = Some(support::arrival_review());
+        let mut app = CompanionApp::preview(&ctx, controller);
+        app.result_plot = companion_ui::ResultPlot::SignedWaveform;
+        frame(&mut app, &ctx, vec![], size);
+        let output = frame(&mut app, &ctx, vec![], size);
+        let text = labels(&output);
+        let results = text.iter().find(|(t, _)| t == "Results").unwrap().1;
+        let speakers = text.iter().find(|(t, _)| t == "Speakers").unwrap().1;
+        assert!(results.top() > speakers.bottom());
+        assert_eq!(
+            ctx.layer_id_at(results.center()).unwrap().order,
+            egui::Order::Background
+        );
+        find_result_text(&mut app, &ctx, size, "Signed impulse response");
+        let tab = find_result_text(&mut app, &ctx, size, "Virtual burst");
+        click(&mut app, &ctx, tab.center(), size);
+        assert_eq!(app.result_plot, companion_ui::ResultPlot::ToneBurst);
+        find_result_text(
+            &mut app,
+            &ctx,
+            size,
+            "Virtual tone burst · predicted from measured IR",
+        );
+        let frequency = find_result_text(&mut app, &ctx, size, "1000 Hz");
+        click(&mut app, &ctx, frequency.center(), size);
+        let output = frame(&mut app, &ctx, vec![], size);
+        let frequency = labels(&output)
+            .into_iter()
+            .find(|(t, _)| t == "2000 Hz")
+            .unwrap()
+            .1;
+        click(&mut app, &ctx, frequency.center(), size);
+        find_result_text(&mut app, &ctx, size, "6 cycles · 3.00 ms");
+        find_result_text(&mut app, &ctx, size, "No burst played");
+        assert_eq!(starts.load(Ordering::Relaxed), 0);
+    }
 }
 
 #[test]
@@ -445,15 +535,14 @@ fn rejected_target_review_explains_routing_evidence_without_fabricating_a_delay(
         }
         let output = frame(&mut app, &ctx, vec![], size);
         let text = labels(&output);
-        assert!(text.iter().any(|(t, _)| t == "No target sweep detected"));
-        assert!(
-            text.iter()
-                .any(|(t, _)| t.contains("Original take rejected"))
-        );
-        assert!(text.iter().any(|(t, _)| t == "Reference after"));
-        assert!(
-            text.iter()
-                .any(|(t, _)| t.contains("Check the selected speaker's output route"))
+        find_result_text(&mut app, &ctx, size, "No target sweep detected");
+        find_result_text(&mut app, &ctx, size, "Original take rejected");
+        find_result_text(&mut app, &ctx, size, "Reference after");
+        find_result_text(
+            &mut app,
+            &ctx,
+            size,
+            "Check the selected speaker's output route",
         );
         assert!(!text.iter().any(|(t, _)| t.contains("Arrival candidate  ")));
         assert!(text.iter().all(|(_, r)| r.is_finite()));

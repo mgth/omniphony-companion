@@ -1,5 +1,6 @@
 //! Native presentation only. Workers and measurement ownership live in companion-service.
 mod spectral_plot;
+mod waveform_plot;
 use companion_service::{
     controller::{Controller, Job, Take},
     measurement::MeasureProgress,
@@ -25,11 +26,16 @@ pub enum ResultPlot {
     FrequencyResponse,
     EnergyArrival,
     GroupDelay,
+    SignedWaveform,
+    ToneBurst,
 }
 
 pub struct CompanionApp {
     pub controller: Controller,
     pub result_plot: ResultPlot,
+    waveform_view: waveform_plot::State,
+    saved_selected: bool,
+    last_review_file: Option<std::path::PathBuf>,
     endpoint: String,
     closing: bool,
     selected_result: Option<Take>,
@@ -84,6 +90,9 @@ impl CompanionApp {
         Self {
             controller,
             result_plot: ResultPlot::default(),
+            waveform_view: waveform_plot::State::default(),
+            saved_selected: false,
+            last_review_file: None,
             endpoint: "127.0.0.1:9000".into(),
             closing: false,
             selected_result: None,
@@ -104,6 +113,18 @@ impl CompanionApp {
 
     pub fn draw(&mut self, ctx: &egui::Context) {
         self.controller.poll();
+        let review_file = self
+            .controller
+            .state
+            .review
+            .as_ref()
+            .map(|r| r.report_file.clone());
+        if review_file != self.last_review_file {
+            if review_file.is_some() {
+                self.saved_selected = true;
+            }
+            self.last_review_file = review_file;
+        }
         if ctx.input(|i| i.viewport().close_requested()) && self.controller.measuring() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.closing = true;
@@ -244,9 +265,28 @@ impl CompanionApp {
                     .fill(BG)
                     .inner_margin(egui::Margin::same(24)),
             )
-            .show(ctx, |ui| self.speakers(ui));
-        self.result_window(ctx);
-        self.review_window(ctx);
+            .show(ctx, |ui| {
+                let height = ui.available_height();
+                let has_result =
+                    self.selected_result.is_some() || self.controller.state.review.is_some();
+                let panel = if has_result {
+                    egui::TopBottomPanel::bottom("results_panel")
+                        .resizable(true)
+                        .default_height((height * 0.65).min((height - 190.0).max(140.0)))
+                        .height_range(140.0..=(height - 190.0).max(140.0))
+                } else {
+                    egui::TopBottomPanel::bottom("empty_results_panel").exact_height(75.0)
+                };
+                panel
+                    .frame(
+                        egui::Frame::new()
+                            .fill(PANEL)
+                            .inner_margin(egui::Margin::same(10)),
+                    )
+                    .show_inside(ui, |ui| self.results(ui));
+                ui.set_clip_rect(ui.available_rect_before_wrap().intersect(ui.clip_rect()));
+                self.speakers(ui);
+            });
         self.persist_preferences();
     }
 
@@ -531,26 +571,13 @@ impl CompanionApp {
         }
         ui.add_space(12.0);
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Speakers").size(23.0).strong());
+            ui.label(RichText::new("Speakers").size(23.0).strong()).on_hover_text("Measure individually or capture checked speakers. Choose the playback sink in Studio / Audio Output / Output device.");
             if let Some(snapshot) = &self.controller.state.snapshot {
                 ui.add_space(4.0);
                 badge(ui, &format!("{}", snapshot.outputs.len()), MUTED);
             }
         });
-        ui.label(
-            RichText::new(
-                "Measure individually or capture all checked speakers with shared references.",
-            )
-            .color(MUTED),
-        );
-        ui.label(
-            RichText::new(
-                "Choose the speaker playback sink in Studio / Audio Output / Output device.",
-            )
-            .small()
-            .color(MUTED),
-        );
-        ui.add_space(18.0);
+        ui.add_space(4.0);
         ui.horizontal(|ui| {
             let readiness = self.controller.batch_outputs();
             if ui
@@ -692,6 +719,7 @@ impl CompanionApp {
                                     ui.add(egui::Label::new(RichText::new(text).small().color(color)).truncate());
                                     if ui.small_button("View result").clicked() {
                                         self.selected_result = Some(take.clone());
+                                        self.saved_selected = false;
                                     }
                                 } else if let Err(reason) = &readiness {
                                     ui.add(egui::Label::new(RichText::new(reason).small().color(MUTED)).truncate()).on_hover_text(reason);
@@ -709,6 +737,7 @@ impl CompanionApp {
                         let (status, color) = take_status(take);
                         if ui.button(RichText::new(format!("{} · {status}", take.output_id)).color(color)).clicked() {
                             self.selected_result = Some(take.clone());
+                            self.saved_selected = false;
                         }
                     }
                 });
@@ -761,26 +790,71 @@ impl CompanionApp {
         );
     }
 
-    fn result_window(&mut self, ctx: &egui::Context) {
+    fn results(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Results").size(18.0).strong());
+            if let Some(take) = &self.selected_result {
+                ui.selectable_value(
+                    &mut self.saved_selected,
+                    false,
+                    format!("Take · {}", take.output_id),
+                );
+            }
+            if let Some(review) = &self.controller.state.review {
+                ui.selectable_value(
+                    &mut self.saved_selected,
+                    true,
+                    format!("Saved · {}", review.output_id),
+                );
+            }
+        });
+        let scroll_id = egui::Id::new((
+            "result_scroll",
+            self.saved_selected,
+            self.controller
+                .state
+                .review
+                .as_ref()
+                .map(|r| &r.report_file),
+            self.selected_result
+                .as_ref()
+                .and_then(|t| t.outcome.as_ref().ok())
+                .map(|o| &o.directory),
+        ));
+        egui::ScrollArea::vertical()
+            .id_salt(scroll_id)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                if self.saved_selected && self.controller.state.review.is_some() {
+                    self.review_panel(ui);
+                } else if self.selected_result.is_some() {
+                    self.result_panel(ui);
+                } else {
+                    ui.label(
+                        RichText::new("Choose View result on a speaker, or analyze a saved take.")
+                            .color(MUTED),
+                    );
+                }
+            });
+    }
+
+    fn result_panel(&mut self, ui: &mut egui::Ui) {
         let Some(take) = &self.selected_result else {
             return;
         };
-        let mut open = true;
         let mut review_requested = None;
-        egui::Window::new(format!("Measurement · {}", take.output_id)).open(&mut open).default_width(600.0)
-            .vscroll(true).default_height(600.0).max_height(600.0).resizable(true).show(ctx, |ui| {
+        ui.push_id("live_result", |ui| {
                 let (status, color) = take_status(take);
                 ui.label(RichText::new(status).size(20.0).color(color).strong());
-                ui.add_space(10.0);
-                ui.label(format!("Microphone: {} · Channel {}", take.settings.microphone_id, take.settings.input_channel));
-                ui.label(format!("Position: {}", take.settings.position_id));
-                ui.label(format!("Reference: {}", take.settings.reference_output.as_deref().unwrap_or("—")));
+                ui.label(RichText::new(format!("{} · {} · Channel {} · Reference: {}", take.settings.microphone_id, take.settings.position_id, take.settings.input_channel, take.settings.reference_output.as_deref().unwrap_or("—"))).small().color(MUTED));
                 match &take.outcome {
                     Ok(outcome) => {
                         if take.settings.device.as_deref().is_some_and(|s| s.starts_with("pipewire:monitor:")) { ui.label(RichText::new("Sink monitor · not an acoustic microphone measurement").color(WARM)); }
-                        if let Some(report) = &outcome.diagnostics { draw_diagnostics(ui, report); }
-                        if let Some(impulse) = &outcome.impulse { draw_impulse(ui, impulse, &mut self.result_plot); }
+                        if let Some(impulse) = &outcome.impulse { draw_impulse(ui, impulse, &mut self.result_plot, &mut self.waveform_view); }
                         if let Some(error) = &outcome.impulse_error { ui.label(RichText::new(error).color(WARM)); }
+                        if let Some(report) = &outcome.diagnostics {
+                            egui::CollapsingHeader::new("Acquisition diagnostics").default_open(outcome.impulse.is_none()).show(ui, |ui| draw_diagnostics(ui, report));
+                        }
                         if let Some(timing) = &outcome.timing {
                             ui.add_space(12.0);
                             egui::Grid::new("timing_values").spacing([32.0, 10.0]).show(ui, |ui| {
@@ -813,81 +887,63 @@ impl CompanionApp {
         if let Some(path) = review_requested {
             self.review_path = path;
             self.controller.review_saved(&self.review_path);
-            open = false;
-        }
-        if !open {
-            self.selected_result = None;
+            self.saved_selected = true;
         }
     }
-    fn review_window(&mut self, ctx: &egui::Context) {
+    fn review_panel(&mut self, ui: &mut egui::Ui) {
         let Some(review) = &self.controller.state.review else {
             return;
         };
-        let mut open = true;
-        egui::Window::new(format!("Saved take · {}", review.output_id))
-            .id(egui::Id::new("saved_take_review"))
-            .open(&mut open)
-            .default_width(620.0)
-            .default_height(650.0)
-            .max_height(650.0)
-            .vscroll(true)
-            .show(ctx, |ui| {
+        ui.push_id("saved_result", |ui| {
+            ui.label(
+                RichText::new(format!(
+                    "{} · {} · Channel {} · Reference: {}",
+                    review.microphone_id,
+                    review.position_id,
+                    review.input_channel,
+                    review.reference_output_id
+                ))
+                .small()
+                .color(MUTED),
+            );
+            if review.origin == "sink_monitor_capture" {
                 ui.label(
-                    RichText::new("Offline measurement review")
-                        .size(20.0)
-                        .strong(),
+                    RichText::new("Sink monitor · not an acoustic microphone measurement")
+                        .color(WARM),
                 );
-                ui.label(format!(
-                    "{} · {} · Channel {}",
-                    review.microphone_id, review.position_id, review.input_channel
-                ));
-                ui.label(format!(
-                    "Speaker: {} · Reference: {}",
-                    review.output_id, review.reference_output_id
-                ));
-                if review.origin == "sink_monitor_capture" {
-                    ui.label(
-                        RichText::new("Sink monitor · not an acoustic microphone measurement")
-                            .color(WARM),
-                    );
-                }
-                if let Some(reason) = &review.original_rejection_reason {
-                    ui.label(
-                        RichText::new(format!("Original take rejected: {reason}")).color(WARM),
-                    );
-                }
-                draw_diagnostics(ui, &review.diagnostics);
-                if let Some(error) = &review.analysis_error {
-                    ui.label(RichText::new(error).color(WARM));
-                }
-                if let Some(impulse) = &review.impulse {
-                    draw_impulse(ui, impulse, &mut self.result_plot);
-                }
-                if let Some(error) = &review.impulse_error {
-                    ui.label(RichText::new(error).color(WARM));
-                }
-                ui.separator();
+            }
+            if let Some(reason) = &review.original_rejection_reason {
+                ui.label(RichText::new(format!("Original take rejected: {reason}")).color(WARM));
+            }
+            if let Some(error) = &review.analysis_error {
+                ui.label(RichText::new(error).color(WARM));
+            }
+            if let Some(impulse) = &review.impulse {
+                draw_impulse(ui, impulse, &mut self.result_plot, &mut self.waveform_view);
+            }
+            if let Some(error) = &review.impulse_error {
+                ui.label(RichText::new(error).color(WARM));
+            }
+            egui::CollapsingHeader::new("Acquisition diagnostics")
+                .default_open(review.impulse.is_none())
+                .show(ui, |ui| draw_diagnostics(ui, &review.diagnostics));
+            ui.separator();
 
-                ui.label(RichText::new("New analysis report").small().color(MUTED));
-                ui.label(
-                    RichText::new(review.report_file.display().to_string())
-                        .small()
-                        .monospace(),
-                );
-                if ui.button("Copy analysis path").clicked() {
-                    ui.ctx().copy_text(review.report_file.display().to_string());
-                }
-                ui.label(
-                    RichText::new(
-                        "Original files preserved · No audio played · No correction applied",
-                    )
+            ui.label(RichText::new("New analysis report").small().color(MUTED));
+            ui.label(
+                RichText::new(review.report_file.display().to_string())
+                    .small()
+                    .monospace(),
+            );
+            if ui.button("Copy analysis path").clicked() {
+                ui.ctx().copy_text(review.report_file.display().to_string());
+            }
+            ui.label(
+                RichText::new("Original files preserved · No audio played · No correction applied")
                     .small()
                     .color(MUTED),
-                );
-            });
-        if !open {
-            self.controller.state.review = None;
-        }
+            );
+        });
     }
 }
 
@@ -974,7 +1030,7 @@ fn take_status(take: &Take) -> (&str, Color32) {
             ("Captured · arrival candidate", ACCENT)
         }
         Ok(outcome) if outcome.accepted && outcome.impulse.is_some() => {
-            ("Captured · arrival needs review", WARM)
+            ("Captured · arrival unresolved", WARM)
         }
         Ok(outcome)
             if outcome.accepted
@@ -1073,14 +1129,32 @@ fn draw_arrival_summary(ui: &mut egui::Ui, report: &ImpulseReport) {
     ui.label(RichText::new("Experimental arrival evidence; direct path and automatic correction are not validated.").small().color(MUTED));
 }
 
-fn draw_impulse(ui: &mut egui::Ui, report: &ImpulseReport, plot: &mut ResultPlot) {
-    ui.add_space(12.0);
-    if *plot == ResultPlot::Impulse {
-        draw_arrival_summary(ui, report);
-    } else {
-        egui::CollapsingHeader::new("Arrival diagnostics")
-            .show(ui, |ui| draw_arrival_summary(ui, report));
+fn draw_impulse(
+    ui: &mut egui::Ui,
+    report: &ImpulseReport,
+    plot: &mut ResultPlot,
+    waveform: &mut waveform_plot::State,
+) {
+    draw_impulse_plot(ui, report, plot, waveform);
+    if report.relative_arrival_ms.is_none() {
+        ui.label(
+            RichText::new(
+                "Arrival unresolved · Inspect Arrival diagnostics; no manual approval is required.",
+            )
+            .small()
+            .color(WARM),
+        );
     }
+    egui::CollapsingHeader::new("Arrival diagnostics")
+        .show(ui, |ui| draw_arrival_summary(ui, report));
+}
+
+fn draw_impulse_plot(
+    ui: &mut egui::Ui,
+    report: &ImpulseReport,
+    plot: &mut ResultPlot,
+    waveform: &mut waveform_plot::State,
+) {
     let id = ui.id().with("impulse_segment");
     let mut selected: usize = ui.data_mut(|d| d.get_persisted(id)).unwrap_or(1);
     selected = selected.min(2);
@@ -1104,10 +1178,25 @@ fn draw_impulse(ui: &mut egui::Ui, report: &ImpulseReport, plot: &mut ResultPlot
             (ResultPlot::FrequencyResponse, "Frequency response"),
             (ResultPlot::EnergyArrival, "Arrival / frequency"),
             (ResultPlot::GroupDelay, "Group delay"),
+            (ResultPlot::SignedWaveform, "Signed waveform"),
+            (ResultPlot::ToneBurst, "Virtual burst"),
         ] {
             ui.selectable_value(plot, mode, label);
         }
     });
+    if matches!(*plot, ResultPlot::SignedWaveform | ResultPlot::ToneBurst) {
+        if let Some(report) = &segment.waveforms {
+            waveform_plot::draw(ui, report, *plot, waveform);
+        } else {
+            ui.label(
+                RichText::new(
+                    "Reanalyze this take to generate signed waveforms and virtual bursts.",
+                )
+                .color(WARM),
+            );
+        }
+        return;
+    }
     if *plot != ResultPlot::Impulse {
         if let Some(spectral) = &segment.spectral {
             spectral_plot::draw(ui, spectral, *plot);
