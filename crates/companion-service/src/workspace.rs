@@ -23,6 +23,20 @@ pub struct TakeReference {
     pub settings: Settings,
     pub result: Result<PathBuf, String>,
 }
+impl From<&Take> for TakeReference {
+    fn from(t: &Take) -> Self {
+        Self {
+            output_id: t.output_id.clone(),
+            revision: t.revision.clone(),
+            settings: t.settings.clone(),
+            result: t
+                .outcome
+                .as_ref()
+                .map(|o| absolute(&o.directory))
+                .map_err(Clone::clone),
+        }
+    }
+}
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WorkspaceIndex {
@@ -109,6 +123,7 @@ pub fn absolute(path: &Path) -> PathBuf {
 
 #[derive(Default)]
 pub struct RestoredWorkspace {
+    pub analyses: crate::analysis_cache::Index,
     pub index: WorkspaceIndex,
     pub takes: Vec<Take>,
     pub snapshot: Option<Snapshot>,
@@ -231,6 +246,9 @@ pub fn restore(
         warnings,
         ..Default::default()
     };
+    let (analyses, warnings) = crate::analysis_cache::scan(&index.takes);
+    restored.analyses = analyses;
+    restored.warnings.extend(warnings);
     let mut budget = REPORT_BUDGET;
     // Newest results get priority if the bounded report budget is exhausted.
     for reference in index.takes.into_iter().rev() {

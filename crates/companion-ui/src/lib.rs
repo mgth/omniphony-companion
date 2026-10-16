@@ -33,7 +33,8 @@ pub struct CompanionApp {
     pub result_plot: ResultPlot,
     waveform_view: waveform_plot::State,
     saved_selected: bool,
-    last_review_file: Option<std::path::PathBuf>,
+    pending_review_folder: Option<std::path::PathBuf>,
+    attempted_analysis: Option<std::path::PathBuf>,
     endpoint: String,
     closing: bool,
     selected_result: Option<Take>,
@@ -98,6 +99,7 @@ impl CompanionApp {
             controller.refresh_inputs();
         }
         Self {
+            saved_selected: controller.state.review.is_some(),
             controller,
             pending_view: None,
             last_workspace_revision: u64::MAX,
@@ -105,8 +107,8 @@ impl CompanionApp {
             last_alignment: None,
             result_plot: ResultPlot::default(),
             waveform_view: waveform_plot::State::default(),
-            saved_selected: false,
-            last_review_file: None,
+            pending_review_folder: None,
+            attempted_analysis: None,
             endpoint: "127.0.0.1:9000".into(),
             closing: false,
             selected_result: None,
@@ -163,12 +165,6 @@ impl CompanionApp {
                 .alignment
                 .as_ref()
                 .map(|a| a.directory.clone());
-            self.last_review_file = self
-                .controller
-                .state
-                .review
-                .as_ref()
-                .map(|r| r.report_file.clone());
         }
         let alignment_path = self
             .controller
@@ -177,21 +173,12 @@ impl CompanionApp {
             .as_ref()
             .map(|a| a.directory.clone());
         if alignment_path != self.last_alignment {
-            self.show_alignment = alignment_path.is_some();
+            if self.selected_result.is_none() && !self.saved_selected {
+                self.show_alignment = alignment_path.is_some();
+            }
             self.last_alignment = alignment_path;
         }
-        let review_file = self
-            .controller
-            .state
-            .review
-            .as_ref()
-            .map(|r| r.report_file.clone());
-        if review_file != self.last_review_file {
-            if review_file.is_some() {
-                self.saved_selected = true;
-            }
-            self.last_review_file = review_file;
-        }
+        self.sync_selected_analysis();
         if ctx.input(|i| i.viewport().close_requested())
             && (self.controller.cancellable()
                 || matches!(self.controller.state.job, Some(Job::ApplyAlignment)))
@@ -351,6 +338,7 @@ impl CompanionApp {
             .show(ctx, |ui| {
                 let height = ui.available_height();
                 let has_result = self.selected_result.is_some()
+                    || self.saved_selected
                     || self.controller.state.review.is_some()
                     || self.controller.state.alignment.is_some();
                 let reserved = if self.show_alignment { 260.0 } else { 190.0 };
@@ -702,8 +690,7 @@ impl CompanionApp {
                 )
                 .clicked()
             {
-                self.show_alignment = false;
-                self.controller.review_saved(&self.review_path);
+                self.analyze_selected_folder(self.review_path.clone());
             }
             if ui
                 .add_enabled(
@@ -712,6 +699,7 @@ impl CompanionApp {
                 )
                 .clicked()
             {
+                self.show_alignment = true;
                 self.controller.load_alignment(&self.review_path);
             }
             ui.label(
@@ -794,6 +782,7 @@ impl CompanionApp {
                 .on_disabled_hover_text(ready.as_ref().err().map(String::as_str).unwrap_or(""))
                 .clicked()
             {
+                self.show_alignment = true;
                 self.controller.start_alignment();
             }
             ui.label(
@@ -956,11 +945,10 @@ impl CompanionApp {
                                 }
                                 if active { self.row_progress(ui); }
                                 else if let Some(take) = &take {
-                                    let (text, color) = take_status(take);
+                                    let (text, color) = self.measurement_status(take);
                                     ui.add(egui::Label::new(RichText::new(text).small().color(color)).truncate());
                                     if ui.small_button("View result").clicked() {
-                                        self.show_alignment = false; self.selected_result = Some(take.clone());
-                                        self.saved_selected = false;
+                                        self.select_take(take.clone());
                                     }
                                 } else if let Err(reason) = &readiness {
                                     ui.add(egui::Label::new(RichText::new(reason).small().color(MUTED)).truncate()).on_hover_text(reason);
@@ -974,13 +962,14 @@ impl CompanionApp {
             if !self.controller.state.takes.is_empty() {
                 ui.add_space(8.0);
                 egui::CollapsingHeader::new(format!("Recent takes ({})", self.controller.state.takes.len())).show(ui, |ui| {
+                    let mut selected = None;
                     for take in self.controller.state.takes.iter().rev() {
-                        let (status, color) = take_status(take);
+                        let (status, color) = self.measurement_status(take);
                         if ui.button(RichText::new(format!("{} · {status}", take.output_id)).color(color)).clicked() {
-                            self.show_alignment = false; self.selected_result = Some(take.clone());
-                            self.saved_selected = false;
+                            selected = Some(take.clone());
                         }
                     }
+                    if let Some(take) = selected { self.select_take(take); }
                 });
             }
         });
@@ -1032,9 +1021,110 @@ impl CompanionApp {
         );
     }
 
+    fn select_take(&mut self, take: Take) {
+        self.selected_result = Some(take);
+        self.show_alignment = false;
+        self.saved_selected = false;
+        self.pending_review_folder = None;
+        self.attempted_analysis = None;
+        self.sync_selected_analysis();
+    }
+
+    fn analyze_selected_folder(&mut self, path: String) {
+        self.review_path = path.trim().to_owned();
+        self.selected_result = None;
+        self.show_alignment = false;
+        self.saved_selected = true;
+        self.pending_review_folder = Some(companion_service::workspace::absolute(
+            std::path::Path::new(&self.review_path),
+        ));
+        self.attempted_analysis = None;
+        self.controller.review_saved(&self.review_path);
+    }
+
+    // Selection owns the visible report. A worker finishing for another speaker cannot
+    // change it, and a failed cache load is not retried on every UI frame.
+    fn sync_selected_analysis(&mut self) {
+        if self.selected_result.is_none()
+            && let Some(review) = self.active_review()
+        {
+            let folder = companion_service::workspace::absolute(&review.directory);
+            self.selected_result = self
+                .controller
+                .state
+                .takes
+                .iter()
+                .rev()
+                .find(|t| {
+                    t.outcome.as_ref().is_ok_and(|o| {
+                        companion_service::workspace::absolute(&o.directory) == folder
+                    })
+                })
+                .cloned();
+        }
+        let Some(take) = self.selected_result.as_ref() else {
+            return;
+        };
+        let Some(analysis) = self.controller.analysis_for(take) else {
+            self.saved_selected = false;
+            return;
+        };
+        self.saved_selected = true;
+        if self.active_review().is_none()
+            && !self.controller.busy()
+            && self.attempted_analysis.as_ref() != Some(&analysis.report_file)
+        {
+            self.attempted_analysis = Some(analysis.report_file.clone());
+            let take = take.clone();
+            self.controller.load_analysis(&take);
+        }
+    }
+
+    fn active_review(&self) -> Option<&companion_service::review::SavedReview> {
+        if !self.saved_selected {
+            return None;
+        }
+        let review = self.controller.state.review.as_ref()?;
+        let folder = companion_service::workspace::absolute(&review.directory);
+        if let Some(take) = &self.selected_result {
+            let analysis = self.controller.analysis_for(take)?;
+            if folder != analysis.directory
+                || companion_service::workspace::absolute(&review.report_file)
+                    != analysis.report_file
+            {
+                return None;
+            }
+        } else if self
+            .pending_review_folder
+            .as_ref()
+            .is_some_and(|p| *p != folder)
+        {
+            return None;
+        }
+        Some(review)
+    }
+
+    fn measurement_status(&self, take: &Take) -> (&'static str, Color32) {
+        self.controller
+            .analysis_for(take)
+            .map(analysis_status)
+            .unwrap_or_else(|| take_status(take))
+    }
+
     fn results(&mut self, ui: &mut egui::Ui) {
+        let output = self
+            .selected_result
+            .as_ref()
+            .map(|t| t.output_id.as_str())
+            .or_else(|| self.active_review().map(|r| r.output_id.as_str()));
+        let heading = output.map_or_else(
+            || "Measurement results".into(),
+            |id| format!("{id} · Measurement result"),
+        );
+        let mut selected = None;
+        let mut select_manual = false;
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("Results").size(18.0).strong());
+            ui.label(RichText::new(heading).size(18.0).strong());
             egui::ComboBox::from_id_salt("measurement_history")
                 .selected_text("Previous measurements")
                 .show_ui(ui, |ui| {
@@ -1065,54 +1155,97 @@ impl CompanionApp {
                             )
                             .clicked()
                         {
-                            self.selected_result = Some(take.clone());
-                            self.saved_selected = false;
+                            selected = Some(take.clone());
                         }
                     }
+                    if let Some(review) = &self.controller.state.review {
+                        select_manual = ui
+                            .selectable_label(
+                                false,
+                                format!(
+                                    "{} · Saved analysis · {}",
+                                    review.output_id,
+                                    review.directory.display()
+                                ),
+                            )
+                            .clicked();
+                    }
                 });
-            if let Some(take) = &self.selected_result {
-                ui.selectable_value(
-                    &mut self.saved_selected,
-                    false,
-                    format!("Take · {}", take.output_id),
-                );
-            }
-            if let Some(review) = &self.controller.state.review {
-                ui.selectable_value(
-                    &mut self.saved_selected,
-                    true,
-                    format!("Saved · {}", review.output_id),
-                );
-            }
         });
-        let scroll_id = egui::Id::new((
-            "result_scroll",
-            self.saved_selected,
-            self.controller
+        if let Some(take) = selected {
+            self.select_take(take);
+        }
+        if select_manual {
+            self.selected_result = None;
+            self.saved_selected = true;
+            self.pending_review_folder = self
+                .controller
                 .state
                 .review
                 .as_ref()
-                .map(|r| companion_service::workspace::absolute(&r.report_file)),
-            self.selected_result
-                .as_ref()
-                .and_then(|t| t.outcome.as_ref().ok())
-                .map(|o| companion_service::workspace::absolute(&o.directory)),
-        ));
-        egui::ScrollArea::vertical()
-            .id_salt(scroll_id)
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                if self.saved_selected && self.controller.state.review.is_some() {
-                    self.review_panel(ui);
-                } else if self.selected_result.is_some() {
-                    self.result_panel(ui);
+                .map(|r| companion_service::workspace::absolute(&r.directory));
+        }
+        let folder = self
+            .selected_result
+            .as_ref()
+            .and_then(|t| t.outcome.as_ref().ok())
+            .map(|o| companion_service::workspace::absolute(&o.directory))
+            .or_else(|| {
+                self.active_review()
+                    .map(|r| companion_service::workspace::absolute(&r.directory))
+            })
+            .or_else(|| self.pending_review_folder.clone());
+        if self.saved_selected || self.selected_result.is_some() {
+            ui.label(
+                RichText::new(if self.saved_selected {
+                    "Latest saved analysis"
                 } else {
-                    ui.label(
-                        RichText::new("Choose View result on a speaker, or analyze a saved take.")
-                            .color(MUTED),
-                    );
+                    "Original capture · no saved reanalysis for this take"
+                })
+                .small()
+                .color(MUTED),
+            );
+        }
+        if let Some(folder) = &folder
+            && let Some(alignment) = &self.controller.state.alignment
+            && let Some((pass, count)) = alignment.rows.iter().find_map(|row| {
+                row.take_folders
+                    .iter()
+                    .position(|p| companion_service::workspace::absolute(p) == *folder)
+                    .map(|i| (i + 1, row.take_folders.len()))
+            })
+        {
+            ui.label(
+                RichText::new(format!(
+                    "Pass {pass} of {count} · Alignment combines both passes"
+                ))
+                .small()
+                .color(MUTED),
+            );
+        }
+        let scroll_id = egui::Id::new((
+            "result_scroll",
+            folder,
+            self.active_review()
+                .map(|r| companion_service::workspace::absolute(&r.report_file)),
+        ));
+        egui::ScrollArea::vertical().id_salt(scroll_id).auto_shrink([false, false]).show(ui, |ui| {
+            if self.active_review().is_some() {
+                self.review_panel(ui);
+            } else if self.saved_selected {
+                if self.controller.busy() {
+                    ui.horizontal(|ui| { ui.spinner(); ui.label("Loading selected measurement analysis…"); });
+                } else if let Some(error) = &self.controller.state.review_error {
+                    ui.colored_label(WARM, format!("Selected analysis unavailable: {error}"));
+                } else {
+                    ui.label("Selected analysis unavailable. Choose a measurement or analyze its saved folder again.");
                 }
-            });
+            } else if self.selected_result.is_some() {
+                self.result_panel(ui);
+            } else {
+                ui.label(RichText::new("Choose View result on a speaker, or analyze a saved take.").color(MUTED));
+            }
+        });
     }
 
     fn result_panel(&mut self, ui: &mut egui::Ui) {
@@ -1169,16 +1302,37 @@ impl CompanionApp {
                 ui.label(RichText::new("Arrival candidates are experimental. An early peak is not proof of the direct path. Automatic gain/delay correction remains disabled.").small().color(MUTED));
             });
         if let Some(path) = review_requested {
-            self.review_path = path;
-            self.controller.review_saved(&self.review_path);
-            self.saved_selected = true;
+            self.analyze_selected_folder(path);
         }
     }
     fn review_panel(&mut self, ui: &mut egui::Ui) {
-        let Some(review) = &self.controller.state.review else {
+        let Some(review) = self.active_review().cloned() else {
             return;
         };
         ui.push_id("saved_result", |ui| {
+            let (status, color) = analysis_status(
+                &companion_service::analysis_cache::CachedAnalysis::from_review(&review),
+            );
+            ui.label(RichText::new(status).size(20.0).color(color).strong());
+            if self.selected_result.as_ref().is_some_and(|take| {
+                self.controller
+                    .state
+                    .snapshot
+                    .as_ref()
+                    .is_none_or(|s| s.revision != take.revision)
+                    || self.controller.settings != take.settings
+            }) {
+                ui.colored_label(
+                    WARM,
+                    "Previous measurement · current renderer or capture settings differ",
+                );
+            }
+            if let Some(delay) = review.impulse.as_ref().and_then(|r| r.relative_arrival_ms) {
+                ui.label(format!(
+                    "Arrival relative to {}: {delay:+.3} ms",
+                    review.reference_output_id
+                ));
+            }
             ui.label(
                 RichText::new(format!(
                     "{} · {} · Channel {} · Reference: {}",
@@ -1195,9 +1349,6 @@ impl CompanionApp {
                     RichText::new("Sink monitor · not an acoustic microphone measurement")
                         .color(WARM),
                 );
-            }
-            if let Some(reason) = &review.original_rejection_reason {
-                ui.label(RichText::new(format!("Original take rejected: {reason}")).color(WARM));
             }
             if let Some(error) = &review.analysis_error {
                 ui.label(RichText::new(error).color(WARM));
@@ -1222,7 +1373,24 @@ impl CompanionApp {
                 .show(ui, |ui| draw_diagnostics(ui, &review.diagnostics));
             ui.separator();
 
-            ui.label(RichText::new("New analysis report").small().color(MUTED));
+            egui::CollapsingHeader::new("Original capture details").show(ui, |ui| {
+                ui.label("Historical capture verdict, before this saved reanalysis:");
+                if let Some(reason) = &review.original_rejection_reason {
+                    ui.colored_label(WARM, format!("Original take rejected: {reason}"));
+                } else {
+                    ui.label(if review.original_accepted_for_analysis {
+                        "Original take accepted"
+                    } else {
+                        "Original take not accepted"
+                    });
+                }
+                ui.label(
+                    RichText::new(review.directory.display().to_string())
+                        .small()
+                        .monospace(),
+                );
+            });
+            ui.label(RichText::new("Saved analysis report").small().color(MUTED));
             ui.label(
                 RichText::new(review.report_file.display().to_string())
                     .small()
@@ -1316,7 +1484,24 @@ fn truncate(text: &str, limit: usize) -> String {
         format!("{}…", text.chars().take(limit - 1).collect::<String>())
     }
 }
-fn take_status(take: &Take) -> (&str, Color32) {
+fn analysis_status(
+    analysis: &companion_service::analysis_cache::CachedAnalysis,
+) -> (&'static str, Color32) {
+    if analysis
+        .quality
+        .as_ref()
+        .is_some_and(|q| q.acquisition.grade == companion_service::quality::Grade::Poor)
+    {
+        ("Reanalyzed · quality warning", WARM)
+    } else if analysis.arrival_ms().is_some() {
+        ("Reanalyzed · arrival candidate", ACCENT)
+    } else if analysis.has_response() {
+        ("Reanalyzed · arrival unresolved", WARM)
+    } else {
+        ("Reanalyzed · timing unavailable", WARM)
+    }
+}
+fn take_status(take: &Take) -> (&'static str, Color32) {
     match &take.outcome {
         Ok(o) if !o.accepted && o.timing.is_some() => ("Results available · capture fault", WARM),
         Ok(o) if o.accepted && o.timing.as_ref().is_some_and(|t| !t.warnings.is_empty()) => {

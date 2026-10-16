@@ -22,6 +22,13 @@ children, plus the latest alignment. The previous version did not record a selec
 result or graph, so that first import selects the latest available result. Subsequent
 launches use the saved index and exact view choices rather than rescanning.
 
+For each indexed take, the service also discovers its latest `analysis-*.json`.
+This includes reports produced by older versions of **Reanalyze saved passes**.
+Speaker rows and **View result** use that analysis for the exact take folder and
+speaker identity. The single result view labels its source and alignment pass;
+the original capture verdict remains under **Original capture details**. A saved
+review for another speaker never replaces a selection when its worker finishes.
+
 ## Display state and live state
 
 Loading runs on a background worker and reads the saved reports as they were written.
@@ -44,6 +51,10 @@ revision-checked actions. Restarting a renderer does not make a saved profile fr
 - Display report: 32 MiB; cumulative take/review report budget: 256 MiB, newest first.
   Dense waveform reports can exceed 8 MiB. The core observation reader retains its
   separate 8 MiB limit; increasing the display limit does not relax correction checks.
+- Saved-analysis discovery: 512 entries per known take folder and a separate
+  256 MiB cumulative read budget. Only small identity/quality summaries stay in
+  the index; plots load on selection in a worker. Invalid latest reports produce
+  a warning instead of silently falling back to an older analysis.
 - First-import discovery: at most 4096 directory entries, four levels, only known
   session directory prefixes, with no directory-symlink traversal.
 - Result references update on completed controller events; large report arrays are

@@ -311,6 +311,7 @@ fn whole_alignment_reanalysis_retains_originals_and_cannot_apply_a_profile() {
         fs::create_dir(&path).unwrap();
         fixture(&path);
         change(&path, "capture-report.json", |r| {
+            r.as_object_mut().unwrap().remove("timing");
             r["accepted_for_analysis"] = json!(false);
             r["rejection_reason"] = json!(
                 "sweep 1 signal-to-noise ratio is 19.88 dB, below the 20 dB acquisition limit"
@@ -354,7 +355,51 @@ fn whole_alignment_reanalysis_retains_originals_and_cannot_apply_a_profile() {
         application_uncertain: false,
     };
     let before = fs::read(folders[0].join("capture-report.json")).unwrap();
-    let review = alignment::reanalyze(&original).unwrap();
+    struct Offline;
+    impl companion_service::controller::Backend for Offline {
+        fn inputs(&self) -> Result<Vec<measurement_capture::InputDevice>, String> {
+            panic!("offline review must not enumerate devices")
+        }
+        fn discover(&self, _: std::net::SocketAddr) -> Result<omniphony_adapter::Snapshot, String> {
+            panic!("offline review must not connect")
+        }
+        fn measure(
+            &self,
+            _: companion_service::measurement::MeasureRequest,
+            _: &std::sync::atomic::AtomicBool,
+            _: &mut dyn FnMut(companion_service::measurement::MeasureProgress),
+        ) -> Result<companion_service::measurement::TakeOutcome, String> {
+            panic!("offline review must not measure")
+        }
+    }
+    let mut controller =
+        companion_service::controller::Controller::new(std::sync::Arc::new(Offline));
+    controller.state.alignment = Some(original.clone());
+    controller.reanalyze_alignment();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while controller.busy() {
+        controller.poll();
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    assert!(
+        controller.state.error.is_none(),
+        "{:?}",
+        controller.state.error
+    );
+    assert!(
+        controller.state.workspace_warnings.is_empty(),
+        "{:?}",
+        controller.state.workspace_warnings
+    );
+    assert_eq!(controller.state.takes.len(), 2);
+    assert_eq!(controller.state.analyses.len(), 2);
+    for take in &controller.state.takes {
+        let analysis = controller.analysis_for(take).unwrap();
+        assert!((analysis.arrival_ms().unwrap() - 5.0).abs() < 0.05);
+        assert!(!take.outcome.as_ref().unwrap().accepted);
+    }
+    let review = controller.state.alignment.clone().unwrap();
     assert_ne!(review.directory, original.directory);
     assert!(review.rows[0].qualified.is_some());
     assert_eq!(review.rows[0].quality.len(), 2);

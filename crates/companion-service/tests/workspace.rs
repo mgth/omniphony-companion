@@ -190,3 +190,138 @@ fn display_reports_larger_than_the_core_limit_reload_without_changing_observatio
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     assert!(result.takes[0].outcome.as_ref().unwrap().accepted);
 }
+
+fn saved_analysis(
+    reference: &TakeReference,
+    name: &str,
+    arrival: f64,
+    modified: u64,
+) -> std::path::PathBuf {
+    let path = reference.result.as_ref().unwrap().join(name);
+    write_json(
+        &path,
+        &serde_json::json!({
+            "schema_version": 2, "output_id": reference.output_id,
+            "microphone_id": reference.settings.microphone_id,
+            "position_id": reference.settings.position_id,
+            "reference_output_id": reference.settings.reference_output,
+            "input_channel": reference.settings.input_channel,
+            "capture_sample_rate": reference.settings.sample_rate,
+            "signal": reference.settings.sweep,
+            "impulse": {"relative_arrival_ms": arrival}
+        }),
+    )
+    .unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_times(
+            std::fs::FileTimes::new()
+                .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(modified)),
+        )
+        .unwrap();
+    path
+}
+
+#[test]
+fn restart_finds_latest_legacy_pass_analysis_without_replacing_capture_verdicts() {
+    let dir = tempfile::tempdir().unwrap();
+    let original = fixture(dir.path(), "alignment-1/pass-1/take-1", "R", false);
+    let other = fixture(dir.path(), "take-newer", "R", true);
+    saved_analysis(&original, "analysis-old.json", 9.0, 1);
+    let latest = saved_analysis(&original, "analysis-new.json", 0.3, 2);
+    let source = std::fs::read(
+        original
+            .result
+            .as_ref()
+            .unwrap()
+            .join("capture-report.json"),
+    )
+    .unwrap();
+    let index = WorkspaceIndex {
+        takes: vec![original.clone(), other],
+        ..Default::default()
+    };
+    let restored = workspace::restore(Some(index), &original.settings).unwrap();
+    assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
+    assert_eq!(restored.analyses.len(), 1);
+    let cached = &restored.analyses[original.result.as_ref().unwrap()];
+    assert_eq!(cached.arrival_ms(), Some(0.3));
+    assert_eq!(cached.report_file, latest);
+    assert!(cached.matches_take(&restored.takes[0]));
+    assert!(
+        !cached.matches_take(&restored.takes[1]),
+        "a new take must not inherit an old analysis"
+    );
+    assert!(!restored.takes[0].outcome.as_ref().unwrap().accepted);
+    assert_eq!(
+        source,
+        std::fs::read(
+            original
+                .result
+                .as_ref()
+                .unwrap()
+                .join("capture-report.json")
+        )
+        .unwrap()
+    );
+    assert_eq!(
+        std::fs::read_dir(original.result.as_ref().unwrap())
+            .unwrap()
+            .count(),
+        6
+    );
+}
+
+#[test]
+fn invalid_latest_analysis_is_reported_instead_of_silently_showing_older_or_other_speaker_data() {
+    use companion_service::analysis_cache;
+    for field in [
+        "output_id",
+        "microphone_id",
+        "position_id",
+        "reference_output_id",
+        "input_channel",
+        "capture_sample_rate",
+        "signal",
+        "schema_version",
+        "revision",
+        "corrupt",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let reference = fixture(dir.path(), "take-1", "R", true);
+        saved_analysis(&reference, "analysis-old.json", 3.0, 1);
+        let latest = saved_analysis(&reference, "analysis-new.json", 0.3, 2);
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&latest).unwrap()).unwrap();
+        match field {
+            "corrupt" => {
+                std::fs::write(&latest, b"{broken").unwrap();
+            }
+            "revision" => {
+                let path = latest.parent().unwrap().join("snapshot.json");
+                let mut snapshot: Snapshot = companion_service::files::read_json(&path).unwrap();
+                snapshot.revision = "another capture".into();
+                std::fs::write(&path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+            }
+            _ => {
+                value[field] = match field {
+                    "input_channel" | "capture_sample_rate" | "schema_version" => {
+                        serde_json::json!(99)
+                    }
+                    "signal" => serde_json::json!(omniphony_adapter::Sweep {
+                        peak_dbfs: -45.0,
+                        ..reference.settings.sweep
+                    }),
+                    _ => serde_json::json!("another measurement"),
+                };
+                std::fs::write(&latest, serde_json::to_vec(&value).unwrap()).unwrap();
+            }
+        }
+        let (index, warnings) = analysis_cache::scan(&[reference]);
+        assert!(index.is_empty(), "{field}");
+        assert_eq!(warnings.len(), 1, "{field}");
+        assert!(warnings[0].contains("latest saved analysis unavailable"));
+    }
+}
