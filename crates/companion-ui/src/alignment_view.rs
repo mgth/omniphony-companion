@@ -36,9 +36,10 @@ pub fn draw(ui: &mut egui::Ui, a: &Alignment, busy: bool) -> Option<&'static str
                 .show(ui, |ui| {
                     for title in [
                         "Speaker",
-                        "Arrival",
+                        "Arrival candidate",
                         "Level",
                         "Repeat Δt / ΔL",
+                        "Quality",
                         "Gain: before → target",
                         "Delay: before → target",
                     ] {
@@ -55,7 +56,9 @@ pub fn draw(ui: &mut egui::Ui, a: &Alignment, busy: bool) -> Option<&'static str
                                 q.arrival_repeat_spread_ms, q.level_repeat_spread_db
                             ));
                         } else {
-                            ui.label("Unresolved");
+                            ui.label(row.repeats.iter().rev().find_map(|r| r.arrival_ms)
+                                .map(|v| format!("{v:+.3} ms" )).unwrap_or("Unavailable".into()))
+                                .on_hover_text("Latest available diagnostic estimate; this row has not qualified for correction.");
                             ui.label(
                                 row.repeats
                                     .last()
@@ -63,8 +66,12 @@ pub fn draw(ui: &mut egui::Ui, a: &Alignment, busy: bool) -> Option<&'static str
                                     .map(|v| format!("{v:+.2} dB"))
                                     .unwrap_or("—".into()),
                             );
-                            ui.label("—");
+                            let spread = row.repeats.first().zip(row.repeats.get(1)).and_then(|(a,b)| Some(((a.arrival_ms? - b.arrival_ms?).abs(), (a.level_db? - b.level_db?).abs())));
+                            ui.label(spread.map(|(t,l)| format!("{t:.3} ms / {l:.2} dB")).unwrap_or("—".into()));
                         }
+                        let grade = row.quality.iter().map(|q| q.grade()).min();
+                        ui.label(grade.map(|g| g.label()).unwrap_or("Not rated"))
+                            .on_hover_text(row.quality.iter().flat_map(|q| q.acquisition.details.iter().chain(&q.timing.details).chain(&q.level.details)).cloned().collect::<Vec<_>>().join("\n"));
                         if let Some(speaker) = a.profile.as_ref().and_then(|p| {
                             p.target_snapshot
                                 .speakers
@@ -123,6 +130,10 @@ pub fn draw(ui: &mut egui::Ui, a: &Alignment, busy: bool) -> Option<&'static str
     ui.add_space(8.0);
     ui.label("Targets include existing output settings. Earlier speakers receive delay; louder speakers are attenuated. Levels are relative transfer dB, not SPL.");
     ui.horizontal_wrapped(|ui| {
+        if ui.add_enabled(!busy && a.applied_snapshot.is_none() && !a.application_uncertain, egui::Button::new("Reanalyze saved passes"))
+            .on_hover_text("Recompute diagnostic results and quality from the original audio. Creates a separate report; no playback or correction.").clicked() {
+            action = Some("reanalyze");
+        }
         let ready = !busy && !a.application_uncertain && a.profile.is_some();
         if ui
             .add_enabled(

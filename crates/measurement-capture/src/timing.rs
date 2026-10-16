@@ -24,6 +24,10 @@ pub struct TimingReport {
     pub signal_to_noise_db: [f64; 3],
     pub sweep_rms_dbfs: [f64; 3],
     pub noise_rms_dbfs: f64,
+    #[serde(default)]
+    pub band_noise: Option<crate::noise::BandNoise>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
     pub valid_for_correction: bool,
 }
 #[derive(Clone, Copy)]
@@ -57,10 +61,31 @@ pub fn analyze(
     render_rate: u32,
     sweep: Sweep,
 ) -> Result<TimingReport, String> {
+    analyze_inner(samples, capture_rate, render_rate, sweep, false)
+}
+
+/// Inspect clipped audio without making it eligible for correction.
+pub fn inspect(
+    samples: &[f32],
+    capture_rate: u32,
+    render_rate: u32,
+    sweep: Sweep,
+) -> Result<TimingReport, String> {
+    analyze_inner(samples, capture_rate, render_rate, sweep, true)
+}
+fn analyze_inner(
+    samples: &[f32],
+    capture_rate: u32,
+    render_rate: u32,
+    sweep: Sweep,
+    inspect_clipping: bool,
+) -> Result<TimingReport, String> {
     sweep.validate(render_rate)?;
     if !(8_000..=192_000).contains(&capture_rate)
         || samples.len() > capture_rate as usize * super::MAX_SECONDS as usize
-        || samples.iter().any(|x| !x.is_finite() || x.abs() >= 0.999)
+        || samples
+            .iter()
+            .any(|x| !x.is_finite() || x.abs() > 16.0 || (!inspect_clipping && x.abs() >= 0.999))
     {
         return Err("invalid, clipped, nonfinite or overlong capture".into());
     }
@@ -109,6 +134,8 @@ pub fn analyze(
     let noise = reference_noise(samples, peaks[0].position, effective_rate)?;
     let padding = effective_rate * SETTLE_MS as f64 / 1000.0;
     let body = effective_rate * sweep.duration_ms as f64 / 1000.0;
+    let mut warnings = Vec::new();
+    let mut windows = [(0, 0); 3];
     let mut snr = [0.0; 3];
     let mut sweep_rms_dbfs = [0.0; 3];
     for (i, p) in peaks.iter().enumerate() {
@@ -120,19 +147,23 @@ pub fn analyze(
         let signal_rms = rms(&samples[start..end]).max(1e-10);
         sweep_rms_dbfs[i] = 20.0 * signal_rms.log10();
         snr[i] = 20.0 * (signal_rms / noise).log10();
-        if snr[i] < 20.0 {
-            return Err(format!(
-                "sweep {} signal-to-noise ratio is {:.2} dB, below the 20 dB acquisition limit",
-                i + 1,
-                snr[i]
-            ));
+        windows[i] = (start, end);
+    }
+    let band_noise =
+        crate::noise::estimate(samples, effective_rate, sweep, peaks[0].position, windows)?;
+    for (i, value) in band_noise.signal_to_noise_db.iter().enumerate() {
+        if *value < 20.0 {
+            warnings.push(format!("Sweep {} excited-band signal/noise is {value:.1} dB; estimates are retained with reduced confidence.", i + 1));
         }
     }
     if (sweep_rms_dbfs[0] - sweep_rms_dbfs[2]).abs() > 1.0 {
-        return Err("reference levels changed by more than 1 dB during the take".into());
+        warnings.push("Reference levels changed by more than 1 dB during the take".into());
+    }
+    if samples.iter().any(|x| x.abs() >= 0.999) {
+        warnings.push("Clipped recording: distorted estimates are for inspection only.".into());
     }
     Ok(TimingReport {
-        method: "repeated-reference-correlation-v3".into(),
+        method: "repeated-reference-correlation-v4".into(),
         reference_start_frames: [peaks[0].position, peaks[2].position],
         target_start_frame: peaks[1].position,
         clock_drift_ppm: (!ambiguous_peaks).then_some(ppm),
@@ -140,6 +171,8 @@ pub fn analyze(
         ambiguous_peaks,
         competing_peak_ratio: located.competing_peak_ratio,
         normalized_correlation: peaks.map(|p| p.score),
+        band_noise: Some(band_noise),
+        warnings,
         signal_to_noise_db: snr,
         sweep_rms_dbfs,
         noise_rms_dbfs: 20.0 * noise.log10(),
@@ -409,7 +442,7 @@ mod tests {
         assert!(!report.valid_for_correction);
     }
     #[test]
-    fn noise_is_still_rejected_when_arrivals_are_ambiguous() {
+    fn weak_sweeps_remain_inspectable_with_quality_warnings() {
         let dry = fixture(48000, 0.0, 5.0);
         let mut noisy = dry.clone();
         for i in 960..noisy.len() {
@@ -420,7 +453,18 @@ mod tests {
             state = state.wrapping_mul(1664525).wrapping_add(1013904223);
             *x += ((state as f64 / u32::MAX as f64 - 0.5) * 0.05) as f32;
         }
-        assert!(analyze(&noisy, 48000, 48000, spec()).is_err());
+        let report = analyze(&noisy, 48000, 48000, spec()).unwrap();
+        assert!(!report.warnings.is_empty());
+        assert!(
+            report
+                .band_noise
+                .as_ref()
+                .unwrap()
+                .signal_to_noise_db
+                .iter()
+                .any(|v| *v < 20.0)
+        );
+        assert!(!report.valid_for_correction);
     }
     #[test]
     fn ambiguous_arrivals_do_not_bypass_reference_level_checks() {
@@ -432,11 +476,14 @@ mod tests {
         for x in &mut echo[168000..] {
             *x *= 1.4;
         }
+        let report = analyze(&echo, 48000, 48000, spec()).unwrap();
         assert!(
-            analyze(&echo, 48000, 48000, spec())
-                .unwrap_err()
-                .contains("reference levels changed")
+            report
+                .warnings
+                .iter()
+                .any(|r| r.contains("Reference levels changed"))
         );
+        assert!(!report.valid_for_correction);
     }
     #[test]
     fn multiple_plausible_sequences_are_still_rejected() {

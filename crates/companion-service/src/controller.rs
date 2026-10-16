@@ -741,6 +741,21 @@ impl Controller {
             let _ = sender.send(Event::AlignmentUpdated(Box::new(a), result));
         });
     }
+    pub fn reanalyze_alignment(&mut self) {
+        if self.busy() {
+            return;
+        }
+        let Some(alignment) = self.state.alignment.clone() else {
+            return;
+        };
+        self.state.job = Some(Job::Review);
+        self.state.error = None;
+        let sender = self.sender.clone();
+        std::thread::spawn(move || {
+            let result = catch_job(|| alignment::reanalyze(&alignment));
+            let _ = sender.send(Event::AlignmentLoaded(Box::new(result)));
+        });
+    }
     pub fn load_alignment(&mut self, directory: &str) {
         if self.busy() {
             return;

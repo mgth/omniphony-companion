@@ -9,3 +9,5 @@ pub mod preferences;
 pub mod review;
 pub mod workspace;
 pub type AppResult<T> = Result<T, Box<dyn std::error::Error>>;
+
+pub mod quality;

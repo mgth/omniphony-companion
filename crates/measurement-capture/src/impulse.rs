@@ -63,11 +63,34 @@ pub fn analyze(
     sweep: Sweep,
     timing: &TimingReport,
 ) -> Result<ImpulseReport, String> {
+    analyze_inner(samples, capture_rate, render_rate, sweep, timing, false)
+}
+
+/// Distorted clipped traces may be inspected, but callers must retain their fault.
+pub fn inspect(
+    samples: &[f32],
+    capture_rate: u32,
+    render_rate: u32,
+    sweep: Sweep,
+    timing: &TimingReport,
+) -> Result<ImpulseReport, String> {
+    analyze_inner(samples, capture_rate, render_rate, sweep, timing, true)
+}
+fn analyze_inner(
+    samples: &[f32],
+    capture_rate: u32,
+    render_rate: u32,
+    sweep: Sweep,
+    timing: &TimingReport,
+    inspect_clipping: bool,
+) -> Result<ImpulseReport, String> {
     sweep.validate(render_rate)?;
     sweep.validate(capture_rate)?;
     if samples.is_empty()
         || samples.len() > capture_rate as usize * crate::MAX_SECONDS as usize
-        || samples.iter().any(|x| !x.is_finite() || x.abs() >= 0.999)
+        || samples
+            .iter()
+            .any(|x| !x.is_finite() || x.abs() > 16.0 || (!inspect_clipping && x.abs() >= 0.999))
     {
         return Err("invalid impulse-response input".into());
     }

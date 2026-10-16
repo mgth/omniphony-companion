@@ -92,9 +92,15 @@ fn scroll_results(app: &mut CompanionApp, ctx: &egui::Context, size: Vec2, delta
 
 fn find_result_text(app: &mut CompanionApp, ctx: &egui::Context, size: Vec2, needle: &str) -> Rect {
     scroll_results(app, ctx, size, 10000.0);
-    for _ in 0..30 {
+    for _ in 0..80 {
         let output = frame(app, ctx, vec![], size);
-        if let Some((_, rect)) = labels(&output).into_iter().find(|(t, r)| {
+        let visible = output.shapes.iter().flat_map(|shape| {
+            let mut labels = Vec::new();
+            texts(&shape.shape, &mut labels);
+            labels.retain(|(_, rect)| shape.clip_rect.contains(rect.center()));
+            labels
+        });
+        if let Some((_, rect)) = visible.into_iter().find(|(t, r)| {
             (if needle == "Arrival diagnostics" {
                 t == needle
             } else {
@@ -103,7 +109,7 @@ fn find_result_text(app: &mut CompanionApp, ctx: &egui::Context, size: Vec2, nee
         }) {
             return rect;
         }
-        scroll_results(app, ctx, size, -100.0);
+        scroll_results(app, ctx, size, -40.0);
     }
     panic!("Result text not reachable by scrolling: {needle}");
 }
@@ -399,6 +405,8 @@ fn captured_sweeps_with_ambiguous_arrivals_show_levels_and_withhold_timing() {
             impulse: None,
             impulse_error: None,
             timing: Some(TimingReport {
+                band_noise: None,
+                warnings: vec![],
                 method: "synthetic-ui-fixture".into(),
                 reference_start_frames: [24000.0, 168000.0],
                 target_start_frame: 96000.0,
@@ -430,10 +438,7 @@ fn captured_sweeps_with_ambiguous_arrivals_show_levels_and_withhold_timing() {
     let text = labels(&output);
     assert_eq!(text.iter().filter(|(t, _)| t == "Unresolved").count(), 2);
     assert!(text.iter().any(|(t, _)| t == "25.0 dB"));
-    assert!(
-        text.iter()
-            .any(|(t, _)| t.contains("More volume will not resolve this"))
-    );
+    find_result_text(&mut app, &ctx, size, "More volume will not resolve this");
     assert!(!text.iter().any(|(t, _)| t.contains("Take rejected")));
     assert!(text.iter().all(|(_, rect)| rect.is_finite()));
 }
@@ -484,6 +489,7 @@ fn frequency_and_timing_views_switch_without_playback_and_handle_missing_points(
         ] {
             app.result_plot = mode;
             frame(&mut app, &ctx, vec![], size);
+            find_result_text(&mut app, &ctx, size, title);
             let output = frame(&mut app, &ctx, vec![], size);
             let text = labels(&output);
             assert!(text.iter().any(|(t, _)| t == title), "{mode:?}");
@@ -492,13 +498,7 @@ fn frequency_and_timing_views_switch_without_playback_and_handle_missing_points(
         }
     }
     let size = Vec2::new(1160.0, 800.0);
-    let output = frame(&mut app, &ctx, vec![], size);
-    let position = labels(&output)
-        .iter()
-        .find(|(t, _)| t == "Frequency response")
-        .unwrap()
-        .1
-        .center();
+    let position = find_result_text(&mut app, &ctx, size, "Frequency response").center();
     click(&mut app, &ctx, position, size);
     assert_eq!(app.result_plot, ResultPlot::FrequencyResponse);
     let review = app.controller.state.review.as_mut().unwrap();
@@ -508,12 +508,8 @@ fn frequency_and_timing_views_switch_without_playback_and_handle_missing_points(
         point.peak_time_ms = None;
         point.group_delay_ms = None;
     }
+    find_result_text(&mut app, &ctx, size, "No reliable points in this view.");
     let output = frame(&mut app, &ctx, vec![], size);
-    assert!(
-        labels(&output)
-            .iter()
-            .any(|(t, _)| t == "No reliable points in this view.")
-    );
     assert!(labels(&output).iter().all(|(_, r)| r.is_finite()));
 }
 
@@ -899,4 +895,49 @@ fn restart_restores_graph_selection_and_speaker_results_even_without_the_rendere
         "startup must not generate analysis files"
     );
     assert_eq!(app.controller.settings, settings);
+}
+
+#[test]
+fn marginal_measurements_keep_graphs_and_show_separate_quality_indicators() {
+    let ctx = egui::Context::default();
+    let (mut controller, starts) = support::ready();
+    let mut review = support::arrival_review();
+    review.timing.as_mut().unwrap().band_noise = Some(measurement_capture::noise::BandNoise {
+        band_hz: [200.0, 10000.0],
+        noise_rms_dbfs: -50.0,
+        signal_to_noise_db: [18.0, 19.0, 18.0],
+    });
+    let ir = std::sync::Arc::make_mut(review.impulse.as_mut().unwrap());
+    let points = &mut ir.segments[1].spectral.as_mut().unwrap().points;
+    points
+        .iter_mut()
+        .find(|p| p.frequency_hz > 1000.0)
+        .unwrap()
+        .estimated_snr_db = 17.0;
+    review.quality = Some(companion_service::quality::assess(
+        review.timing.as_ref(),
+        review.impulse.as_deref(),
+        Some(&review.diagnostics),
+        None,
+    ));
+    assert_eq!(
+        review.quality.as_ref().unwrap().level.grade,
+        companion_service::quality::Grade::Limited
+    );
+    controller.state.review = Some(review);
+    let mut app = CompanionApp::preview(&ctx, controller);
+    app.result_plot = companion_ui::ResultPlot::FrequencyResponse;
+    let size = Vec2::new(1160.0, 1000.0);
+    for _ in 0..3 {
+        frame(&mut app, &ctx, vec![], size);
+    }
+    for label in [
+        "Acquisition: Limited",
+        "Timing: Limited",
+        "Level: Limited",
+        "Frequency response",
+    ] {
+        find_result_text(&mut app, &ctx, size, label);
+    }
+    assert_eq!(starts.load(Ordering::Relaxed), 0);
 }

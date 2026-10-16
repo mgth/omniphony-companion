@@ -46,6 +46,8 @@ pub struct SegmentDiagnostics {
 pub struct AcquisitionDiagnostics {
     pub method: String,
     pub noise_rms_dbfs: f64,
+    #[serde(default)]
+    pub band_noise: Option<crate::noise::BandNoise>,
     pub total_clipped_samples: usize,
     pub reference_start_frames: Option<[f64; 2]>,
     pub segments: Option<[SegmentDiagnostics; 3]>,
@@ -73,8 +75,9 @@ pub fn analyze(
     }
     let noise = rms(&samples[..capture_rate as usize / 10]);
     let mut report = AcquisitionDiagnostics {
-        method: "reference-pair-acquisition-v2".into(),
+        method: "reference-pair-acquisition-v3".into(),
         noise_rms_dbfs: db(noise),
+        band_noise: None,
         total_clipped_samples: samples.iter().filter(|x| x.abs() >= 0.999).count(),
         reference_start_frames: None,
         segments: None,
@@ -89,12 +92,40 @@ pub fn analyze(
         return Ok(report);
     }
     match locate_segments(samples, capture_rate, render_rate, sweep) {
-        Ok((references, segments, noise)) => {
+        Ok((references, mut segments, noise)) => {
+            let source_len = sweep.samples(render_rate)?.len();
+            let effective_rate =
+                render_rate as f64 * (references[1] - references[0]) / (2.0 * source_len as f64);
+            report.band_noise = crate::noise::estimate(
+                samples,
+                effective_rate,
+                sweep,
+                references[0],
+                segments
+                    .each_ref()
+                    .map(|s| (s.body_start_frame, s.body_end_frame)),
+            )
+            .ok();
+            if let Some(band) = &report.band_noise {
+                for (s, snr) in segments.iter_mut().zip(band.signal_to_noise_db) {
+                    if s.clipped_samples == 0 {
+                        s.status = if snr < 6.0 && s.normalized_correlation < 0.2 {
+                            SegmentStatus::NoSweepDetected
+                        } else if snr < 20.0 {
+                            SegmentStatus::LowSignalToNoise
+                        } else if s.normalized_correlation < 0.2 {
+                            SegmentStatus::UncorrelatedSignal
+                        } else {
+                            SegmentStatus::Detected
+                        };
+                    }
+                }
+            }
             report.noise_rms_dbfs = db(noise);
             let target = &segments[1];
             match target.status {
                 SegmentStatus::NoSweepDetected => report.messages.push("The reference sweeps were found, but no target sweep was detected above background. Check the selected speaker's output route, mute, amplifier and connection. Increasing the overall volume is not the first step.".into()),
-                SegmentStatus::LowSignalToNoise => report.messages.push("The target interval has insufficient signal / noise. Check routing and input selection before adjusting levels.".into()),
+                SegmentStatus::LowSignalToNoise => report.messages.push("The target sweep has limited excited-band signal / noise. Results remain available with reduced confidence.".into()),
                 SegmentStatus::UncorrelatedSignal => report.messages.push("Sound is present during the target interval, but it does not reliably match the sweep. Check routing, interference and capture continuity.".into()),
                 SegmentStatus::Clipped => report.messages.push("Clipping occurs in the target speaker interval. Repeat this speaker at a lower level.".into()),
                 SegmentStatus::Detected => (),
@@ -110,8 +141,12 @@ pub fn analyze(
                         .into(),
                 );
             }
-            if segments[0].signal_to_noise_db < 20.0 || segments[2].signal_to_noise_db < 20.0 {
-                report.messages.push("Reference sweeps have insufficient signal / noise. These windows are diagnostic only; the acquisition quality gate still applies.".into());
+            if report
+                .band_noise
+                .as_ref()
+                .is_some_and(|b| b.signal_to_noise_db[0] < 20.0 || b.signal_to_noise_db[2] < 20.0)
+            {
+                report.messages.push("Reference sweeps have limited excited-band signal / noise. Inspect confidence and repeatability before correction.".into());
             }
             if target.normalized_correlation >= 0.2 {
                 let relative_ms = (target.body_start_frame as f64
@@ -300,7 +335,9 @@ mod tests {
         {
             *dst += src;
         }
-        assert!(crate::timing::analyze(&samples, 48000, 48000, sweep()).is_err());
+        let timing = crate::timing::analyze(&samples, 48000, 48000, sweep()).unwrap();
+        assert!(!timing.warnings.is_empty());
+        assert!((timing.relative_peak_delay_ms.unwrap() - 160.0).abs() < 0.2);
         let report = analyze(&samples, 48000, 48000, sweep()).unwrap();
         assert_eq!(report.segments.unwrap()[1].status, SegmentStatus::Detected);
         assert!(report.messages.iter().any(|m| m.contains("Long delay:")));
@@ -308,7 +345,7 @@ mod tests {
             report
                 .messages
                 .iter()
-                .any(|m| m.contains("Reference sweeps have insufficient"))
+                .any(|m| m.contains("Reference sweeps have limited"))
         );
         assert!(!report.valid_for_correction);
     }

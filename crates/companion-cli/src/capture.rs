@@ -20,6 +20,11 @@ pub enum Command {
         #[arg(long)]
         take: PathBuf,
     },
+    /// Recompute both retained alignment passes as a separate diagnostic report.
+    ReviewAlignment {
+        #[arg(long)]
+        session: PathBuf,
+    },
     /// Record one microphone channel with reference/target/reference playback.
     Measure(Box<Measure>),
 }
@@ -70,6 +75,30 @@ pub fn run(command: Command) -> AppResult<()> {
             serde_json::to_string_pretty(&measurement_capture::devices()?)?
         ),
         Command::Measure(args) => measure(*args)?,
+        Command::ReviewAlignment { session } => {
+            let original = companion_service::alignment::load(&session)?;
+            let reviewed = companion_service::alignment::reanalyze(&original)?;
+            for row in &reviewed.rows {
+                println!(
+                    "{}: {}",
+                    row.output_id,
+                    row.qualified
+                        .as_ref()
+                        .map(|q| format!(
+                            "{:+.3} ms / {:+.2} dB; repeat spread {:.3} ms / {:.2} dB",
+                            q.arrival_ms,
+                            q.level_db,
+                            q.arrival_repeat_spread_ms,
+                            q.level_repeat_spread_db
+                        ))
+                        .unwrap_or_else(|| row.reason.clone().unwrap_or("Unavailable".into()))
+                );
+                for quality in &row.quality {
+                    print_quality(quality);
+                }
+            }
+            println!("Diagnostic alignment: {}", reviewed.directory.display());
+        }
         Command::Review { take } => {
             let review = companion_service::review::saved_take(&take)?;
             println!(
@@ -85,6 +114,9 @@ pub fn run(command: Command) -> AppResult<()> {
                 println!("Original take rejected: {reason}");
             }
             print_diagnostics(&review.diagnostics);
+            if let Some(quality) = &review.quality {
+                print_quality(quality);
+            }
             if let Some(error) = &review.analysis_error {
                 println!("{error}");
             }
@@ -129,10 +161,14 @@ fn measure(args: Measure) -> AppResult<()> {
     if let Some(report) = &outcome.diagnostics {
         print_diagnostics(report);
     }
-    if let Some(reason) = outcome.rejection_reason {
-        return Err(format!("take rejected: {reason}; see saved report").into());
-    }
+    print_quality(&outcome.quality());
     print_impulse(outcome.impulse.as_deref(), outcome.impulse_error.as_deref());
+    if let Some(reason) = outcome.rejection_reason {
+        return Err(format!(
+            "capture fault: {reason}; diagnostic results retained in the saved report"
+        )
+        .into());
+    }
     if let Some(report) = outcome.timing {
         println!(
             "Acquisition signal / noise: {:.1} dB. No correction proposed.",
@@ -198,4 +234,18 @@ fn print_diagnostics(report: &measurement_capture::diagnostics::AcquisitionDiagn
         println!("{message}");
     }
     println!("Approximate reference-pair windows; these levels are not speaker gain corrections.");
+}
+
+fn print_quality(q: &companion_service::quality::Report) {
+    println!(
+        "Experimental quality — acquisition: {}; timing: {}; level: {}",
+        q.acquisition.grade.label(),
+        q.timing.grade.label(),
+        q.level.grade.label()
+    );
+    for indicator in [&q.acquisition, &q.timing, &q.level] {
+        for detail in &indicator.details {
+            println!("  {detail}");
+        }
+    }
 }

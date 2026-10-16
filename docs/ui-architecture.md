@@ -64,7 +64,9 @@ position/microphone/configuration out of the current speaker status. The files
 remain available after closing the application.
 
 Completed rejected takes can show reference/target acquisition diagnostics,
-while retaining their rejection and withholding timing/impulse estimates. The
+while retaining their original rejection. Completed weak or clipped takes may
+also show diagnostic timing/impulse estimates with separate acquisition, timing
+and level quality indicators; correction qualification remains separate. The
 shared service owns reference-pair detection and classification; panels only
 display the result.
 

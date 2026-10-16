@@ -32,6 +32,9 @@ pub struct SavedReview {
     pub input_channel: u16,
     pub analysis_start_frame: usize,
     pub capture_sample_rate: u32,
+    /// Includes the lead-in before the analysis slice.
+    #[serde(default)]
+    pub capture_clipped_samples: usize,
     pub render_sample_rate: u32,
     pub signal: Sweep,
     pub sequence_window: Option<crate::batch::SequenceWindow>,
@@ -42,6 +45,8 @@ pub struct SavedReview {
     pub analysis_error: Option<String>,
     pub impulse: Option<Arc<ImpulseReport>>,
     pub impulse_error: Option<String>,
+    #[serde(default)]
+    pub quality: Option<crate::quality::Report>,
     pub valid_for_correction: bool,
 }
 
@@ -83,12 +88,13 @@ struct CaptureFacts {
     is_monitor: bool,
 }
 
-/// Inspect completed captures, including rejected levels/timing. Rejected takes
-/// retain their verdict and receive diagnostics only (except the documented
-/// legacy correlation-ambiguity case). Capture faults are never repaired here.
+/// Inspect completed captures, including rejected levels/timing. Quality-only
+/// rejections can receive new diagnostic responses while retaining their original
+/// verdict. Capture faults and identity inconsistencies are never repaired here.
 pub fn saved_take(directory: &Path) -> AppResult<SavedReview> {
     let stimulus: Stimulus = read_json(&directory.join("stimulus.json"))?;
-    let capture: CaptureReport = read_json(&directory.join("capture-report.json"))?;
+    let capture: CaptureReport =
+        crate::files::read_json_limited(&directory.join("capture-report.json"), 32 * 1024 * 1024)?;
     let snapshot: Snapshot = read_json(&directory.join("snapshot.json"))?;
     if !matches!(stimulus.schema_version, 1 | 2)
         || !(1..=3).contains(&capture.schema_version)
@@ -260,22 +266,30 @@ pub fn saved_take(directory: &Path) -> AppResult<SavedReview> {
         snapshot.sample_rate,
         stimulus.signal,
     )?;
-    // Recompute from audio, never trust saved peaks or previously computed estimates.
-    // Diagnostic review is not permission to promote a rejected acquisition.
-    let timing = if !capture.accepted_for_analysis && !legacy_timing_rejection {
-        Err("Original acquisition rejected; diagnostics only. Record a new take after resolving its cause.".to_owned())
-    } else if clipped != 0 {
-        Err("Clipped recording; timing and impulse analysis withheld.".to_owned())
-    } else {
-        timing::analyze(
+    // Recompute from audio, preserving the original verdict. Quality-only
+    // rejection no longer suppresses a diagnostic response; transport/identity
+    // failures still cannot establish a synchronized measurement.
+    let quality_rejection = capture.rejection_reason.as_deref().is_some_and(|r| {
+        r.contains("signal-to-noise ratio")
+            || r.contains("reference levels changed")
+            || r == "clipped recording"
+    });
+    let inspectable = capture.accepted_for_analysis || legacy_timing_rejection || quality_rejection;
+    let timing = if inspectable {
+        timing::inspect(
             samples,
             spec.sample_rate,
             snapshot.sample_rate,
             stimulus.signal,
         )
+    } else {
+        Err(
+            "Original acquisition failed outside analysis; synchronized results unavailable."
+                .to_owned(),
+        )
     };
     let response = timing.as_ref().ok().map(|timing| {
-        impulse::analyze(
+        impulse::inspect(
             samples,
             spec.sample_rate,
             snapshot.sample_rate,
@@ -289,8 +303,24 @@ pub fn saved_take(directory: &Path) -> AppResult<SavedReview> {
         .cloned()
         .map(Arc::new);
     let impulse_error = response.and_then(Result::err);
+    let quality = crate::quality::assess(
+        timing.as_ref().ok(),
+        impulse.as_deref(),
+        Some(&diagnostics),
+        if clipped > 0 {
+            Some("Clipped recording: diagnostic results cannot qualify a correction.")
+        } else {
+            (!inspectable).then_some(
+                capture
+                    .rejection_reason
+                    .as_deref()
+                    .unwrap_or("Original capture failed"),
+            )
+        },
+    );
     let mut review = SavedReview {
         schema_version: 2,
+        quality: Some(quality),
         directory: directory.to_owned(),
         report_file: PathBuf::new(),
         origin: stimulus.origin,
@@ -301,6 +331,7 @@ pub fn saved_take(directory: &Path) -> AppResult<SavedReview> {
         input_channel: capture.capture.input_channel,
         analysis_start_frame: capture.analysis_start_frame,
         capture_sample_rate: spec.sample_rate,
+        capture_clipped_samples: clipped,
         render_sample_rate: snapshot.sample_rate,
         signal: stimulus.signal,
         sequence_window: stimulus.sequence_window,

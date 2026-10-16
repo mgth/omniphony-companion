@@ -250,7 +250,15 @@ fn rejected_missing_and_clipped_target_takes_are_diagnosed_without_promotion() {
             }
         );
         assert!(!review.original_accepted_for_analysis && !review.valid_for_correction);
-        assert!(review.timing.is_none() && review.impulse.is_none());
+        if clipped {
+            assert!(review.timing.is_some() && review.impulse.is_some());
+            assert_eq!(
+                review.quality.as_ref().unwrap().acquisition.grade,
+                companion_service::quality::Grade::Poor
+            );
+        } else {
+            assert!(review.timing.is_none() && review.impulse.is_none());
+        }
         assert_eq!(
             original,
             fs::read(dir.path().join("capture-report.json")).unwrap()
@@ -258,7 +266,7 @@ fn rejected_missing_and_clipped_target_takes_are_diagnosed_without_promotion() {
         assert_eq!(audio, fs::read(&wav_path).unwrap());
         let report: Value = serde_json::from_slice(&fs::read(review.report_file).unwrap()).unwrap();
         assert_eq!(report["schema_version"], 2);
-        assert!(report["timing"].is_null());
+        assert_eq!(report["timing"].is_null(), !clipped);
         if clipped {
             change(dir.path(), "capture-report.json", |r| {
                 r["capture"]["clipped_samples"] = json!(0)
@@ -266,4 +274,149 @@ fn rejected_missing_and_clipped_target_takes_are_diagnosed_without_promotion() {
             assert!(saved_take(dir.path()).is_err());
         }
     }
+}
+
+#[test]
+fn old_snr_rejections_get_new_diagnostic_results_without_rewriting_the_original() {
+    let dir = tempfile::tempdir().unwrap();
+    fixture(dir.path());
+    change(dir.path(), "capture-report.json", |r| {
+        r["accepted_for_analysis"] = json!(false);
+        r["rejection_reason"] =
+            json!("sweep 1 signal-to-noise ratio is 19.88 dB, below the 20 dB acquisition limit");
+    });
+    let original = fs::read(dir.path().join("capture-report.json")).unwrap();
+    let review = saved_take(dir.path()).unwrap();
+    assert!(!review.original_accepted_for_analysis && !review.valid_for_correction);
+    assert!(review.timing.is_some() && review.impulse.is_some());
+    assert!(review.quality.as_ref().unwrap().level_db.is_some());
+    assert_eq!(
+        original,
+        fs::read(dir.path().join("capture-report.json")).unwrap()
+    );
+}
+
+#[test]
+fn whole_alignment_reanalysis_retains_originals_and_cannot_apply_a_profile() {
+    use companion_service::{
+        alignment::{self, Alignment, Row},
+        controller::Settings,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let original_dir = root.path().join("alignment-original");
+    fs::create_dir(&original_dir).unwrap();
+    let mut folders = vec![];
+    for pass in 1..=2 {
+        let path = original_dir.join(format!("pass-{pass}"));
+        fs::create_dir(&path).unwrap();
+        fixture(&path);
+        change(&path, "capture-report.json", |r| {
+            r["accepted_for_analysis"] = json!(false);
+            r["rejection_reason"] = json!(
+                "sweep 1 signal-to-noise ratio is 19.88 dB, below the 20 dB acquisition limit"
+            );
+        });
+        folders.push(path);
+    }
+    let snapshot = companion_service::files::read_json(&folders[0].join("snapshot.json")).unwrap();
+    let signal = companion_service::files::read_json::<Value>(&folders[0].join("stimulus.json"))
+        .unwrap()["signal"]
+        .clone();
+    let original = Alignment {
+        schema_version: 1,
+        directory: original_dir,
+        endpoint: "127.0.0.1:9000".parse().unwrap(),
+        settings: Settings {
+            microphone_id: "synthetic-mic".into(),
+            position_id: "synthetic-seat".into(),
+            reference_output: Some("L".into()),
+            sweep: serde_json::from_value(signal).unwrap(),
+            ..Default::default()
+        },
+        snapshot,
+        rows: vec![Row {
+            output_id: "R".into(),
+            take_folders: folders.clone(),
+            repeats: vec![],
+            quality: vec![],
+            qualified: None,
+            reason: None,
+        }],
+        blockers: vec![],
+        pass_reports: None,
+        verification_pass_reports: None,
+        session: None,
+        profile: None,
+        applied_snapshot: None,
+        restored_snapshot: None,
+        verification: None,
+        verification_note: None,
+        application_uncertain: false,
+    };
+    let before = fs::read(folders[0].join("capture-report.json")).unwrap();
+    let review = alignment::reanalyze(&original).unwrap();
+    assert_ne!(review.directory, original.directory);
+    assert!(review.rows[0].qualified.is_some());
+    assert_eq!(review.rows[0].quality.len(), 2);
+    assert!(review.profile.is_none() && review.session.is_none());
+    assert!(review.targets(false).is_err());
+    assert!(alignment::load(&review.directory).is_ok());
+    assert_eq!(
+        before,
+        fs::read(folders[0].join("capture-report.json")).unwrap()
+    );
+    // Clipping outside the analysis slice remains a capture fault, even when
+    // the retained sweep response itself is clean and repeatable.
+    let wav_path = folders[0].join("recording.wav");
+    let mut reader = hound::WavReader::open(&wav_path).unwrap();
+    let spec = reader.spec();
+    let mut samples: Vec<f32> = reader.samples().map(Result::unwrap).collect();
+    drop(reader);
+    samples[0] = 1.0;
+    let mut writer = hound::WavWriter::create(&wav_path, spec).unwrap();
+    for sample in samples {
+        writer.write_sample(sample).unwrap();
+    }
+    writer.finalize().unwrap();
+    change(&folders[0], "capture-report.json", |r| {
+        r["rejection_reason"] = json!("clipped recording");
+        r["capture"]["clipped_samples"] = json!(1);
+        r["analysis_start_frame"] = json!(4800);
+    });
+    let clipped = saved_take(&folders[0]).unwrap();
+    assert_eq!(clipped.capture_clipped_samples, 1);
+    assert_eq!(clipped.diagnostics.total_clipped_samples, 0);
+    assert!(clipped.impulse.is_some());
+    assert_eq!(
+        clipped.quality.unwrap().acquisition.grade,
+        companion_service::quality::Grade::Poor
+    );
+    let clipped_alignment = alignment::reanalyze(&original).unwrap();
+    assert!(clipped_alignment.rows[0].qualified.is_none());
+    assert!(
+        clipped_alignment.rows[0]
+            .reason
+            .as_ref()
+            .unwrap()
+            .contains("clipped recording")
+    );
+    // Restore the synthetic fixture for the independent identity check below.
+    fs::remove_dir_all(&folders[0]).unwrap();
+    fs::create_dir(&folders[0]).unwrap();
+    fixture(&folders[0]);
+    let mut applied = original.clone();
+    applied.applied_snapshot = Some(applied.snapshot.clone());
+    assert!(alignment::reanalyze(&applied).is_err());
+    change(&folders[1], "snapshot.json", |r| {
+        r["revision"] = json!("different")
+    });
+    let mismatched = alignment::reanalyze(&original).unwrap();
+    assert!(mismatched.rows[0].qualified.is_none());
+    assert!(
+        mismatched.rows[0]
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("different renderer configuration")
+    );
 }
