@@ -62,7 +62,8 @@ calibration-file preservation and repeated acoustic reference sequences.
 Offline diagnostics estimate linear clock drift and relative correlation-peak
 delay and reject several capture/quality failures. This is a milestone-3
 prototype: real-interface repeatability and discontinuity tests remain open.
-It does not yet produce direct-arrival observations or calibration profiles.
+Individual takes remain diagnostic. The later repeated-alignment workflow below
+connects qualified arrival/level evidence to experimental profiles.
 See `docs/capture-validation.md` for the next bench checks.
 
 A first milestone-6 interface now exposes the acquisition prototype in a native
@@ -74,7 +75,7 @@ reference–speaker–reference sequence whose intervening references are shared
 Progress stays in the active speaker row. Acquisition preferences and speaker
 checkboxes now persist locally, with startup device enumeration and renderer
 reconnection. Unavailable saved choices remain selected and block acquisition.
-Automatic correction and guided microphone positioning remain pending.
+Automatic optimization iterations and guided microphone positioning remain pending.
 See `docs/batch-capture.md`.
 
 An initial milestone-4 increment now reconstructs band-limited impulse responses,
@@ -82,9 +83,9 @@ checks early arrival candidates across bands/thresholds and compares the two
 reference waveforms. New takes and offline reanalysis share this code. The UI
 can review a saved recording without a renderer and display impulse envelopes,
 candidates and unresolved reasons. This remains experimental evidence, not a
-validated direct-path observation or an automatic correction input. Representative
-levels, microphone-calibration application, hardware accuracy and profile
-conversion remain pending; see `docs/arrival-review.md`.
+validated direct-path observation or a standalone correction input. Repeated
+alignment now adds representative levels and profile conversion. Microphone
+calibration and hardware accuracy remain pending; see `docs/arrival-review.md`.
 
 Spectral review now adds transfer magnitude, a denser band-energy arrival curve
 and group delay from the same retained responses. These preserve a common time
@@ -102,8 +103,8 @@ A further acquisition increment diagnoses completed rejected takes using the two
 reference sweeps independently of the target. Per-interval levels distinguish
 clipping, missing target evidence and weak or uncorrelated sound. UI and CLI
 retain the original rejection and do not convert these levels into correction
-gains. Hardware routing verification and representative-level estimation remain
-pending; see `docs/acquisition-diagnostics.md`.
+gains. Repeated alignment now adds a separate common-band transfer-level estimator;
+hardware routing validation remains necessary. See `docs/acquisition-diagnostics.md`.
 
 ### Multiple microphones
 
@@ -184,6 +185,38 @@ Three complementary levels:
 
 Acoustic tolerances will be chosen using bench results and measured
 repeatability. Simulator thresholds are not a promise of real-hardware accuracy.
+
+## Current priority — Complete delay and level alignment
+
+The experimental software loop now includes repeatable target acquisition, comparable band levels, conservative proposals,
+explicit live application/readback, repeated verification and guarded restoration.
+Real-interface accuracy, repeatability and acoustic before/after validation are
+still required before calling mission 1 complete. See `docs/gain-delay-alignment.md`.
+Keep the microphone fixed at the reference seat. Preserve uncertainty: repeatability
+alone does not establish an unobstructed direct path. Subwoofer integration remains
+outside this mission. No tonal EQ or spatial sensor work should displace this priority.
+
+## Deferred single-microphone backlog
+
+The following work is retained for after mission 1:
+
+1. Apply explicitly defined microphone amplitude calibration; early/full response
+   windows and phase plots with a common time reference.
+2. Extend captures and impulse windows for bass decay, noise-aware decay fits and
+   reflection timing diagnostics (without claiming arrival directions).
+3. Guide successive microphone positions, show individual responses and spatial
+   variation, and reserve independent validation positions.
+4. Fit bounded parametric EQ to a target, favoring cuts; preview and remeasure.
+5. Align speakers/subwoofers and optimize multiple subwoofers through gains,
+   polarities and delays using their complex acoustic sum and shared timing.
+6. Add minimum-phase FIR correction with a defined latency/runtime budget.
+7. Evaluate excess-phase and modal-tail correction separately, only where repeatable
+   improvements survive validation at other positions.
+
+One movable microphone supports these tasks. Independent driver adjustments require
+independent outputs. Direction, pressure-gradient and intensity measurements belong
+to the later synchronous 3D probe work. Virtual bursts remain predictions from the
+sweep response, not independent acquisitions.
 
 ## Later missions
 

@@ -63,6 +63,7 @@ pub struct Position {
 pub enum ObservationOrigin {
     Simulated,
     Imported,
+    Measured,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -75,6 +76,7 @@ pub struct Observation {
     pub arrival_ms: f64,
     /// Comparable relative levels using the same stimulus, calibration and band.
     /// This is not an absolute SPL measurement.
+    // Legacy field name: measured transfer levels are relative dB, not SPL or PCM RMS.
     pub level_dbfs: f64,
     pub snr_db: f64,
     pub clipped: bool,
@@ -220,8 +222,8 @@ impl Session {
                 pairs.insert((&observation.speaker_id, &observation.position_id)),
                 "duplicate speaker/position observation; put repeats in separate batches",
             )?;
-            finite_range(observation.arrival_ms, 0.0, 10_000.0, "arrival")?;
-            finite_range(observation.level_dbfs, -300.0, 0.0, "relative level")?;
+            finite_range(observation.arrival_ms, -100.0, 10_000.0, "arrival")?;
+            finite_range(observation.level_dbfs, -300.0, 300.0, "relative level")?;
             finite_range(observation.snr_db, -100.0, 200.0, "signal-to-noise ratio")?;
         }
         Ok(())

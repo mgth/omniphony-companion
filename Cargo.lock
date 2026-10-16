@@ -537,6 +537,7 @@ dependencies = [
 name = "companion-service"
 version = "0.1.0"
 dependencies = [
+ "calibration-core",
  "hound",
  "measurement-capture",
  "omniphony-adapter",
@@ -2170,7 +2171,7 @@ dependencies = [
 [[package]]
 name = "omniphony-osc-contract"
 version = "0.1.0"
-source = "git+https://github.com/mgth/Omniphony?rev=d1b18ba2400371b5713bbb8f594befa5f556b8a9#d1b18ba2400371b5713bbb8f594befa5f556b8a9"
+source = "git+https://github.com/mgth/Omniphony?rev=3174ea1f5cfebad6047a3ca1f5c43938f6487aa0#3174ea1f5cfebad6047a3ca1f5c43938f6487aa0"
 dependencies = [
  "serde",
 ]

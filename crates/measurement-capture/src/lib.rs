@@ -3,6 +3,7 @@
 pub mod calibration;
 pub mod diagnostics;
 pub mod impulse;
+pub mod level;
 #[cfg(target_os = "linux")]
 mod pipewire_capture;
 pub mod sequence;

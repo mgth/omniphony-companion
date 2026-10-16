@@ -158,11 +158,11 @@ pub fn propose(session: &Session, policy: &CalibrationPolicy) -> Result<Calibrat
     let latest = observations
         .iter()
         .map(|o| o.arrival_ms)
-        .fold(0.0, f64::max);
+        .fold(f64::NEG_INFINITY, f64::max);
     let quietest = observations
         .iter()
         .map(|o| o.level_dbfs)
-        .fold(0.0, f64::min);
+        .fold(f64::INFINITY, f64::min);
     let mut target = session.baseline.snapshot.clone();
     for speaker in &mut target.speakers {
         if speaker.role == SpeakerRole::Subwoofer {

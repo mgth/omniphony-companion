@@ -363,3 +363,55 @@ fn referenced_sequence_requires_matching_identity_and_total_frames() {
         handle.join().unwrap();
     }
 }
+
+#[test]
+fn application_requires_complete_readback_and_never_replays_an_uncertain_write() {
+    for corrupt in [false, true] {
+        let (endpoint, handle) = server(move |mut stream| {
+            let request = receive(&mut stream);
+            let Command::SetOutputs {
+                expected_revision,
+                settings,
+            } = request.command
+            else {
+                panic!("wrong command")
+            };
+            assert_eq!(expected_revision, "test:1");
+            assert_eq!(settings.len(), 1);
+            let mut applied = snapshot();
+            applied.revision = "test:2".into();
+            applied.outputs[0].gain_db = settings[0].gain_db;
+            applied.outputs[0].delay_ms = settings[0].delay_ms;
+            if corrupt {
+                applied.master_gain_db = 2.0;
+            }
+            send(
+                &mut stream,
+                request.request_id,
+                Reply::Snapshot { snapshot: applied },
+            );
+            if corrupt {
+                assert!(read_frame(&mut stream, MAX_PACKET_BYTES).unwrap().is_none());
+            }
+        });
+        let mut client = Client::connect(endpoint, Duration::from_secs(1)).unwrap();
+        let result = client.set_outputs(
+            &snapshot(),
+            vec![OutputSetting {
+                output_id: "L".into(),
+                gain_db: -4.0,
+                delay_ms: 2.5,
+            }],
+        );
+        if corrupt {
+            assert!(result.is_err());
+            assert!(client.discover().is_err());
+        } else {
+            let s = result.unwrap();
+            assert_eq!(s.outputs[0].delay_ms, 2.5);
+            assert_eq!(s.revision, "test:2");
+        }
+        drop(client);
+        handle.join().unwrap();
+    }
+}

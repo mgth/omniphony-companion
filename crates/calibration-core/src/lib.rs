@@ -1,11 +1,12 @@
 //! Offline calibration policy over already-estimated observations.
 //!
 //! This crate neither captures audio nor estimates direct arrivals from PCM.
-//! Hardware adapters must supply timing-referenced, calibrated observations.
+//! Hardware adapters must supply timing-referenced, comparable observations.
 //! All public operations revalidate deserialized data before using it.
 
 mod model;
 mod policy;
+pub mod repeatability;
 
 pub use model::*;
 pub use policy::*;
