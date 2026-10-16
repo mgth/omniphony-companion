@@ -185,6 +185,7 @@ pub struct InputCheck {
 
 #[derive(Default)]
 pub struct State {
+    pub analyses: crate::analysis_cache::Index,
     pub saved_snapshot: Option<Snapshot>,
     pub restored_index: Option<crate::workspace::WorkspaceIndex>,
     pub workspace_warnings: Vec<String>,
@@ -206,6 +207,41 @@ pub struct State {
     pub takes: Vec<Take>,
     pub error: Option<String>,
 }
+struct LoadedAlignment {
+    alignment: alignment::Alignment,
+    workspace: crate::workspace::RestoredWorkspace,
+}
+
+impl LoadedAlignment {
+    fn read(alignment: alignment::Alignment) -> Result<Self, String> {
+        let references = alignment
+            .rows
+            .iter()
+            .flat_map(|r| {
+                r.take_folders
+                    .iter()
+                    .map(|p| crate::workspace::TakeReference {
+                        output_id: r.output_id.clone(),
+                        revision: alignment.snapshot.revision.clone(),
+                        settings: alignment.settings.clone(),
+                        result: Ok(crate::workspace::absolute(p)),
+                    })
+            })
+            .collect();
+        let workspace = crate::workspace::restore(
+            Some(crate::workspace::WorkspaceIndex {
+                takes: references,
+                ..Default::default()
+            }),
+            &alignment.settings,
+        )?;
+        Ok(Self {
+            alignment,
+            workspace,
+        })
+    }
+}
+
 enum Event {
     WorkspaceRestored(Box<Result<crate::workspace::RestoredWorkspace, String>>),
     InputLevel(measurement_capture::input::InputLevel),
@@ -216,7 +252,7 @@ enum Event {
         Box<alignment::Alignment>,
         Result<(Snapshot, Vec<(String, TakeOutcome)>), String>,
     ),
-    AlignmentLoaded(Box<Result<alignment::Alignment, String>>),
+    AlignmentLoaded(Box<Result<LoadedAlignment, String>>),
     Reviewed(Box<Result<SavedReview, String>>),
     Inputs(Result<Vec<InputDevice>, String>),
     Discovered(SocketAddr, Result<Snapshot, String>),
@@ -358,6 +394,32 @@ impl Controller {
         let sender = self.sender.clone();
         std::thread::spawn(move || {
             let result = catch_job(|| backend.review(path));
+            let _ = sender.send(Event::Reviewed(Box::new(result)));
+        });
+    }
+
+    pub fn analysis_for(&self, take: &Take) -> Option<&crate::analysis_cache::CachedAnalysis> {
+        let folder = crate::workspace::absolute(&take.outcome.as_ref().ok()?.directory);
+        self.state
+            .analyses
+            .get(&folder)
+            .filter(|a| a.matches_take(take))
+    }
+
+    pub fn load_analysis(&mut self, take: &Take) {
+        if self.busy() {
+            return;
+        }
+        let Some(analysis) = self.analysis_for(take) else {
+            return;
+        };
+        let path = analysis.report_file.clone();
+        self.state.review_error = None;
+        self.state.job = Some(Job::Review);
+        let sender = self.sender.clone();
+        let take = take.clone();
+        std::thread::spawn(move || {
+            let result = catch_job(|| crate::analysis_cache::load(&path, &take));
             let _ = sender.send(Event::Reviewed(Box::new(result)));
         });
     }
@@ -752,7 +814,8 @@ impl Controller {
         self.state.error = None;
         let sender = self.sender.clone();
         std::thread::spawn(move || {
-            let result = catch_job(|| alignment::reanalyze(&alignment));
+            let result =
+                catch_job(|| alignment::reanalyze(&alignment).and_then(LoadedAlignment::read));
             let _ = sender.send(Event::AlignmentLoaded(Box::new(result)));
         });
     }
@@ -774,7 +837,7 @@ impl Controller {
         let path = PathBuf::from(directory.trim());
         let sender = self.sender.clone();
         std::thread::spawn(move || {
-            let result = catch_job(|| alignment::load(&path));
+            let result = catch_job(|| alignment::load(&path).and_then(LoadedAlignment::read));
             let _ = sender.send(Event::AlignmentLoaded(Box::new(result)));
         });
     }
@@ -896,6 +959,7 @@ impl Controller {
     }
     /// Reading events is nonblocking. A slow/minimized frontend never owns keepalives.
     pub fn poll(&mut self) {
+        let previous_revision = self.state.workspace_revision;
         while let Ok(event) = self.receiver.try_recv() {
             if !matches!(
                 &event,
@@ -912,6 +976,7 @@ impl Controller {
                         Ok(saved) => {
                             self.state.restored_index = Some(saved.index);
                             self.state.takes = saved.takes;
+                            self.state.analyses = saved.analyses;
                             self.state.saved_snapshot = saved.snapshot;
                             self.state.alignment = saved.alignment;
                             self.state.review = saved.review;
@@ -988,7 +1053,42 @@ impl Controller {
                 }
                 Event::AlignmentLoaded(result) => {
                     match *result {
-                        Ok(a) => self.state.alignment = Some(a),
+                        Ok(loaded) => {
+                            let mut imported = Vec::new();
+                            for take in loaded.workspace.takes {
+                                let folder = take
+                                    .outcome
+                                    .as_ref()
+                                    .ok()
+                                    .map(|o| crate::workspace::absolute(&o.directory));
+                                if let Some(old) = self.state.takes.iter_mut().find(|t| {
+                                    folder.is_some()
+                                        && t.outcome
+                                            .as_ref()
+                                            .ok()
+                                            .map(|o| crate::workspace::absolute(&o.directory))
+                                            == folder
+                                }) {
+                                    *old = take;
+                                } else {
+                                    imported.push(take);
+                                }
+                                if let Some(folder) = folder {
+                                    self.state.analyses.remove(&folder);
+                                }
+                            }
+                            // Browsing an older alignment must not displace newer captures
+                            // as the default result for an existing speaker.
+                            self.state.takes.splice(0..0, imported);
+                            self.state.analyses.extend(loaded.workspace.analyses);
+                            self.state
+                                .workspace_warnings
+                                .extend(loaded.workspace.warnings);
+                            if self.state.takes.len() > 100 {
+                                self.state.takes.drain(..self.state.takes.len() - 100);
+                            }
+                            self.state.alignment = Some(loaded.alignment);
+                        }
                         Err(e) => self.state.error = Some(e),
                     }
                     self.state.job = None;
@@ -1032,7 +1132,14 @@ impl Controller {
                 }
                 Event::Reviewed(result) => {
                     match *result {
-                        Ok(review) => self.state.review = Some(review),
+                        Ok(review) => {
+                            let summary =
+                                crate::analysis_cache::CachedAnalysis::from_review(&review);
+                            self.state
+                                .analyses
+                                .insert(summary.directory.clone(), summary);
+                            self.state.review = Some(review);
+                        }
                         Err(error) => self.state.review_error = Some(error),
                     }
                     self.state.job = None;
@@ -1094,6 +1201,28 @@ impl Controller {
                     self.state.stopping = false;
                 }
             }
+        }
+        if self.state.workspace_revision != previous_revision {
+            let folders: std::collections::BTreeSet<_> = self
+                .state
+                .takes
+                .iter()
+                .filter_map(|t| {
+                    t.outcome
+                        .as_ref()
+                        .ok()
+                        .map(|o| crate::workspace::absolute(&o.directory))
+                })
+                .chain(
+                    self.state
+                        .review
+                        .as_ref()
+                        .map(|r| crate::workspace::absolute(&r.directory)),
+                )
+                .collect();
+            self.state
+                .analyses
+                .retain(|folder, _| folders.contains(folder));
         }
         if self.input_check().is_none() {
             self.state.input_check = None;

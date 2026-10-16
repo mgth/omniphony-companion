@@ -556,7 +556,11 @@ fn signed_and_virtual_burst_views_stay_below_speakers_and_never_play_audio() {
         frame(&mut app, &ctx, vec![], size);
         let output = frame(&mut app, &ctx, vec![], size);
         let text = labels(&output);
-        let results = text.iter().find(|(t, _)| t == "Results").unwrap().1;
+        let results = text
+            .iter()
+            .find(|(t, _)| t == "Front right · Measurement result")
+            .unwrap()
+            .1;
         let speakers = text.iter().find(|(t, _)| t == "Speakers").unwrap().1;
         assert!(results.top() > speakers.bottom());
         assert_eq!(
@@ -602,6 +606,10 @@ fn rejected_target_review_explains_routing_evidence_without_fabricating_a_delay(
         let output = frame(&mut app, &ctx, vec![], size);
         let text = labels(&output);
         find_result_text(&mut app, &ctx, size, "No target sweep detected");
+        let details = find_result_text(&mut app, &ctx, size, "Original capture details");
+        if size.x == 850.0 {
+            click(&mut app, &ctx, details.center(), size);
+        }
         find_result_text(&mut app, &ctx, size, "Original take rejected");
         find_result_text(&mut app, &ctx, size, "Reference after");
         find_result_text(
@@ -765,10 +773,14 @@ fn restart_restores_graph_selection_and_speaker_results_even_without_the_rendere
     let snapshot = controller.state.snapshot.clone().unwrap();
     let review = support::arrival_review();
     let mut saved_review = review.clone();
+    saved_review.output_id = "Front left".into();
+    saved_review.microphone_id = settings.microphone_id.clone();
+    saved_review.position_id = settings.position_id.clone();
     saved_review.directory = folder.clone();
     saved_review.report_file = folder.join("analysis-test.json");
     write_json(&saved_review.report_file, &saved_review).unwrap();
-    controller.state.review = Some(saved_review);
+    let (_, unrelated) = saved_result(&controller, &dir.path().join("unrelated"), "TBR");
+    controller.state.review = Some(unrelated);
     write_json(&folder.join("snapshot.json"), &snapshot).unwrap();
     write_json(&folder.join("stimulus.json"),&serde_json::json!({"output_id":"Front left","microphone_id":settings.microphone_id,"position_id":settings.position_id,"reference_output_id":"Front left","signal":settings.sweep})).unwrap();
     write_json(&folder.join("capture-report.json"),&serde_json::json!({"schema_version":3,"accepted_for_analysis":true,"rejection_reason":null,"capture":{},"impulse":review.impulse,"timing":review.timing,"diagnostics":review.diagnostics})).unwrap();
@@ -788,9 +800,16 @@ fn restart_restores_graph_selection_and_speaker_results_even_without_the_rendere
             impulse_error: None,
         }),
     };
-    // Seed the index as a completed session, then make a real view choice in egui.
+    // A close during cache loading can leave the old global review alongside
+    // a different selected take. The explicit take selection must win on restart.
     controller.state.takes.push(take);
     let mut store = PreferenceStore::open(path.clone()).unwrap();
+    store.update_view(companion_service::preferences::ViewPreferences {
+        selected_take: Some(folder.clone()),
+        selected_output: Some("Front left".into()),
+        saved_selected: true,
+        ..Default::default()
+    });
     store.update(&settings, "127.0.0.1:9000", &Default::default(), "");
     store.update_workspace(companion_service::workspace::WorkspaceIndex::from_state(
         &controller.state,
@@ -810,6 +829,18 @@ fn restart_restores_graph_selection_and_speaker_results_even_without_the_rendere
         std::thread::sleep(Duration::from_millis(2));
     }
     let output = frame(&mut app, &ctx, vec![], size);
+    let restored_labels = labels(&output);
+    assert!(
+        restored_labels
+            .iter()
+            .any(|(s, _)| s == "Front left · Measurement result")
+    );
+    assert!(
+        restored_labels
+            .iter()
+            .any(|(s, _)| s == "Latest saved analysis")
+    );
+    assert!(!restored_labels.iter().any(|(s, _)| s.contains("TBR")));
     let button = labels(&output)
         .into_iter()
         .find(|(s, _)| s == "Previous measurements")
@@ -881,7 +912,10 @@ fn restart_restores_graph_selection_and_speaker_results_even_without_the_rendere
     let output = frame(&mut app, &ctx, vec![], size);
     let text = labels(&output);
     assert!(text.iter().any(|(s, _)| s.contains("Saved speaker layout")));
-    assert!(text.iter().any(|(s, _)| s.contains("Take · Front left")));
+    assert!(
+        text.iter()
+            .any(|(s, _)| s.contains("Front left · Measurement result"))
+    );
     assert!(text.iter().any(|(s, _)| s.contains("Frequency response")));
     assert!(text.iter().any(|(s, _)| s == "Reference after"));
     assert!(app.controller.state.workspace_warnings.is_empty());
@@ -940,4 +974,298 @@ fn marginal_measurements_keep_graphs_and_show_separate_quality_indicators() {
         find_result_text(&mut app, &ctx, size, label);
     }
     assert_eq!(starts.load(Ordering::Relaxed), 0);
+}
+
+fn finish_worker(app: &mut CompanionApp, ctx: &egui::Context, size: Vec2) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        frame(app, ctx, vec![], size);
+        if !app.controller.busy() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "worker did not finish");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[test]
+fn loaded_alignment_pass_opens_its_latest_analysis_and_labels_the_original_verdict_as_history() {
+    use companion_service::{
+        alignment::{Alignment, Row},
+        files::write_json,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (mut controller, starts) = support::ready();
+    let (first, _) = saved_result(&controller, &dir.path().join("pass-1"), "Front right");
+    let (second, _) = saved_result(&controller, &dir.path().join("pass-2"), "Front right");
+    let originals: Vec<_> = [&first, &second]
+        .iter()
+        .map(|t| {
+            let path = t
+                .outcome
+                .as_ref()
+                .unwrap()
+                .directory
+                .join("capture-report.json");
+            (path.clone(), std::fs::read(path).unwrap())
+        })
+        .collect();
+    let alignment = Alignment {
+        schema_version: 1,
+        directory: dir.path().to_owned(),
+        endpoint: "127.0.0.1:9000".parse().unwrap(),
+        settings: controller.settings.clone(),
+        snapshot: controller.state.snapshot.clone().unwrap(),
+        rows: vec![Row {
+            output_id: "Front right".into(),
+            take_folders: vec![
+                first.outcome.as_ref().unwrap().directory.clone(),
+                second.outcome.as_ref().unwrap().directory.clone(),
+            ],
+            repeats: vec![],
+            quality: vec![],
+            qualified: None,
+            reason: None,
+        }],
+        pass_reports: None,
+        verification_pass_reports: None,
+        blockers: vec!["Diagnostic review only".into()],
+        session: None,
+        profile: None,
+        applied_snapshot: None,
+        restored_snapshot: None,
+        verification: None,
+        verification_note: None,
+        application_uncertain: false,
+    };
+    write_json(&dir.path().join("alignment-state.json"), &alignment).unwrap();
+    controller.state.takes = vec![first, second];
+    let mut unrelated = support::arrival_review();
+    unrelated.output_id = "TBR".into();
+    controller.state.review = Some(unrelated);
+    controller
+        .state
+        .snapshot
+        .as_mut()
+        .unwrap()
+        .outputs
+        .retain(|o| o.id == "Front right");
+    controller.load_alignment(dir.path().to_str().unwrap());
+    let ctx = egui::Context::default();
+    let mut app = CompanionApp::preview(&ctx, controller);
+    let size = Vec2::new(1160.0, 1400.0);
+    finish_worker(&mut app, &ctx, size);
+    assert_eq!(app.controller.state.analyses.len(), 2);
+    let output = frame(&mut app, &ctx, vec![], size);
+    let button = labels(&output)
+        .into_iter()
+        .find(|(s, _)| s == "View result")
+        .unwrap()
+        .1;
+    click(&mut app, &ctx, button.center(), size);
+    finish_worker(&mut app, &ctx, size);
+    let text = labels(&frame(&mut app, &ctx, vec![], size));
+    for expected in [
+        "Front right · Measurement result",
+        "Latest saved analysis",
+        "Reanalyzed · arrival candidate",
+        "Pass 2 of 2 · Alignment combines both passes",
+    ] {
+        assert!(
+            text.iter().any(|(s, _)| s == expected),
+            "missing {expected}: {text:?}"
+        );
+    }
+    assert!(!text.iter().any(|(s, _)| s.contains("TBR")
+        || s.starts_with("Take ·")
+        || s.starts_with("Saved ·")
+        || s.contains("Recorded · timing unavailable")
+        || s.contains("Original take rejected")));
+    find_result_text(
+        &mut app,
+        &ctx,
+        size,
+        "Arrival relative to Front left: +2.400 ms",
+    );
+    let details = find_result_text(&mut app, &ctx, size, "Original capture details");
+    click(&mut app, &ctx, details.center(), size);
+    find_result_text(
+        &mut app,
+        &ctx,
+        size,
+        "Original take rejected: legacy broadband signal/noise rejection",
+    );
+    assert_eq!(
+        app.controller.state.review.as_ref().unwrap().directory,
+        dir.path().join("pass-2")
+    );
+    assert!(
+        app.controller
+            .state
+            .alignment
+            .as_ref()
+            .unwrap()
+            .profile
+            .is_none()
+    );
+    assert!(
+        app.controller
+            .state
+            .takes
+            .iter()
+            .all(|t| !t.outcome.as_ref().unwrap().accepted)
+    );
+    for (path, bytes) in originals {
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
+    assert_eq!(starts.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn an_unrelated_review_finishing_later_cannot_steal_the_selected_speaker() {
+    use companion_service::{
+        analysis_cache::CachedAnalysis,
+        controller::{Backend, Controller},
+        review::SavedReview,
+    };
+    use std::sync::{Arc, Mutex, atomic::AtomicBool, mpsc};
+    struct Gate {
+        entered: mpsc::SyncSender<()>,
+        release: Mutex<mpsc::Receiver<()>>,
+        report: SavedReview,
+    }
+    impl Backend for Gate {
+        fn inputs(&self) -> Result<Vec<measurement_capture::InputDevice>, String> {
+            Ok(vec![])
+        }
+        fn discover(&self, _: std::net::SocketAddr) -> Result<omniphony_adapter::Snapshot, String> {
+            Err("offline".into())
+        }
+        fn measure(
+            &self,
+            _: companion_service::measurement::MeasureRequest,
+            _: &AtomicBool,
+            _: &mut dyn FnMut(companion_service::measurement::MeasureProgress),
+        ) -> Result<companion_service::measurement::TakeOutcome, String> {
+            panic!("browsing must not measure")
+        }
+        fn review(&self, _: std::path::PathBuf) -> Result<SavedReview, String> {
+            self.entered.send(()).unwrap();
+            self.release
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap();
+            Ok(self.report.clone())
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let (mut ready, _) = support::ready();
+    let (take, review) = saved_result(&ready, &dir.path().join("FR"), "Front right");
+    let (_, unrelated) = saved_result(&ready, &dir.path().join("TBR"), "TBR");
+    let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    let mut controller = Controller::new(Arc::new(Gate {
+        entered: entered_tx,
+        release: Mutex::new(release_rx),
+        report: unrelated,
+    }));
+    controller.settings = ready.settings.clone();
+    controller.state = std::mem::take(&mut ready.state);
+    controller
+        .state
+        .snapshot
+        .as_mut()
+        .unwrap()
+        .outputs
+        .retain(|o| o.id == "Front right");
+    controller.state.takes.push(take);
+    controller.state.analyses.insert(
+        review.directory.clone(),
+        CachedAnalysis::from_review(&review),
+    );
+    controller.review_saved(dir.path().join("TBR").to_str().unwrap());
+    entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let ctx = egui::Context::default();
+    let mut app = CompanionApp::preview(&ctx, controller);
+    let size = Vec2::new(1160.0, 1000.0);
+    frame(&mut app, &ctx, vec![], size);
+    let text = labels(&frame(&mut app, &ctx, vec![], size));
+    let button = text.iter().find(|(s, _)| s == "View result").unwrap().1;
+    click(&mut app, &ctx, button.center(), size);
+    release_tx.send(()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let text = labels(&frame(&mut app, &ctx, vec![], size));
+        assert!(
+            text.iter()
+                .any(|(s, _)| s == "Front right · Measurement result")
+        );
+        assert!(!text.iter().any(|(s, _)| s.contains("TBR")));
+        if !app.controller.busy() {
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(
+        app.controller.state.review.as_ref().unwrap().report_file,
+        review.report_file
+    );
+    find_result_text(&mut app, &ctx, size, "Reanalyzed · arrival candidate");
+}
+
+/// Cached report fixture deliberately has unreadable PCM: browsing must not rerun DSP.
+pub fn saved_result(
+    controller: &companion_service::controller::Controller,
+    folder: &std::path::Path,
+    output: &str,
+) -> (
+    companion_service::controller::Take,
+    companion_service::review::SavedReview,
+) {
+    use companion_service::files::write_json;
+    std::fs::create_dir_all(folder).unwrap();
+    let mut review = support::arrival_review();
+    review.output_id = output.into();
+    review.microphone_id = controller.settings.microphone_id.clone();
+    review.position_id = controller.settings.position_id.clone();
+    review.directory = folder.to_owned();
+    review.report_file = folder.join("analysis-latest.json");
+    review.original_accepted_for_analysis = false;
+    review.original_rejection_reason = Some("legacy broadband signal/noise rejection".into());
+    write_json(&review.report_file, &review).unwrap();
+    write_json(
+        &folder.join("snapshot.json"),
+        controller.state.snapshot.as_ref().unwrap(),
+    )
+    .unwrap();
+    write_json(&folder.join("stimulus.json"), &serde_json::json!({
+        "output_id": output, "microphone_id": review.microphone_id, "position_id": review.position_id,
+        "reference_output_id": review.reference_output_id, "signal": review.signal
+    })).unwrap();
+    write_json(&folder.join("capture-report.json"), &serde_json::json!({
+        "schema_version": 3, "accepted_for_analysis": false, "rejection_reason": review.original_rejection_reason, "capture": {}
+    })).unwrap();
+    std::fs::write(
+        folder.join("recording.wav"),
+        b"cached fixture; no PCM analysis permitted",
+    )
+    .unwrap();
+    let take = companion_service::controller::Take {
+        output_id: output.into(),
+        revision: controller.state.snapshot.as_ref().unwrap().revision.clone(),
+        settings: controller.settings.clone(),
+        outcome: Ok(companion_service::measurement::TakeOutcome {
+            directory: folder.to_owned(),
+            accepted: false,
+            cancelled: false,
+            rejection_reason: review.original_rejection_reason.clone(),
+            diagnostics: None,
+            timing: None,
+            impulse: None,
+            impulse_error: None,
+        }),
+    };
+    (take, review)
 }
