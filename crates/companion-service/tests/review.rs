@@ -353,6 +353,7 @@ fn whole_alignment_reanalysis_retains_originals_and_cannot_apply_a_profile() {
         verification: None,
         verification_note: None,
         application_uncertain: false,
+        physical_levels_changed: false,
     };
     let before = fs::read(folders[0].join("capture-report.json")).unwrap();
     struct Offline;

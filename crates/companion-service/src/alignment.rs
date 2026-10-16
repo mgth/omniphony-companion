@@ -56,6 +56,8 @@ pub struct Alignment {
     pub verification: Option<core::VerificationReport>,
     /// Set before sending any mutation. Remains true if acknowledgement/storage fails.
     pub application_uncertain: bool,
+    #[serde(default)]
+    pub physical_levels_changed: bool,
 }
 #[derive(Debug, Clone)]
 pub struct Outcome {
@@ -204,6 +206,7 @@ pub fn capture<B: Backend + ?Sized>(
         verification_note: None,
         verification: None,
         application_uncertain: false,
+        physical_levels_changed: false,
     };
     let mut takes = vec![];
     // Preserve one calibration file for both passes, even if its source is edited.
@@ -582,6 +585,13 @@ pub fn apply<B: Backend + ?Sized>(
     alignment: &mut Alignment,
     restore: bool,
 ) -> Result<Snapshot, String> {
+    if !restore && alignment.physical_levels_changed {
+        return Err(
+            "Physical speaker levels may have changed. Measure a new alignment before applying."
+                .into(),
+        );
+    }
+
     if alignment.application_uncertain {
         return Err("Previous application is uncertain. Inspect the renderer and saved original settings before further changes.".into());
     }
@@ -642,6 +652,13 @@ pub fn verify<B: Backend + ?Sized>(
     cancel: &AtomicBool,
     progress: &mut dyn FnMut(usize, usize, MeasureProgress),
 ) -> Result<Outcome, String> {
+    if a.physical_levels_changed {
+        return Err(
+            "Physical speaker levels may have changed. Measure a new alignment before verifying."
+                .into(),
+        );
+    }
+
     if a.application_uncertain {
         return Err("Application state is uncertain.".into());
     }
@@ -742,4 +759,16 @@ pub fn load(directory: &Path) -> Result<Alignment, String> {
     }
     a.directory = directory.to_owned();
     Ok(a)
+}
+
+/// Preserve restoration data while preventing stale proposals after knob changes.
+pub fn invalidate_physical_levels(alignment: &mut Alignment) -> Result<(), String> {
+    if !alignment.physical_levels_changed {
+        alignment.physical_levels_changed = true;
+        alignment.verification = None;
+        alignment.verification_note =
+            Some("Physical speaker levels may have changed. Measure a new alignment.".into());
+        save(alignment)?;
+    }
+    Ok(())
 }

@@ -37,6 +37,7 @@ pub struct ViewPreferences {
     pub burst_frequency: f64,
     pub burst_overview: bool,
     pub burst_overlay: bool,
+    pub manual_noise_dbfs: f32,
 }
 impl Default for ViewPreferences {
     fn default() -> Self {
@@ -49,6 +50,7 @@ impl Default for ViewPreferences {
             burst_frequency: 1000.0,
             burst_overview: false,
             burst_overlay: true,
+            manual_noise_dbfs: -30.0,
         }
     }
 }

@@ -395,3 +395,36 @@ fn stable_projector_latency_warns_and_aligns_within_advertised_capacity() {
     );
     assert!(!a.blockers.is_empty());
 }
+
+#[test]
+fn physical_level_adjustment_persists_staleness_but_keeps_digital_restoration() {
+    let rig = Rig::new();
+    let root = tempfile::tempdir().unwrap();
+    let mut a = acquire(&rig, root.path());
+    assert!(a.profile.is_some());
+    alignment::apply(&rig, &mut a, false).unwrap();
+    let original = a.snapshot.clone();
+    alignment::invalidate_physical_levels(&mut a).unwrap();
+    let mut a = alignment::load(&a.directory).unwrap();
+    assert!(a.physical_levels_changed);
+    assert!(
+        alignment::apply(&rig, &mut a, false)
+            .unwrap_err()
+            .contains("Physical")
+    );
+    assert!(
+        alignment::verify(&rig, &mut a, &AtomicBool::new(false), &mut |_, _, _| {})
+            .unwrap_err()
+            .contains("Physical")
+    );
+    alignment::apply(&rig, &mut a, true).unwrap();
+    assert!(omniphony_adapter::same_configuration(
+        &rig.snapshot.lock().unwrap(),
+        &original
+    ));
+    assert!(
+        alignment::load(&a.directory)
+            .unwrap()
+            .physical_levels_changed
+    );
+}

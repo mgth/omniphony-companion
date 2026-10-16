@@ -773,6 +773,7 @@ fn alignment_session_stays_above_individual_results_and_unqualified_actions_stay
             verification: None,
             verification_note: None,
             application_uncertain: false,
+            physical_levels_changed: false,
         });
         let mut app = CompanionApp::preview(&ctx, controller);
         for _ in 0..3 {
@@ -1220,6 +1221,7 @@ fn loaded_alignment_pass_opens_its_latest_analysis_and_labels_the_original_verdi
         verification: None,
         verification_note: None,
         application_uncertain: false,
+        physical_levels_changed: false,
     };
     write_json(&dir.path().join("alignment-state.json"), &alignment).unwrap();
     controller.state.takes = vec![first, second];
@@ -1600,4 +1602,73 @@ fn quality_grades_draw_distinct_colored_symbols_with_readable_labels() {
         }
         assert_eq!(starts.load(Ordering::Relaxed), 0);
     }
+}
+
+#[test]
+fn manual_level_panel_saves_a_fresh_reference_shows_direction_and_stops() {
+    use companion_service::{
+        controller::Job,
+        manual_level::{Phase, Reading, Request, Run},
+    };
+    let ctx = egui::Context::default();
+    let (mut controller, starts) = support::ready();
+    let context = controller.manual_context(-30.0).unwrap();
+    let reference_level = calibration_core::manual_level::estimate(0.0101, 0.0001, 0.0).unwrap();
+    controller.state.job = Some(Job::ManualLevels {
+        output_id: "Front left".into(),
+    });
+    controller.state.manual_run = Some(Run {
+        request: Request {
+            context: context.clone(),
+            output_id: "Front left".into(),
+        },
+        reading: Some(Reading {
+            phase: Phase::Listening,
+            level: Some(reference_level),
+            remaining_seconds: 55,
+            captured_at: Instant::now(),
+        }),
+        error: None,
+        completed: false,
+    });
+    let mut app = CompanionApp::with_controller(&ctx, controller, false);
+    let size = Vec2::new(1400.0, 1000.0);
+    let output = frame(&mut app, &ctx, vec![], size);
+    let header = labels(&output)
+        .into_iter()
+        .find(|(s, _)| s.contains("Manual speaker levels"))
+        .unwrap()
+        .1;
+    click(&mut app, &ctx, header.center(), size);
+    for _ in 0..10 {
+        frame(&mut app, &ctx, vec![], size);
+    }
+    let output = frame(&mut app, &ctx, vec![], size);
+    let save = labels(&output)
+        .into_iter()
+        .find(|(s, _)| s == "Use live level as reference")
+        .unwrap()
+        .1;
+    click(&mut app, &ctx, save.center(), size);
+    assert!(app.controller.manual_reference(-30.0).is_some());
+    let run = app.controller.state.manual_run.as_mut().unwrap();
+    run.request.output_id = "Front right".into();
+    run.reading.as_mut().unwrap().level =
+        Some(calibration_core::manual_level::estimate(0.0051, 0.0001, 0.0).unwrap());
+    run.reading.as_mut().unwrap().captured_at = Instant::now();
+    let output = frame(&mut app, &ctx, vec![], size);
+    let text = labels(&output);
+    assert!(
+        text.iter()
+            .any(|(s, _)| s.contains("-3.0 dB relative to Front left"))
+    );
+    assert!(
+        text.iter()
+            .any(|(s, _)| s == "Raise this speaker’s physical volume")
+    );
+    let stop = text.into_iter().find(|(s, _)| s == "Stop noise").unwrap().1;
+    click(&mut app, &ctx, stop.center(), size);
+    assert!(app.controller.state.stopping);
+    assert!(!app.controller.can_set_manual_reference(-30.0));
+    assert_eq!(starts.load(Ordering::Relaxed), 0);
 }

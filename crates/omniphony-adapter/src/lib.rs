@@ -28,6 +28,7 @@ pub struct Client {
     session: Option<(String, Snapshot)>,
     progress: Option<Progress>,
     closed: bool,
+    noise_progress: Option<protocol::NoiseProgress>,
 }
 
 impl Client {
@@ -47,6 +48,7 @@ impl Client {
             session: None,
             progress: None,
             closed: false,
+            noise_progress: None,
         })
     }
 
@@ -304,6 +306,7 @@ impl Client {
             return Err(self.fail("renderer acknowledged a different signal"));
         }
         self.progress = Some(progress.clone());
+        self.noise_progress = None;
         Ok(progress)
     }
 
@@ -351,10 +354,102 @@ impl Client {
         Ok(progress)
     }
 
+    /// Finite, leased physical-level noise. Older renderers reject the optional
+    /// command; never fall back to the legacy unbounded speaker-test control.
+    pub fn start_noise(
+        &mut self,
+        signal_id: u64,
+        output_id: &str,
+        signal: protocol::LevelNoise,
+    ) -> Result<protocol::NoiseProgress> {
+        let session_id = self.session_id()?;
+        let reply = self.exchange(protocol::Command::StartNoise {
+            session_id,
+            signal_id,
+            output_id: output_id.into(),
+            signal,
+        }).map_err(|error| match error {
+            Error::Server { code, message } if code == "invalid_request" => Error::Server {
+                code,
+                message: format!("{message}. Manual level noise requires a compatible Omniphony calibration build; update Omniphony."),
+            },
+            other => other,
+        })?;
+        let progress = self.accept_noise(reply)?;
+        if progress.signal_id != signal_id
+            || progress.output_id != output_id
+            || progress.signal != signal
+        {
+            return Err(self.fail("renderer acknowledged different manual-level noise"));
+        }
+        self.noise_progress = Some(progress.clone());
+        self.progress = None;
+        Ok(progress)
+    }
+
+    fn accept_noise(&mut self, reply: protocol::Reply) -> Result<protocol::NoiseProgress> {
+        let protocol::Reply::NoiseSession {
+            session_id,
+            snapshot,
+            lease_ms,
+            signal,
+        } = reply
+        else {
+            return Err(self.fail("expected finite level-noise progress; update Omniphony"));
+        };
+        if self.session.as_ref() != Some(&(session_id, snapshot.clone()))
+            || lease_ms != protocol::LEASE_MS
+            || signal.signal.validate(snapshot.sample_rate).is_err()
+            || signal.signal_id == 0
+            || !snapshot.outputs.iter().any(|o| o.id == signal.output_id)
+            || signal.total_frames != signal.signal.frames(snapshot.sample_rate)
+            || signal.rendered_frames > signal.total_frames
+            || (signal.state == SignalState::Completed
+                && signal.rendered_frames != signal.total_frames)
+        {
+            return Err(self.fail("invalid manual-level noise progress or session identity"));
+        }
+        Ok(signal)
+    }
+
+    fn update_noise(&mut self, reply: protocol::Reply) -> Result<protocol::NoiseProgress> {
+        let next = self.accept_noise(reply)?;
+        let Some(previous) = &self.noise_progress else {
+            return Err(self.fail("no manual-level signal started"));
+        };
+        if next.signal_id != previous.signal_id
+            || next.output_id != previous.output_id
+            || next.signal != previous.signal
+            || next.rendered_frames < previous.rendered_frames
+            || (!matches!(previous.state, SignalState::Queued | SignalState::Rendering)
+                && previous.state != next.state)
+            || (previous.state == SignalState::Rendering && next.state == SignalState::Queued)
+        {
+            return Err(self.fail("manual-level signal identity or progress changed"));
+        }
+        self.noise_progress = Some(next.clone());
+        Ok(next)
+    }
+    pub fn noise_status(&mut self) -> Result<protocol::NoiseProgress> {
+        let session_id = self.session_id()?;
+        let reply = self.exchange(protocol::Command::Status { session_id })?;
+        self.update_noise(reply)
+    }
+    pub fn stop_noise(&mut self) -> Result<protocol::NoiseProgress> {
+        let session_id = self.session_id()?;
+        let reply = self.exchange(protocol::Command::Stop { session_id })?;
+        let progress = self.update_noise(reply)?;
+        if matches!(progress.state, SignalState::Queued | SignalState::Rendering) {
+            return Err(self.fail("manual-level noise stop was not acknowledged"));
+        }
+        Ok(progress)
+    }
+
     pub fn end(&mut self) -> Result<()> {
         let session_id = self.session_id()?;
         match self.exchange(protocol::Command::End { session_id })? {
             protocol::Reply::Ended {} => {
+                self.noise_progress = None;
                 self.session = None;
                 self.progress = None;
                 Ok(())

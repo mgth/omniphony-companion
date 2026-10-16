@@ -1,0 +1,80 @@
+# Manual physical speaker levels
+
+This tool matches active speakers by guiding adjustments to their physical
+volume controls. It does not propose or write digital output gains or delays.
+Use it before acquiring a new alignment session.
+
+## Use
+
+1. Connect to a renderer build with the optional finite level-noise extension.
+   Select the measurement interface, microphone channel and reference speaker.
+   Keep microphone position and interface input gain unchanged throughout.
+2. Expand **Manual speaker levels · physical volume controls**, above the speaker
+   list. Start with the conservative default test peak (-30 dBFS).
+3. Choose **Play reference**. The renderer silences programme audio; the companion
+   measures background, starts noise and waits two seconds for settling.
+4. When the live meter is available, choose **Use live level as reference**,
+   then **Stop noise**. The reference uses the current one-second band-power
+   window. It is a snapshot, not a level that follows later knob movements.
+5. Select a different speaker row, then **Play selected**. Adjust that speaker's
+   physical volume. Negative difference means raise its volume; positive means
+   lower it. Green indicates a difference within ±0.5 dB.
+6. Stop noise before selecting the next speaker. Capture a new reference if the
+   microphone, its position, interface gain or any relevant setup changes.
+7. Acquire a fresh two-pass alignment after physical adjustments.
+
+Each run stops after 60 seconds; **Stop noise**, the global **Stop** button and
+closing the app also stop it. Closing/minimizing a panel does not own the timer.
+There is no automatic playback on startup. The test-peak preference is saved;
+reference levels and active runs are intentionally not restored after restart.
+
+## What the meter means
+
+The renderer emits one repeatable second of periodic pink noise, looped without
+intervening gaps, with energy only in 500–2000 Hz. The microphone worker applies
+fourth-order Butterworth high/low passes and calculates rolling one-second
+power. It subtracts the quiet background power and removes the known current
+master/output digital gains for the comparison. Those settings remain unchanged.
+The displayed microphone band RMS is dBFS; the signed difference is a relative
+comparison in dB. Neither is calibrated acoustic SPL.
+
+The same stimulus and microphone setup must be used for reference and targets.
+A change in renderer snapshot, endpoint, input/channel/rate, microphone/position
+identity, reference speaker or noise peak invalidates the saved reference.
+Changes to an interface's physical input-gain knob cannot be detected: capture
+another reference after such a change. Do not move the microphone between speakers.
+
+Reference saving requires a fresh live sample and at least 10 dB signal/background
+ratio after background subtraction. Weak signal readings remain displayed with
+a warning. Silence, missing frames, capture faults and clipping stop or prevent
+playback. Stale UI samples cannot become reference evidence. The background
+estimate remains fixed during a run; substantial changes in room noise require
+restarting the run and checking the reference again.
+
+The common band must fit each output's declared frequency range. Muted outputs,
+sink monitors and subwoofers are excluded. This initial tool does not provide
+bass matching, sensitivity calibration, multiple-microphone averaging or
+automatic hardware volume control.
+
+## Previous alignments
+
+Physical knobs are outside the renderer's configuration revision. Before opening
+an adjustment run, the companion conservatively marks the currently loaded
+alignment stale and persists that state. It preserves the original digital
+settings so an applied alignment can still be restored. Applying/verifying the
+old proposal is blocked; offline reanalysis cannot make it current again.
+Historical recordings remain available for inspection. Earlier saved sessions
+also describe the old physical setup: acquire new evidence after knob changes.
+
+## Validation
+
+Automated tests cover known level ratios, background/trim compensation,
+excited-band filtering, clipping/nonfinite samples, reference identity/freshness,
+cancellation without frontend polling, persisted alignment retirement and digital
+restoration, protocol identity/stop validation and UI adjustment direction.
+Renderer tests cover spectrum, bounded storage, finite rendering, exclusive
+ownership, unsafe output refusal, lease expiry, disconnect and setup changes.
+A real renderer fixture that discards all audio buffers additionally exercises
+finite completion, switching outputs, explicit stop and disconnect through the
+Companion adapter. Real microphone/acoustic behavior still needs installation
+validation; automated development checks do not play physical speakers.

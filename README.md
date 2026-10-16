@@ -30,6 +30,9 @@ The Rust/egui desktop window lets you:
 - Connect to the local Omniphony address and list its physical speaker outputs,
   including current gain, delay, mute and frequency limits.
 - Choose a fixed timing-reference speaker and a listening position.
+- Match active speakers using **Manual speaker levels**: finite pink noise, a live
+  microphone meter and signed difference from a chosen reference. Adjust physical
+  volume controls; digital gains remain unchanged. See `docs/manual-speaker-levels.md`.
 - Start a measurement for one speaker, with progress inside its row and no layout shift.
 - Check the wired speakers and use **Measure selected speakers** for one continuous
   capture with shared reference sweeps. **Stop** cancels the complete run.
