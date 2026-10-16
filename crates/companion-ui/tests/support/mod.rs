@@ -366,5 +366,6 @@ pub fn alignment(
         verification: None,
         verification_note: None,
         application_uncertain: false,
+        physical_levels_changed: false,
     }
 }

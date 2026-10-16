@@ -10,13 +10,13 @@ pub struct BandNoise {
     pub signal_to_noise_db: [f64; 3],
 }
 
-struct Biquad {
+pub(crate) struct Biquad {
     b: [f64; 3],
     a: [f64; 2],
     z: [f64; 2],
 }
 impl Biquad {
-    fn new(hz: f64, rate: f64, q: f64, high_pass: bool) -> Self {
+    pub(crate) fn new(hz: f64, rate: f64, q: f64, high_pass: bool) -> Self {
         let omega = std::f64::consts::TAU * hz / rate;
         let c = omega.cos();
         let alpha = omega.sin() / (2.0 * q);
@@ -32,7 +32,7 @@ impl Biquad {
             z: [0.0; 2],
         }
     }
-    fn process(&mut self, x: f64) -> f64 {
+    pub(crate) fn process(&mut self, x: f64) -> f64 {
         let y = self.b[0] * x + self.z[0];
         self.z[0] = self.b[1] * x - self.a[0] * y + self.z[1];
         self.z[1] = self.b[2] * x - self.a[1] * y;

@@ -4,6 +4,7 @@ pub mod analysis_cache;
 pub mod batch;
 pub mod controller;
 pub mod files;
+pub mod manual_level;
 pub mod measurement;
 pub mod microphone;
 pub mod preferences;

@@ -268,3 +268,15 @@ and IIR/FIR/MIMO choices will be decided separately.
 - [REW — measurements and timing references](https://www.roomeqwizard.com/help/help_en-GB/html/makingmeasurements.html)
 - [DRC-FIR — method documentation](https://drc-fir.sourceforge.net/doc/drc.html)
 - [CamillaDSP — engine and documentation](https://github.com/HEnquist/camilladsp)
+
+
+### Manual hardware level preparation
+
+A separate manual-level tool now helps the user match physical active-speaker
+volume knobs against a measured reference. It uses finite leased 500–2000 Hz
+pink noise, a bounded microphone meter, background subtraction and relative
+comparison with existing digital trims removed. It does not apply a calibration
+profile. Current alignment proposals are retired before adjustments while keeping
+original digital restoration data. See `docs/manual-speaker-levels.md`.
+Installation validation, subwoofer matching and sensitivity-calibrated SPL remain
+future work.

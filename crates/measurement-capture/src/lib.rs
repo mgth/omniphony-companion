@@ -5,6 +5,7 @@ pub mod diagnostics;
 pub mod impulse;
 pub mod input;
 pub mod level;
+pub mod live_level;
 pub mod noise;
 #[cfg(target_os = "linux")]
 mod pipewire_capture;
@@ -318,6 +319,16 @@ impl Capture {
             self.max_frames,
             &self.faults,
         );
+    }
+    /// Live meters consume and discard PCM on the worker. Capacity is retained;
+    /// no recording grows with runtime and the callback remains unchanged.
+    pub fn drain_live(&mut self, mut consume: impl FnMut(f32)) -> usize {
+        self.poll();
+        let count = self.samples.len();
+        for sample in self.samples.drain(..) {
+            consume(sample);
+        }
+        count
     }
     pub fn frames(&self) -> usize {
         self.samples.len()

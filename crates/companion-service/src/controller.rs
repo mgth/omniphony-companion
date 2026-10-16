@@ -2,6 +2,7 @@
 use crate::{
     alignment,
     batch::{self, BatchOutcome},
+    manual_level,
     measurement::{self, MeasureProgress, MeasureRequest, TakeOutcome},
     microphone::{self, InputRequest},
     review::{self, SavedReview},
@@ -20,6 +21,16 @@ use std::{
 };
 
 pub trait Backend: Send + Sync + 'static {
+    fn manual_levels(
+        &self,
+        request: manual_level::Request,
+        cancel: &AtomicBool,
+        update: &mut dyn FnMut(manual_level::Reading),
+    ) -> Result<(), String> {
+        let _ = (request, cancel, update);
+        Err("Manual speaker levels are unavailable in this backend.".into())
+    }
+
     fn check_input(
         &self,
         request: InputRequest,
@@ -63,6 +74,15 @@ pub trait Backend: Send + Sync + 'static {
 }
 pub struct LiveBackend;
 impl Backend for LiveBackend {
+    fn manual_levels(
+        &self,
+        request: manual_level::Request,
+        cancel: &AtomicBool,
+        update: &mut dyn FnMut(manual_level::Reading),
+    ) -> Result<(), String> {
+        manual_level::run(request, cancel, update).map_err(|e| e.to_string())
+    }
+
     fn check_input(
         &self,
         request: InputRequest,
@@ -147,6 +167,9 @@ impl Default for Settings {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Job {
+    ManualLevels {
+        output_id: String,
+    },
     InputCheck,
     Alignment {
         output_ids: Vec<String>,
@@ -193,6 +216,8 @@ pub struct State {
     pub workspace_imported: bool,
     pub workspace_revision: u64,
     pub input_check: Option<InputCheck>,
+    pub manual_run: Option<manual_level::Run>,
+    pub manual_reference: Option<manual_level::Reference>,
     pub alignment: Option<alignment::Alignment>,
     pub review: Option<SavedReview>,
     pub review_error: Option<String>,
@@ -243,6 +268,9 @@ impl LoadedAlignment {
 }
 
 enum Event {
+    ManualReading(manual_level::Reading),
+    ManualFinished(Result<(), String>),
+    PhysicalLevelsInvalidated(Box<alignment::Alignment>),
     WorkspaceRestored(Box<Result<crate::workspace::RestoredWorkspace, String>>),
     InputLevel(measurement_capture::input::InputLevel),
     InputChecked(Result<(), String>),
@@ -302,7 +330,11 @@ impl Controller {
         )
     }
     pub fn cancellable(&self) -> bool {
-        self.measuring() || matches!(self.state.job, Some(Job::InputCheck))
+        self.measuring()
+            || matches!(
+                self.state.job,
+                Some(Job::InputCheck | Job::ManualLevels { .. })
+            )
     }
 
     pub fn input_request(&self) -> Result<InputRequest, String> {
@@ -375,6 +407,130 @@ impl Controller {
             });
             let _ = sender.send(Event::InputChecked(result));
         });
+    }
+
+    pub fn manual_context(&self, peak_dbfs: f32) -> Result<manual_level::Context, String> {
+        let input = self.input_request()?;
+        if self.selected_input().is_some_and(|d| d.is_monitor) {
+            return Err("Select a physical microphone, not a sink monitor.".into());
+        }
+        let context = manual_level::Context {
+            endpoint: self.state.endpoint.ok_or("Connect to Omniphony first.")?,
+            snapshot: self
+                .state
+                .snapshot
+                .clone()
+                .ok_or("Connect to Omniphony first.")?,
+            input,
+            microphone_id: self.settings.microphone_id.clone(),
+            position_id: self.settings.position_id.clone(),
+            reference_output: self
+                .settings
+                .reference_output
+                .clone()
+                .ok_or("Choose a reference speaker in the microphone settings.")?,
+            peak_dbfs,
+        };
+        context.output(&context.reference_output)?;
+        Ok(context)
+    }
+    pub fn manual_reference(&self, peak_dbfs: f32) -> Option<&manual_level::Reference> {
+        let context = self.manual_context(peak_dbfs).ok()?;
+        self.state
+            .manual_reference
+            .as_ref()
+            .filter(|r| r.context == context)
+    }
+    pub fn start_manual_levels(&mut self, output_id: &str, peak_dbfs: f32) {
+        if self.busy() {
+            return;
+        }
+        let request = match self.manual_context(peak_dbfs).and_then(|context| {
+            context.output(output_id)?;
+            Ok(manual_level::Request {
+                context,
+                output_id: output_id.into(),
+            })
+        }) {
+            Ok(r) => r,
+            Err(e) => {
+                self.state.error = Some(e);
+                return;
+            }
+        };
+        if request.output_id != request.context.reference_output
+            && self.manual_reference(peak_dbfs).is_none()
+        {
+            self.state.error = Some("Play and save the reference speaker level first.".into());
+            return;
+        }
+        if self
+            .state
+            .manual_reference
+            .as_ref()
+            .is_some_and(|r| r.context != request.context)
+        {
+            self.state.manual_reference = None;
+        }
+        self.state.manual_run = Some(manual_level::Run {
+            request: request.clone(),
+            reading: None,
+            error: None,
+            completed: false,
+        });
+        self.state.job = Some(Job::ManualLevels {
+            output_id: output_id.into(),
+        });
+        self.state.stopping = false;
+        self.state.error = None;
+        self.cancelled = Arc::new(AtomicBool::new(false));
+        let (backend, sender, cancel, alignment) = (
+            self.backend.clone(),
+            self.sender.clone(),
+            self.cancelled.clone(),
+            self.state.alignment.clone(),
+        );
+        std::thread::spawn(move || {
+            let result = catch_job(|| {
+                // Physical changes cannot be detected in the renderer snapshot.
+                // Conservatively retire old proposals before enabling adjustment.
+                if let Some(mut alignment) = alignment {
+                    crate::alignment::invalidate_physical_levels(&mut alignment)?;
+                    let _ = sender.send(Event::PhysicalLevelsInvalidated(Box::new(alignment)));
+                }
+                backend.manual_levels(request, &cancel, &mut |reading| {
+                    let _ = sender.send(Event::ManualReading(reading));
+                })
+            });
+            let _ = sender.send(Event::ManualFinished(result));
+        });
+    }
+    pub fn can_set_manual_reference(&self, peak_dbfs: f32) -> bool {
+        let Some(run) = &self.state.manual_run else {
+            return false;
+        };
+        matches!(self.state.job, Some(Job::ManualLevels { .. }))
+            && !self.state.stopping
+            && self.manual_context(peak_dbfs).as_ref() == Ok(&run.request.context)
+            && run.request.output_id == run.request.context.reference_output
+            && run.reading.as_ref().is_some_and(|r| {
+                r.phase == manual_level::Phase::Listening
+                    && r.captured_at.elapsed() < Duration::from_millis(500)
+                    && r.level.is_some_and(|l| l.usable())
+            })
+    }
+    pub fn set_manual_reference(&mut self, peak_dbfs: f32) {
+        if !self.can_set_manual_reference(peak_dbfs) {
+            return;
+        }
+        if let Some(run) = &self.state.manual_run
+            && let Some(level) = run.reading.as_ref().and_then(|r| r.level)
+        {
+            self.state.manual_reference = Some(manual_level::Reference {
+                context: run.request.context.clone(),
+                level,
+            });
+        }
     }
 
     /// Offline analysis uses the same worker boundary as acquisition. No renderer needed.
@@ -963,7 +1119,8 @@ impl Controller {
         while let Ok(event) = self.receiver.try_recv() {
             if !matches!(
                 &event,
-                Event::InputLevel(_)
+                Event::ManualReading(_)
+                    | Event::InputLevel(_)
                     | Event::AlignmentProgress(..)
                     | Event::BatchProgress(..)
                     | Event::Progress(_)
@@ -971,6 +1128,23 @@ impl Controller {
                 self.state.workspace_revision = self.state.workspace_revision.wrapping_add(1);
             }
             match event {
+                Event::ManualReading(reading) => {
+                    if let Some(run) = &mut self.state.manual_run {
+                        run.reading = Some(reading);
+                    }
+                }
+                Event::PhysicalLevelsInvalidated(alignment) => {
+                    self.state.alignment = Some(*alignment);
+                }
+                Event::ManualFinished(result) => {
+                    if let Some(run) = &mut self.state.manual_run {
+                        run.error = result.err();
+                        run.completed = true;
+                    }
+                    self.state.job = None;
+                    self.state.stopping = false;
+                }
+
                 Event::WorkspaceRestored(result) => {
                     match *result {
                         Ok(saved) => {

@@ -60,6 +60,24 @@ fn snapshot() -> Snapshot {
     }
 }
 impl Backend for Bench {
+    fn manual_levels(
+        &self,
+        _request: companion_service::manual_level::Request,
+        cancel: &AtomicBool,
+        update: &mut dyn FnMut(companion_service::manual_level::Reading),
+    ) -> Result<(), String> {
+        update(companion_service::manual_level::Reading {
+            phase: companion_service::manual_level::Phase::Listening,
+            level: Some(calibration_core::manual_level::estimate(0.0101, 0.0001, -2.0).unwrap()),
+            remaining_seconds: 55,
+            captured_at: Instant::now(),
+        });
+        while !cancel.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        self.finished.store(true, Ordering::Relaxed);
+        Ok(())
+    }
     fn check_input(
         &self,
         request: companion_service::microphone::InputRequest,
@@ -417,4 +435,75 @@ fn offline_review_does_not_require_a_connection_or_trigger_capture() {
     c.review_saved("");
     assert!(!c.busy());
     assert!(c.state.review_error.is_some());
+}
+
+#[test]
+fn manual_levels_are_cancellable_keep_reference_identity_and_never_capture_takes() {
+    let b = Arc::new(Bench::new());
+    let mut c = ready(b.clone());
+    c.start_manual_levels("Left", -30.0);
+    assert!(c.cancellable());
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while c.state.manual_run.as_ref().unwrap().reading.is_none() {
+        c.poll();
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(c.can_set_manual_reference(-30.0));
+    c.set_manual_reference(-30.0);
+    assert!(c.manual_reference(-30.0).is_some());
+    assert!(c.manual_reference(-29.0).is_none());
+    c.settings.position_id.push_str("-moved");
+    assert!(!c.can_set_manual_reference(-30.0));
+    assert!(c.manual_reference(-30.0).is_none());
+    c.settings.position_id = "reference-seat".into();
+    c.state
+        .manual_run
+        .as_mut()
+        .unwrap()
+        .reading
+        .as_mut()
+        .unwrap()
+        .captured_at = Instant::now() - Duration::from_secs(1);
+    assert!(!c.can_set_manual_reference(-30.0));
+    c.start("Right");
+    assert_eq!(b.calls.load(Ordering::Relaxed), 0);
+    c.cancel();
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while !b.finished.load(Ordering::Relaxed) {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    settled(&mut c);
+    assert!(c.state.manual_run.as_ref().unwrap().completed);
+    assert!(!c.can_set_manual_reference(-30.0));
+    assert!(c.state.takes.is_empty());
+    assert!(c.state.analyses.is_empty());
+    b.finished.store(false, Ordering::Relaxed);
+    c.start_manual_levels("Right", -30.0);
+    assert!(c.busy());
+    drop(c);
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while !b.finished.load(Ordering::Relaxed) {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    // Drop cancels even without a final paint/event-poll cycle.
+}
+
+#[test]
+fn manual_levels_reject_monitor_bass_only_muted_missing_or_excessive_drive() {
+    let mut c = ready(Arc::new(Bench::new()));
+    c.start_manual_levels("Sub", -30.0);
+    assert!(!c.busy());
+    c.state.snapshot.as_mut().unwrap().outputs[2].muted = false;
+    assert!(c.manual_context(-30.0).unwrap().output("Sub").is_err());
+    c.state.inputs[0].is_monitor = true;
+    assert!(c.manual_context(-30.0).is_err());
+    c.state.inputs[0].is_monitor = false;
+    assert!(c.manual_context(f32::NAN).is_err());
+    c.state.snapshot.as_mut().unwrap().outputs[0].gain_db = 20.0;
+    assert!(c.manual_context(-12.0).is_err());
+    c.disconnect();
+    assert!(c.manual_context(-30.0).is_err());
 }

@@ -1,5 +1,6 @@
 //! Native presentation only. Workers and measurement ownership live in companion-service.
 mod alignment_view;
+mod manual_level_view;
 mod microphone_view;
 mod quality_view;
 mod spectral_plot;
@@ -32,6 +33,7 @@ pub struct CompanionApp {
     last_workspace_revision: u64,
     pub result_plot: ResultPlot,
     waveform_view: waveform_plot::State,
+    manual_noise_dbfs: f32,
     saved_selected: bool,
     pending_review_folder: Option<std::path::PathBuf>,
     attempted_analysis: Option<std::path::PathBuf>,
@@ -78,6 +80,11 @@ impl CompanionApp {
         app.waveform_view.overview = prefs.view.burst_overview;
         app.waveform_view.overlay = prefs.view.burst_overlay;
         app.saved_selected = prefs.view.saved_selected;
+        app.manual_noise_dbfs = if prefs.view.manual_noise_dbfs.is_finite() {
+            prefs.view.manual_noise_dbfs.clamp(-60.0, -12.0)
+        } else {
+            -30.0
+        };
         app.preferences = Some(store);
         let index = if reconnect {
             prefs.workspace
@@ -110,6 +117,7 @@ impl CompanionApp {
             last_workspace_revision: u64::MAX,
             result_plot: ResultPlot::default(),
             waveform_view: waveform_plot::State::default(),
+            manual_noise_dbfs: -30.0,
             pending_review_folder: None,
             attempted_analysis: None,
             endpoint: "127.0.0.1:9000".into(),
@@ -396,6 +404,7 @@ impl CompanionApp {
                     burst_frequency: self.waveform_view.frequency,
                     burst_overview: self.waveform_view.overview,
                     burst_overlay: self.waveform_view.overlay,
+                    manual_noise_dbfs: self.manual_noise_dbfs,
                 });
             }
         }
@@ -647,6 +656,14 @@ impl CompanionApp {
     }
 
     fn speakers(&mut self, ui: &mut egui::Ui) {
+        manual_level_view::draw(
+            ui,
+            &mut self.controller,
+            self.selected_speaker.as_deref(),
+            &mut self.manual_noise_dbfs,
+        );
+        ui.add_space(10.0);
+
         egui::CollapsingHeader::new("Review a saved take · no playback").show(ui, |ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut self.review_path)
@@ -709,7 +726,7 @@ impl CompanionApp {
             }
             if ui
                 .add_enabled(
-                    self.controller.measuring() && !self.controller.state.stopping,
+                    self.controller.cancellable() && !self.controller.state.stopping,
                     egui::Button::new(RichText::new("Stop").color(RED))
                         .min_size(Vec2::new(60.0, 30.0)),
                 )

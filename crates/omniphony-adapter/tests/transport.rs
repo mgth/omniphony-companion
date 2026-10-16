@@ -434,3 +434,108 @@ fn discovery_uses_advertised_delay_capacity_and_refuses_unsettled_capacities() {
         join.join().unwrap();
     }
 }
+
+fn noise_progress(state: SignalState, frames: u64) -> NoiseProgress {
+    let signal = LevelNoise {
+        duration_seconds: 60,
+        peak_dbfs: -30.0,
+    };
+    NoiseProgress {
+        signal_id: 1,
+        output_id: "L".into(),
+        signal,
+        state,
+        rendered_frames: frames,
+        total_frames: signal.frames(48000),
+    }
+}
+fn noise_session(signal: NoiseProgress) -> Reply {
+    Reply::NoiseSession {
+        session_id: "session:1".into(),
+        snapshot: snapshot(),
+        lease_ms: LEASE_MS,
+        signal,
+    }
+}
+#[test]
+fn finite_noise_validates_identity_progress_stop_and_has_no_legacy_fallback() {
+    for invalid in 0..5 {
+        let (endpoint, handle) = server(move |mut stream| {
+            let r = receive(&mut stream);
+            send(&mut stream, r.request_id, session(None));
+            let r = receive(&mut stream);
+            assert!(
+                matches!(r.command, Command::StartNoise { signal_id: 1, ref output_id, .. } if output_id == "L")
+            );
+            send(
+                &mut stream,
+                r.request_id,
+                noise_session(noise_progress(SignalState::Queued, 0)),
+            );
+            let r = receive(&mut stream);
+            assert!(matches!(r.command, Command::Status { .. }));
+            let mut p = noise_progress(SignalState::Rendering, 1000);
+            match invalid {
+                1 => p.signal.peak_dbfs = -29.0,
+                2 => p.total_frames += 1,
+                3 => p.output_id = "missing".into(),
+                4 => p.state = SignalState::Completed,
+                _ => {}
+            }
+            send(&mut stream, r.request_id, noise_session(p));
+            if invalid == 0 {
+                let r = receive(&mut stream);
+                assert!(matches!(r.command, Command::Stop { .. }));
+                send(
+                    &mut stream,
+                    r.request_id,
+                    noise_session(noise_progress(SignalState::Cancelled, 1000)),
+                );
+                let r = receive(&mut stream);
+                assert!(matches!(r.command, Command::End { .. }));
+                send(&mut stream, r.request_id, Reply::Ended {});
+            }
+        });
+        let mut client = Client::connect(endpoint, Duration::from_secs(1)).unwrap();
+        client.begin(&snapshot()).unwrap();
+        client
+            .start_noise(1, "L", noise_progress(SignalState::Queued, 0).signal)
+            .unwrap();
+        if invalid == 0 {
+            assert_eq!(client.noise_status().unwrap().rendered_frames, 1000);
+            assert_eq!(client.stop_noise().unwrap().state, SignalState::Cancelled);
+            client.end().unwrap();
+        } else {
+            assert!(client.noise_status().is_err());
+        }
+        handle.join().unwrap();
+    }
+    let (endpoint, handle) = server(|mut stream| {
+        let r = receive(&mut stream);
+        send(&mut stream, r.request_id, session(None));
+        let r = receive(&mut stream);
+        send(
+            &mut stream,
+            r.request_id,
+            Reply::Error {
+                code: "invalid_request".into(),
+                message: "unknown command".into(),
+            },
+        );
+        // The only follow-up is the caller's explicit End; never legacy test playback.
+        let r = receive(&mut stream);
+        assert!(matches!(r.command, Command::End { .. }));
+        send(&mut stream, r.request_id, Reply::Ended {});
+    });
+    let mut client = Client::connect(endpoint, Duration::from_secs(1)).unwrap();
+    client.begin(&snapshot()).unwrap();
+    assert!(
+        client
+            .start_noise(1, "L", noise_progress(SignalState::Queued, 0).signal)
+            .unwrap_err()
+            .to_string()
+            .contains("update Omniphony")
+    );
+    client.end().unwrap();
+    handle.join().unwrap();
+}

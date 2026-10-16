@@ -4,6 +4,7 @@
 //! Hardware adapters must supply timing-referenced, comparable observations.
 //! All public operations revalidate deserialized data before using it.
 
+pub mod manual_level;
 mod model;
 mod policy;
 pub mod repeatability;

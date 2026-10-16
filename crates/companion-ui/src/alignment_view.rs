@@ -14,8 +14,13 @@ pub fn session(ui: &mut egui::Ui, a: &Alignment, busy: bool) -> Option<&'static 
         .small()
         .color(super::MUTED),
     );
+    if a.physical_levels_changed {
+        ui.colored_label(super::WARM, "Physical levels may have changed · measure a new alignment. Original digital settings can still be restored.");
+    }
     if a.application_uncertain {
         ui.colored_label(super::RED, "Application outcome is uncertain. Inspect Omniphony and the saved original settings before further changes.");
+    } else if a.physical_levels_changed {
+        // The explicit stale-state message above replaces proposal readiness.
     } else if a.profile.is_none() {
         ui.colored_label(super::WARM, "No correction proposal. Speaker gains and delays have not been changed by this session.");
     } else if a.applied_snapshot.is_none() {
@@ -42,7 +47,7 @@ pub fn session(ui: &mut egui::Ui, a: &Alignment, busy: bool) -> Option<&'static 
         let ready = !busy && !a.application_uncertain && a.profile.is_some();
         if ui
             .add_enabled(
-                ready && a.applied_snapshot.is_none(),
+                ready && !a.physical_levels_changed && a.applied_snapshot.is_none(),
                 egui::Button::new("Apply gains and delays"),
             )
             .clicked()
@@ -51,7 +56,7 @@ pub fn session(ui: &mut egui::Ui, a: &Alignment, busy: bool) -> Option<&'static 
         }
         if ui
             .add_enabled(
-                ready && a.applied_snapshot.is_some(),
+                ready && !a.physical_levels_changed && a.applied_snapshot.is_some(),
                 egui::Button::new("Verify · 2 passes"),
             )
             .clicked()
