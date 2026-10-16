@@ -39,6 +39,9 @@ pub fn windows(
         return Err("invalid sequence recording".into());
     }
     let source = sweep.samples(render_rate)?;
+    if samples.iter().all(|s| *s == 0.0) {
+        return Err(crate::input::NO_SIGNAL.into());
+    }
     let nominal = capture_rate as f64 / render_rate as f64;
     let first = endpoints(
         samples,
@@ -105,6 +108,28 @@ fn endpoints(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn zero_batch_is_reported_as_missing_input_not_missing_references() {
+        let sweep = Sweep {
+            duration_ms: 1000,
+            peak_dbfs: -12.0,
+            start_hz: 200.0,
+            end_hz: 10000.0,
+        };
+        let samples = vec![0.0; 2_013_184];
+        assert_eq!(
+            windows(&samples, 48000, 48000, sweep, 13).unwrap_err(),
+            crate::input::NO_SIGNAL
+        );
+        assert_eq!(
+            crate::timing::analyze(&samples[..240000], 48000, 48000, sweep).unwrap_err(),
+            crate::input::NO_SIGNAL
+        );
+        let diagnostics =
+            crate::diagnostics::analyze(&samples[..240000], 48000, 48000, sweep).unwrap();
+        assert_eq!(diagnostics.messages, [crate::input::NO_SIGNAL]);
+        assert!(diagnostics.segments.is_none());
+    }
     #[test]
     fn overlapping_windows_retain_shared_reference_and_local_delays_with_drift() {
         let sweep = Sweep {

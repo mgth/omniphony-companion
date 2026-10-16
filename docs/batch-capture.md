@@ -1,7 +1,7 @@
 # Continuous whole-system capture
 
 Select an input, channel, sample rate and fixed reference speaker. Check the
-speakers that are wired and ready, then choose **Measure all checked**. The
+speakers that are wired and ready, then choose **Measure selected speakers**. The
 reference must remain connected even if it is unchecked as a measurement target.
 Muted speakers and speakers whose frequency or level limits cannot accommodate
 the selected sweep are excluded. Individual **Measure** actions remain available.

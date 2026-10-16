@@ -192,6 +192,9 @@ The experimental software loop now includes repeatable target acquisition, compa
 explicit live application/readback, repeated verification and guarded restoration.
 Real-interface accuracy, repeatability and acoustic before/after validation are
 still required before calling mission 1 complete. See `docs/gain-delay-alignment.md`.
+Input preparation now includes an explicit ten-second microphone meter and a fresh
+pre-playback activity check on every capture. Digital silence is reported directly,
+and alignment retains pass completion/failure summaries. See `docs/microphone-check.md`.
 Keep the microphone fixed at the reference seat. Preserve uncertainty: repeatability
 alone does not establish an unobstructed direct path. Subwoofer integration remains
 outside this mission. No tonal EQ or spatial sensor work should displace this priority.

@@ -84,6 +84,10 @@ pub fn analyze(
     if report.total_clipped_samples > 0 {
         report.messages.push("Recording clipped. Reduce playback or microphone input gain before repeating; this take cannot be used for correction.".into());
     }
+    if samples.iter().all(|s| *s == 0.0) {
+        report.messages.push(crate::input::NO_SIGNAL.into());
+        return Ok(report);
+    }
     match locate_segments(samples, capture_rate, render_rate, sweep, noise) {
         Ok((references, segments)) => {
             let target = &segments[1];

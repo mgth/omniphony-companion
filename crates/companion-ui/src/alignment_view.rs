@@ -13,6 +13,13 @@ pub fn draw(ui: &mut egui::Ui, a: &Alignment, busy: bool) -> Option<&'static str
         a.settings.microphone_id,
         a.settings.reference_output.as_deref().unwrap_or("—")
     ));
+    pass_summary(ui, "Baseline", a.pass_reports.as_deref(), a.rows.len());
+    if let Some(passes) = &a.verification_pass_reports {
+        pass_summary(ui, "Verification", Some(passes), a.rows.len());
+    }
+    if a.profile.is_none() && !a.application_uncertain {
+        ui.colored_label(super::WARM, "No correction proposal. Speaker gains and delays have not been changed by this session.");
+    }
     for reason in &a.blockers {
         ui.colored_label(super::RED, reason);
     }
@@ -168,4 +175,34 @@ pub fn draw(ui: &mut egui::Ui, a: &Alignment, busy: bool) -> Option<&'static str
         }
     });
     action
+}
+
+fn pass_summary(
+    ui: &mut egui::Ui,
+    label: &str,
+    passes: Option<&[companion_service::alignment::PassReport]>,
+    speakers: usize,
+) {
+    let Some(passes) = passes else {
+        ui.label(format!(
+            "{label}: pass completion was not recorded by this older session."
+        ));
+        return;
+    };
+    for pass in 0..2 {
+        let status = match passes.get(pass) {
+            None => "not started".to_owned(),
+            Some(p) => format!(
+                "{} · {} / {} speakers analyzed",
+                if p.error.is_some() {
+                    "stopped"
+                } else {
+                    "complete"
+                },
+                p.analyzed_speakers,
+                speakers
+            ),
+        };
+        ui.label(format!("{label} pass {} / 2: {status}", pass + 1));
+    }
 }
