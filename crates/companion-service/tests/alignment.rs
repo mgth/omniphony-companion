@@ -22,6 +22,7 @@ struct Rig {
     writes: AtomicUsize,
     lose_ack: AtomicBool,
     bad_repeat: AtomicBool,
+    silent_batch: AtomicBool,
     captures: AtomicUsize,
 }
 impl Rig {
@@ -52,6 +53,7 @@ impl Rig {
             writes: AtomicUsize::new(0),
             lose_ack: AtomicBool::new(false),
             bad_repeat: AtomicBool::new(false),
+            silent_batch: AtomicBool::new(false),
             captures: AtomicUsize::new(0),
         }
     }
@@ -106,6 +108,14 @@ impl Backend for Rig {
     ) -> Result<BatchOutcome, String> {
         assert_eq!(*self.snapshot.lock().unwrap(), args.snapshot);
         let pass = self.captures.fetch_add(1, Ordering::Relaxed);
+        if self.silent_batch.load(Ordering::Relaxed) {
+            return Ok(BatchOutcome {
+                directory: args.out_dir,
+                takes: vec![],
+                cancelled: false,
+                error: Some(measurement_capture::input::NO_SIGNAL.into()),
+            });
+        }
         std::fs::create_dir_all(&args.out_dir).unwrap();
         let mut takes = vec![];
         for (index, id) in outputs.iter().enumerate() {
@@ -198,6 +208,7 @@ fn measured_pipeline_proposes_applies_verifies_reloads_and_restores_without_accu
     let mut a = acquire(&rig, root.path());
     assert!(a.blockers.is_empty(), "{:?}", a.blockers);
     assert!(a.profile.is_some(), "{:?}", a.rows);
+    assert_eq!(a.pass_reports.as_ref().unwrap().len(), 2);
     let targets = a.targets(false).unwrap();
     assert!((targets[0].gain_db + 6.0206).abs() < 0.05);
     assert!((targets[0].delay_ms - 3.0).abs() < 0.05);
@@ -244,6 +255,42 @@ fn measured_pipeline_proposes_applies_verifies_reloads_and_restores_without_accu
     rig.snapshot.lock().unwrap().revision = "external-change".into();
     assert!(alignment::apply(&rig, &mut loaded, true).is_err());
     assert_eq!(rig.writes.load(Ordering::Relaxed), 3);
+}
+
+#[test]
+fn failed_input_records_first_pass_failure_without_starting_second_pass_or_proposing() {
+    let root = tempfile::tempdir().unwrap();
+    let rig = Rig::new();
+    rig.silent_batch.store(true, Ordering::Relaxed);
+    let a = acquire(&rig, root.path());
+    assert_eq!(rig.captures.load(Ordering::Relaxed), 1);
+    assert!(a.profile.is_none());
+    assert!(a.applied_snapshot.is_none());
+    assert_eq!(rig.writes.load(Ordering::Relaxed), 0);
+    let loaded = alignment::load(&a.directory).unwrap();
+    let reports = loaded.pass_reports.unwrap();
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0].analyzed_speakers, 0);
+    assert_eq!(
+        reports[0].error.as_deref(),
+        Some(measurement_capture::input::NO_SIGNAL)
+    );
+    assert_eq!(a.blockers, [measurement_capture::input::NO_SIGNAL]);
+    // Older saved sessions remain readable and do not invent pass history.
+    let file = a.directory.join("alignment-state.json");
+    let mut json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    json.as_object_mut().unwrap().remove("pass_reports");
+    json.as_object_mut()
+        .unwrap()
+        .remove("verification_pass_reports");
+    std::fs::write(file, serde_json::to_vec(&json).unwrap()).unwrap();
+    assert!(
+        alignment::load(&a.directory)
+            .unwrap()
+            .pass_reports
+            .is_none()
+    );
 }
 #[test]
 fn uncertain_mutation_is_persisted_and_never_retried() {

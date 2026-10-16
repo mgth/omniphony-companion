@@ -118,7 +118,9 @@ pub fn measure(
         capture.poll();
         analysis_start_frame = capture.frames() + args.sample_rate as usize / 5;
         progress(0, MeasureProgress::LeadIn);
-        drain_for(&mut capture, Duration::from_millis(600), cancelled)?;
+        crate::microphone::before_playback(&mut capture, args.sample_rate, cancelled, &mut |p| {
+            progress(0, p)
+        })?;
         let mut state = client.start_sequence(
             1,
             &args.output,

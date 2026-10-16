@@ -1,5 +1,6 @@
 //! Native presentation only. Workers and measurement ownership live in companion-service.
 mod alignment_view;
+mod microphone_view;
 mod spectral_plot;
 mod waveform_plot;
 use companion_service::{
@@ -141,7 +142,7 @@ impl CompanionApp {
             self.last_review_file = review_file;
         }
         if ctx.input(|i| i.viewport().close_requested())
-            && (self.controller.measuring()
+            && (self.controller.cancellable()
                 || matches!(self.controller.state.job, Some(Job::ApplyAlignment)))
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
@@ -481,6 +482,14 @@ impl CompanionApp {
         if let Some(error) = &self.controller.state.input_error {
             ui.label(RichText::new(error).small().color(RED));
         }
+        ui.label(
+            RichText::new(
+                "Input port names identify interface channels, not the speaker being measured.",
+            )
+            .small()
+            .color(MUTED),
+        );
+        microphone_view::draw(ui, &mut self.controller);
         ui.add_space(23.0);
         section(ui, "02", "Timing reference");
         ui.add_space(10.0);
@@ -640,7 +649,7 @@ impl CompanionApp {
             if ui
                 .add_enabled(
                     readiness.is_ok(),
-                    egui::Button::new("Measure all checked").min_size(Vec2::new(155.0, 30.0)),
+                    egui::Button::new("Measure selected speakers").min_size(Vec2::new(155.0, 30.0)),
                 )
                 .on_disabled_hover_text(readiness.as_ref().err().map(String::as_str).unwrap_or(""))
                 .clicked()
@@ -679,24 +688,63 @@ impl CompanionApp {
             };
             ui.add(egui::Label::new(RichText::new(text).small().color(MUTED)).truncate());
         });
+        ui.label(
+            RichText::new("One pass for diagnostics. Does not propose or apply corrections.")
+                .small()
+                .color(MUTED),
+        );
         ui.horizontal_wrapped(|ui| {
             let ready = self.controller.alignment_readiness();
             if ui
-                .add_enabled(
-                    ready.is_ok(),
-                    egui::Button::new("Measure alignment · 2 passes"),
-                )
+                .add_enabled(ready.is_ok(), egui::Button::new("Align levels and delays"))
                 .on_disabled_hover_text(ready.as_ref().err().map(String::as_str).unwrap_or(""))
                 .clicked()
             {
                 self.controller.start_alignment();
             }
             ui.label(
-                RichText::new("Keep microphone and input gain fixed for both passes.")
+                RichText::new("Two passes → proposal → Apply → Verify")
                     .small()
                     .color(MUTED),
             );
         });
+        ui.label(
+            RichText::new("Choose either action. Keep the microphone and input gain fixed.")
+                .small()
+                .color(MUTED),
+        );
+        if let Some(snapshot) = &self.controller.state.snapshot {
+            let excluded: Vec<_> = snapshot
+                .outputs
+                .iter()
+                .filter(|o| self.controller.excluded_outputs.contains(&o.id))
+                .map(|o| o.name.as_str())
+                .collect();
+            let unavailable: Vec<_> = snapshot
+                .outputs
+                .iter()
+                .filter(|o| {
+                    !self.controller.excluded_outputs.contains(&o.id)
+                        && self.controller.output_readiness(&o.id).is_err()
+                })
+                .map(|o| o.name.as_str())
+                .collect();
+            let summary = format!(
+                "Excluded: {} · Unavailable: {}",
+                if excluded.is_empty() {
+                    "none".into()
+                } else {
+                    excluded.join(", ")
+                },
+                if unavailable.is_empty() {
+                    "none".into()
+                } else {
+                    unavailable.join(", ")
+                }
+            );
+            ui.add(egui::Label::new(RichText::new(&summary).small().color(MUTED)).truncate())
+                .on_hover_text(&summary);
+        }
         ui.add_space(12.0);
         if let Some(error) = &self.controller.state.error {
             card().show(ui, |ui| {
@@ -835,6 +883,7 @@ impl CompanionApp {
             Some(MeasureProgress::Preparing) => ("Checking configuration", 0.0),
             Some(MeasureProgress::OpeningInput) => ("Opening microphone", 0.0),
             Some(MeasureProgress::LeadIn) => ("Quiet lead-in", 0.0),
+            Some(MeasureProgress::CheckingInput(_)) => ("Checking microphone · no playback", 0.0),
             Some(MeasureProgress::Playing(p)) => {
                 if p.sequence_outputs.is_empty() {
                     (

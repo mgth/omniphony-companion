@@ -60,6 +60,24 @@ fn snapshot() -> Snapshot {
     }
 }
 impl Backend for Bench {
+    fn check_input(
+        &self,
+        request: companion_service::microphone::InputRequest,
+        cancel: &AtomicBool,
+        update: &mut dyn FnMut(measurement_capture::input::InputLevel),
+    ) -> Result<(), String> {
+        assert_eq!(request.input_channel, 2);
+        update(measurement_capture::input::InputLevel::analyze(
+            &[0.02, -0.02],
+            0,
+        ));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !cancel.load(Ordering::Relaxed) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        self.finished.store(true, Ordering::Relaxed);
+        Ok(())
+    }
     fn measure_batch(
         &self,
         request: MeasureRequest,
@@ -174,6 +192,39 @@ fn selection_and_speaker_constraints_gate_recording() {
     c.settings.reference_output = Some("Left".into());
     c.settings.device = None;
     assert!(c.can_measure("Right").is_err());
+}
+
+#[test]
+fn microphone_check_needs_no_renderer_blocks_playback_cancels_and_forgets_old_source() {
+    let b = Arc::new(Bench::new());
+    let mut c = ready(b.clone());
+    c.disconnect();
+    c.check_input();
+    assert_eq!(c.state.job, Some(Job::InputCheck));
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while c.input_check().unwrap().level.is_none() {
+        c.poll();
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(c.input_check().unwrap().level.unwrap().peak_dbfs.is_some());
+    c.start("Left");
+    assert_eq!(b.calls.load(Ordering::Relaxed), 0);
+    c.cancel();
+    // The worker finishes without waiting for UI polling.
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while !b.finished.load(Ordering::Relaxed) {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    settled(&mut c);
+    assert!(c.input_check().is_some());
+    c.settings.input_channel = 1;
+    assert!(c.input_check().is_none());
+    c.poll();
+    c.settings.input_channel = 2;
+    assert!(c.input_check().is_none(), "old activity must not reappear");
+    assert!(c.state.takes.is_empty());
 }
 
 #[test]

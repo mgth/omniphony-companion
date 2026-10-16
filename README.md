@@ -25,11 +25,13 @@ The Rust/egui desktop window lets you:
 
 - Refresh the available microphone inputs and choose an interface, input channel
   and sample rate. Selecting an input does not start recording.
+- Use **Check microphone** for a ten-second live peak/RMS meter without playback
+  or saved audio. Speak near the microphone to confirm the selected channel reacts.
 - Connect to the local Omniphony address and list its physical speaker outputs,
   including current gain, delay, mute and frequency limits.
 - Choose a fixed timing-reference speaker and a listening position.
 - Start a measurement for one speaker, with progress inside its row and no layout shift.
-- Check the wired speakers and use **Measure all checked** for one continuous
+- Check the wired speakers and use **Measure selected speakers** for one continuous
   capture with shared reference sweeps. **Stop** cancels the complete run.
 - Restore input/channel/rate, renderer address, reference, microphone/position,
   sweep settings, recording/calibration paths and speaker checkboxes on startup.
@@ -73,6 +75,22 @@ the selected speaker, then the reference again. It uses the same acquisition
 service as the CLI. A fresh renderer snapshot is checked before opening the input.
 Ordinary Measure actions apply no corrections. Alignment has separate explicit
 Apply/Restore actions; neither writes the persistent renderer configuration.
+
+Choose **Measure selected speakers** for one diagnostic pass, or **Align levels
+and delays** for two independent passes leading to a proposal. You do not need
+to run both actions. The speaker list summarizes manually excluded and currently
+unavailable outputs. Alignment results retain each pass's completion/failure and
+show when the next pass never started; older sessions without this history are
+labeled explicitly.
+
+Each acquisition rechecks the current input during its quiet lead-in, before
+starting a sweep. Exact digital silence, clipping, capture faults or insufficient
+fresh frames stop playback with a specific reason and retain the partial recording.
+Quiet nonzero background noise is allowed: input activity does not establish
+correct microphone identity or acoustic quality. Digital sink-monitor diagnostics
+allow pre-playback silence because that source is expected to be silent before a
+sweep; sink monitors still cannot produce alignment proposals. See
+[microphone checks](docs/microphone-check.md).
 
 Whole-system capture plays **reference → speaker 1 → reference → speaker 2 →
 reference → …**. The reference between two speakers is recorded once and reused
@@ -141,7 +159,7 @@ never read or write personal settings. See [the application boundaries](docs/ui-
 
 1. Select the working broadband speakers, one microphone input and a fixed timing
    reference. Keep the microphone at the listening position and the preamp gain fixed.
-2. Choose **Measure alignment · 2 passes**. Each pass uses the shared-reference
+2. Choose **Align levels and delays**. Each pass uses the shared-reference
    sequence. Progress remains in the active speaker row; Stop cancels the run.
 3. Inspect the **Alignment** tab below the speakers. Levels use equal log-frequency
    power weighting over 500–2000 Hz, including the room response. They are transfer

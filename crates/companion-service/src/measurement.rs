@@ -37,6 +37,7 @@ pub enum MeasureProgress {
     Preparing,
     OpeningInput,
     LeadIn,
+    CheckingInput(measurement_capture::input::InputLevel),
     Playing(Progress),
     Tail,
     Saving,
@@ -199,7 +200,12 @@ pub fn measure(
         capture.poll();
         // Exclude pre-session audio and allow existing output queues to drain.
         analysis_start_frame = capture.frames() + args.sample_rate as usize / 5;
-        drain_for(&mut capture, Duration::from_millis(600), cancelled)?;
+        crate::microphone::before_playback(
+            &mut capture,
+            args.sample_rate,
+            cancelled,
+            &mut on_progress,
+        )?;
         let mut progress =
             client.start_referenced(1, &args.output, Some(&args.reference_output), sweep)?;
         on_progress(MeasureProgress::Playing(progress.clone()));

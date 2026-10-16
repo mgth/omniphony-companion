@@ -65,6 +65,9 @@ pub fn analyze(
         return Err("invalid, clipped, nonfinite or overlong capture".into());
     }
     let source = sweep.samples(render_rate)?;
+    if samples.iter().all(|s| *s == 0.0) {
+        return Err(crate::input::NO_SIGNAL.into());
+    }
     let nominal = capture_rate as f64 / render_rate as f64;
     let spacing = source.len() as f64 * nominal;
     if samples.len() < (3.0 * spacing) as usize {

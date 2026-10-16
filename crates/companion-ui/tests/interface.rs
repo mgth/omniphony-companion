@@ -221,6 +221,57 @@ fn microphone_and_channel_can_be_selected_in_the_interface() {
 }
 
 #[test]
+fn input_meter_and_capture_choices_explain_silence_without_starting_audio() {
+    use companion_service::controller::{InputCheck, Job};
+    let ctx = egui::Context::default();
+    let (mut controller, starts) = support::ready();
+    controller.excluded_outputs.insert("Surround right".into());
+    controller.state.input_check = Some(InputCheck {
+        request: controller.input_request().unwrap(),
+        level: Some(measurement_capture::input::InputLevel::analyze(
+            &[0.0; 100],
+            0,
+        )),
+        error: None,
+    });
+    let mut app = CompanionApp::preview(&ctx, controller);
+    let size = Vec2::new(1160.0, 900.0);
+    frame(&mut app, &ctx, vec![], size);
+    let text = labels(&frame(&mut app, &ctx, vec![], size));
+    for expected in [
+        "Check microphone",
+        "Measure selected speakers",
+        "Align levels and delays",
+        "No microphone signal received",
+        "Last check",
+        "Excluded: Surround right",
+    ] {
+        assert!(
+            text.iter().any(|(t, _)| t.contains(expected)),
+            "missing {expected}"
+        );
+    }
+    app.controller.state.job = Some(Job::InputCheck);
+    let text = labels(&frame(&mut app, &ctx, vec![], size));
+    assert!(text.iter().any(|(t, _)| t.contains("LIVE")));
+    let measure = text
+        .iter()
+        .find(|(t, _)| t == "Measure selected speakers")
+        .unwrap()
+        .1;
+    click(&mut app, &ctx, measure.center(), size);
+    assert_eq!(starts.load(Ordering::Relaxed), 0);
+    app.controller.state.job = None;
+    app.controller.settings.input_channel = 2;
+    let text = labels(&frame(&mut app, &ctx, vec![], size));
+    assert!(
+        !text
+            .iter()
+            .any(|(t, _)| t.contains("No microphone signal received"))
+    );
+}
+
+#[test]
 fn restart_restores_settings_reconnects_and_never_measures_automatically() {
     use companion_service::preferences::PreferenceStore;
     let dir = tempfile::tempdir().unwrap();
@@ -267,6 +318,24 @@ fn restart_restores_settings_reconnects_and_never_measures_automatically() {
         text.iter()
             .any(|(t, _)| t.contains("Selected input unavailable"))
     );
+    // Setup has internal scrolling; the new meter must not resize the speaker pane.
+    frame(
+        &mut app,
+        &ctx,
+        vec![
+            Event::PointerMoved(Pos2::new(150.0, 500.0)),
+            Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: Vec2::new(0.0, -200.0),
+                modifiers: Default::default(),
+            },
+        ],
+        size,
+    );
+    for _ in 0..20 {
+        frame(&mut app, &ctx, vec![], size);
+    }
+    let text = labels(&frame(&mut app, &ctx, vec![], size));
     assert!(
         text.iter()
             .any(|(t, _)| t.contains("Selected reference is missing"))
@@ -586,6 +655,10 @@ fn capture_progress_keeps_speaker_rows_in_place_for_single_and_batch_capture() {
             for phase in [
                 MeasureProgress::OpeningInput,
                 MeasureProgress::LeadIn,
+                MeasureProgress::CheckingInput(measurement_capture::input::InputLevel::analyze(
+                    &[0.0; 100],
+                    0,
+                )),
                 MeasureProgress::Analyzing,
             ] {
                 app.controller.state.progress = Some(phase);
@@ -619,6 +692,11 @@ fn alignment_is_inline_and_unqualified_results_never_apply_or_play() {
             settings: controller.settings.clone(),
             snapshot: controller.state.snapshot.clone().unwrap(),
             rows: vec![],
+            pass_reports: Some(vec![companion_service::alignment::PassReport {
+                analyzed_speakers: 0,
+                error: Some("No microphone signal received".into()),
+            }]),
+            verification_pass_reports: None,
             blockers: vec!["Two independent captures are required".into()],
             session: None,
             profile: None,
@@ -641,6 +719,9 @@ fn alignment_is_inline_and_unqualified_results_never_apply_or_play() {
             .1;
         assert!(alignment.top() > speakers.bottom());
         assert!(text.iter().all(|(_, r)| r.is_finite()));
+        find_result_text(&mut app, &ctx, size, "Baseline pass 1 / 2: stopped");
+        find_result_text(&mut app, &ctx, size, "Baseline pass 2 / 2: not started");
+        find_result_text(&mut app, &ctx, size, "No correction proposal");
         let apply = find_result_text(&mut app, &ctx, size, "Apply gains and delays");
         click(&mut app, &ctx, apply.center(), size);
         assert!(!app.controller.busy());

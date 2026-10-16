@@ -3,6 +3,7 @@ use crate::{
     alignment,
     batch::{self, BatchOutcome},
     measurement::{self, MeasureProgress, MeasureRequest, TakeOutcome},
+    microphone::{self, InputRequest},
     review::{self, SavedReview},
 };
 use measurement_capture::InputDevice;
@@ -19,6 +20,15 @@ use std::{
 };
 
 pub trait Backend: Send + Sync + 'static {
+    fn check_input(
+        &self,
+        request: InputRequest,
+        cancel: &AtomicBool,
+        update: &mut dyn FnMut(measurement_capture::input::InputLevel),
+    ) -> Result<(), String> {
+        let _ = (request, cancel, update);
+        Err("Microphone monitoring is unavailable in this backend.".into())
+    }
     fn set_outputs(
         &self,
         endpoint: SocketAddr,
@@ -53,6 +63,14 @@ pub trait Backend: Send + Sync + 'static {
 }
 pub struct LiveBackend;
 impl Backend for LiveBackend {
+    fn check_input(
+        &self,
+        request: InputRequest,
+        cancel: &AtomicBool,
+        update: &mut dyn FnMut(measurement_capture::input::InputLevel),
+    ) -> Result<(), String> {
+        microphone::monitor(request, cancel, update).map_err(|e| e.to_string())
+    }
     fn set_outputs(
         &self,
         endpoint: SocketAddr,
@@ -129,6 +147,7 @@ impl Default for Settings {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Job {
+    InputCheck,
     Alignment {
         output_ids: Vec<String>,
         current: usize,
@@ -156,8 +175,16 @@ pub struct Take {
     pub outcome: Result<TakeOutcome, String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct InputCheck {
+    pub request: InputRequest,
+    pub level: Option<measurement_capture::input::InputLevel>,
+    pub error: Option<String>,
+}
+
 #[derive(Default)]
 pub struct State {
+    pub input_check: Option<InputCheck>,
     pub alignment: Option<alignment::Alignment>,
     pub review: Option<SavedReview>,
     pub review_error: Option<String>,
@@ -173,6 +200,8 @@ pub struct State {
     pub error: Option<String>,
 }
 enum Event {
+    InputLevel(measurement_capture::input::InputLevel),
+    InputChecked(Result<(), String>),
     AlignmentProgress(usize, usize, MeasureProgress),
     Aligned(Box<Result<alignment::Outcome, String>>),
     AlignmentUpdated(
@@ -227,6 +256,81 @@ impl Controller {
             self.state.job,
             Some(Job::Measure { .. } | Job::Batch { .. } | Job::Alignment { .. })
         )
+    }
+    pub fn cancellable(&self) -> bool {
+        self.measuring() || matches!(self.state.job, Some(Job::InputCheck))
+    }
+
+    pub fn input_request(&self) -> Result<InputRequest, String> {
+        let device = self
+            .selected_input()
+            .ok_or("Choose an available microphone input.")?;
+        if self
+            .state
+            .inputs
+            .iter()
+            .filter(|d| d.name == device.name)
+            .count()
+            != 1
+        {
+            return Err("This input name is ambiguous. Give the interface a unique name.".into());
+        }
+        if self.settings.input_channel == 0
+            || self.settings.input_channel > self.input_channels()
+            || !(8000..=192000).contains(&self.settings.sample_rate)
+        {
+            return Err(
+                "Choose an input channel and sample rate supported by the interface.".into(),
+            );
+        }
+        Ok(InputRequest {
+            device: device.name.clone(),
+            input_channel: self.settings.input_channel,
+            sample_rate: self.settings.sample_rate,
+        })
+    }
+
+    /// Hide old readings immediately after a source/channel/rate change.
+    pub fn input_check(&self) -> Option<&InputCheck> {
+        self.state
+            .input_check
+            .as_ref()
+            .filter(|c| self.input_request().as_ref() == Ok(&c.request))
+    }
+
+    pub fn check_input(&mut self) {
+        if self.busy() {
+            return;
+        }
+        let request = match self.input_request() {
+            Ok(r) => r,
+            Err(e) => {
+                self.state.input_error = Some(e);
+                return;
+            }
+        };
+        self.state.input_check = Some(InputCheck {
+            request: request.clone(),
+            level: None,
+            error: None,
+        });
+        self.state.input_error = None;
+        self.state.job = Some(Job::InputCheck);
+        self.state.stopping = false;
+        self.cancelled = Arc::new(AtomicBool::new(false));
+        let (backend, sender, cancel) = (
+            self.backend.clone(),
+            self.sender.clone(),
+            self.cancelled.clone(),
+        );
+        std::thread::spawn(move || {
+            let result = catch_job(|| {
+                backend.check_input(request, &cancel, &mut |level| {
+                    let _ = sender.send(Event::InputLevel(level));
+                })
+            });
+            let _ = sender.send(Event::InputChecked(result));
+        });
     }
 
     /// Offline analysis uses the same worker boundary as acquisition. No renderer needed.
@@ -744,7 +848,7 @@ impl Controller {
         });
     }
     pub fn cancel(&mut self) {
-        if self.measuring() {
+        if self.cancellable() {
             self.state.stopping = true;
             self.cancelled.store(true, Ordering::Relaxed);
         }
@@ -753,6 +857,18 @@ impl Controller {
     pub fn poll(&mut self) {
         while let Ok(event) = self.receiver.try_recv() {
             match event {
+                Event::InputLevel(level) => {
+                    if let Some(check) = &mut self.state.input_check {
+                        check.level = Some(level);
+                    }
+                }
+                Event::InputChecked(result) => {
+                    if let Some(check) = &mut self.state.input_check {
+                        check.error = result.err();
+                    }
+                    self.state.job = None;
+                    self.state.stopping = false;
+                }
                 Event::AlignmentProgress(pass, index, p) => {
                     if let Some(Job::Alignment {
                         output_ids,
@@ -905,6 +1021,9 @@ impl Controller {
                     self.state.stopping = false;
                 }
             }
+        }
+        if self.input_check().is_none() {
+            self.state.input_check = None;
         }
     }
     pub fn current_take(&self, output_id: &str) -> Option<&Take> {

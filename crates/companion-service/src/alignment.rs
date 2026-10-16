@@ -25,6 +25,12 @@ pub struct Row {
     pub qualified: Option<QualifiedEstimate>,
     pub reason: Option<String>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PassReport {
+    pub analyzed_speakers: usize,
+    pub error: Option<String>,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Alignment {
     pub schema_version: u32,
@@ -34,6 +40,11 @@ pub struct Alignment {
     pub settings: Settings,
     pub snapshot: Snapshot,
     pub rows: Vec<Row>,
+    /// Absent on older sessions; progress is descriptive, never eligibility evidence.
+    #[serde(default)]
+    pub pass_reports: Option<Vec<PassReport>>,
+    #[serde(default)]
+    pub verification_pass_reports: Option<Vec<PassReport>>,
     pub blockers: Vec<String>,
     pub session: Option<core::Session>,
     pub profile: Option<core::CalibrationProfile>,
@@ -165,6 +176,8 @@ pub fn capture<B: Backend + ?Sized>(
             })
             .collect(),
         blockers: vec![],
+        pass_reports: Some(vec![]),
+        verification_pass_reports: None,
         session: None,
         profile: None,
         applied_snapshot: None,
@@ -203,27 +216,36 @@ pub fn capture<B: Backend + ?Sized>(
         }) {
             Ok(batch) => batch,
             Err(error) => {
+                alignment.pass_reports.as_mut().unwrap().push(PassReport {
+                    analyzed_speakers: 0,
+                    error: Some(error.clone()),
+                });
                 alignment.blockers.push(error);
                 break;
             }
         };
-        if let Some(error) = batch.error {
-            alignment.blockers.push(error);
-        }
-        if batch.cancelled {
-            alignment.blockers.push("Alignment cancelled.".into());
-        }
-        if batch.takes.len() != outputs.len()
+        let incomplete = batch.takes.len() != outputs.len()
             || batch
                 .takes
                 .iter()
                 .zip(&outputs)
-                .any(|((id, _), expected)| id != expected)
-        {
-            alignment
-                .blockers
-                .push("The batch did not return every selected speaker in order.".into());
-        } else {
+                .any(|((id, _), expected)| id != expected);
+        let pass_error = batch
+            .error
+            .clone()
+            .or_else(|| batch.cancelled.then(|| "Alignment cancelled.".into()))
+            .or_else(|| {
+                incomplete
+                    .then(|| "The batch did not return every selected speaker in order.".into())
+            });
+        alignment.pass_reports.as_mut().unwrap().push(PassReport {
+            analyzed_speakers: batch.takes.len(),
+            error: pass_error.clone(),
+        });
+        if let Some(error) = pass_error {
+            alignment.blockers.push(error);
+        }
+        if !incomplete {
             for (row, (_, take)) in alignment.rows.iter_mut().zip(&batch.takes) {
                 row.take_folders.push(take.directory.clone());
                 row.repeats.push(estimate(take));
@@ -483,6 +505,7 @@ pub fn apply<B: Backend + ?Sized>(
         alignment.restored_snapshot = Some(result.clone());
     }
     alignment.verification = None;
+    alignment.verification_pass_reports = None;
     alignment.verification_note = None;
     alignment.application_uncertain = false;
     save(alignment)?;
@@ -500,6 +523,7 @@ pub fn verify<B: Backend + ?Sized>(
     }
     a.targets(false)?;
     a.verification = None;
+    a.verification_pass_reports = Some(vec![]);
     a.verification_note = Some("Verification has not completed.".into());
     save(a)?;
     let snapshot = a
@@ -529,6 +553,7 @@ pub fn verify<B: Backend + ?Sized>(
         cancel,
         progress,
     )?;
+    a.verification_pass_reports = outcome.alignment.pass_reports.clone();
     let Some(measured) = outcome.alignment.session.as_ref() else {
         a.verification_note = Some(format!(
             "Verification evidence is unresolved. Review {}",

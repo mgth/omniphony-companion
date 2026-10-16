@@ -3,6 +3,7 @@
 pub mod calibration;
 pub mod diagnostics;
 pub mod impulse;
+pub mod input;
 pub mod level;
 #[cfg(target_os = "linux")]
 mod pipewire_capture;
@@ -322,6 +323,16 @@ impl Capture {
     }
     pub fn faults(&self) -> u32 {
         self.faults.load(Ordering::Relaxed)
+    }
+    pub fn is_monitor(&self) -> bool {
+        self.metadata.is_monitor
+    }
+    /// Inspect a bounded recent window on the worker, never on the audio callback.
+    pub fn input_level(&self, frames: usize) -> input::InputLevel {
+        input::InputLevel::analyze(
+            &self.samples[self.samples.len().saturating_sub(frames)..],
+            self.faults(),
+        )
     }
     pub fn finish(self) -> Recording {
         let Self {
