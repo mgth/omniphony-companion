@@ -114,6 +114,69 @@ fn find_result_text(app: &mut CompanionApp, ctx: &egui::Context, size: Vec2, nee
     panic!("Result text not reachable by scrolling: {needle}");
 }
 
+// Speaker/session controls scroll independently above the fixed individual-result panel.
+fn scroll_speakers(app: &mut CompanionApp, ctx: &egui::Context, size: Vec2, delta: f32) {
+    let text = labels(&frame(app, ctx, vec![], size));
+    let lower = text
+        .iter()
+        .find(|(s, _)| s == "Measurement results" || s.ends_with(" · Measurement result"))
+        .unwrap()
+        .1
+        .top();
+    let pos = Pos2::new(size.x - 70.0, lower - 40.0);
+    frame(
+        app,
+        ctx,
+        vec![
+            Event::PointerMoved(pos),
+            Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: Vec2::new(0.0, delta),
+                modifiers: Default::default(),
+            },
+        ],
+        size,
+    );
+    for _ in 0..20 {
+        frame(app, ctx, vec![], size);
+    }
+}
+
+fn find_speaker_text(
+    app: &mut CompanionApp,
+    ctx: &egui::Context,
+    size: Vec2,
+    needle: &str,
+) -> Rect {
+    scroll_speakers(app, ctx, size, 10000.0);
+    for _ in 0..80 {
+        let output = frame(app, ctx, vec![], size);
+        let lower = labels(&output)
+            .iter()
+            .find(|(s, _)| s == "Measurement results" || s.ends_with(" · Measurement result"))
+            .unwrap()
+            .1
+            .top();
+        for shape in &output.shapes {
+            let mut text = vec![];
+            texts(&shape.shape, &mut text);
+            if let Some((_, rect)) = text.iter().find(|(s, r)| {
+                (if matches!(needle, "Front left" | "Front right") {
+                    s == needle
+                } else {
+                    s.contains(needle)
+                }) && r.left() > 310.0
+                    && shape.clip_rect.contains(r.center())
+                    && r.bottom() < lower - 12.0
+            }) {
+                return *rect;
+            }
+        }
+        scroll_speakers(app, ctx, size, -40.0);
+    }
+    panic!("Speaker text not reachable by scrolling: {needle}");
+}
+
 #[test]
 fn speaker_rows_and_controls_fit_the_minimum_window_and_measure_dispatches() {
     let ctx = egui::Context::default();
@@ -686,7 +749,7 @@ fn capture_progress_keeps_speaker_rows_in_place_for_single_and_batch_capture() {
 }
 
 #[test]
-fn alignment_is_inline_and_unqualified_results_never_apply_or_play() {
+fn alignment_session_stays_above_individual_results_and_unqualified_actions_stay_disabled() {
     for size in [Vec2::new(850.0, 640.0), Vec2::new(1160.0, 800.0)] {
         let ctx = egui::Context::default();
         let (mut controller, starts) = support::ready();
@@ -719,18 +782,137 @@ fn alignment_is_inline_and_unqualified_results_never_apply_or_play() {
         let speakers = text.iter().find(|(t, _)| t == "Speakers").unwrap().1;
         let alignment = text
             .iter()
-            .find(|(t, _)| t == "Delay and level alignment")
+            .find(|(t, _)| t == "Alignment session")
             .unwrap()
             .1;
         assert!(alignment.top() > speakers.bottom());
         assert!(text.iter().all(|(_, r)| r.is_finite()));
-        find_result_text(&mut app, &ctx, size, "Baseline pass 1 / 2: stopped");
-        find_result_text(&mut app, &ctx, size, "Baseline pass 2 / 2: not started");
-        find_result_text(&mut app, &ctx, size, "No correction proposal");
-        let apply = find_result_text(&mut app, &ctx, size, "Apply gains and delays");
+        assert!(
+            !text
+                .iter()
+                .any(|(s, _)| s == "Alignment" || s == "Delay and level alignment")
+        );
+        let lower = text
+            .iter()
+            .find(|(s, _)| s == "Measurement results")
+            .unwrap()
+            .1;
+        assert!(alignment.bottom() < lower.top());
+        let details = find_speaker_text(&mut app, &ctx, size, "Alignment session details");
+        click(&mut app, &ctx, details.center(), size);
+        find_speaker_text(&mut app, &ctx, size, "Baseline pass 1 / 2: stopped");
+        find_speaker_text(&mut app, &ctx, size, "Baseline pass 2 / 2: not started");
+        find_speaker_text(&mut app, &ctx, size, "No correction proposal");
+        let apply = find_speaker_text(&mut app, &ctx, size, "Apply gains and delays");
         click(&mut app, &ctx, apply.center(), size);
         assert!(!app.controller.busy());
         assert_eq!(starts.load(Ordering::Relaxed), 0);
+    }
+}
+
+#[test]
+fn alignment_estimates_and_targets_stay_in_the_speaker_rows_while_individual_results_stay_below() {
+    for proposal in [false, true] {
+        for size in [Vec2::new(850.0, 640.0), Vec2::new(1160.0, 800.0)] {
+            let ctx = egui::Context::default();
+            let (mut controller, starts) = support::ready();
+            controller.state.alignment = Some(support::alignment(&controller, proposal));
+            controller.state.review = Some(support::arrival_review());
+            let mut app = CompanionApp::preview(&ctx, controller);
+            for _ in 0..3 {
+                frame(&mut app, &ctx, vec![], size);
+            }
+            let heading =
+                find_result_text(&mut app, &ctx, size, "Front right · Measurement result");
+            for value in [
+                "+0.125 ms",
+                "-6.50 dB",
+                "0.020 ms / 0.10 dB",
+                "Quality",
+                "Good",
+            ] {
+                let rect = find_speaker_text(&mut app, &ctx, size, value);
+                assert!(
+                    rect.bottom() < heading.top(),
+                    "{value} appeared in the individual result panel"
+                );
+                assert!(
+                    rect.left() > 310.0 && rect.right() < size.x,
+                    "{value} escaped the speaker card: {rect:?}"
+                );
+            }
+            let text = labels(&frame(&mut app, &ctx, vec![], size));
+            let name = text
+                .iter()
+                .find(|(s, r)| s == "Front left" && r.left() > 310.0)
+                .unwrap()
+                .1;
+            let value = text.iter().find(|(s, _)| s == "+0.125 ms").unwrap().1;
+            assert!(value.top() > name.bottom());
+            assert!(
+                !text
+                    .iter()
+                    .any(|(s, _)| s == "Alignment" || s == "Delay and level alignment")
+            );
+            if proposal {
+                for value in [
+                    "Gain: before → target",
+                    "-1.50 → -2.50 dB",
+                    "Delay: before → target",
+                    "0.000 → 1.000 ms",
+                ] {
+                    find_speaker_text(&mut app, &ctx, size, value);
+                }
+            } else {
+                for value in [
+                    "Diagnostic · not qualified",
+                    "Weak target signal · diagnostic estimate only",
+                    "Long delay:",
+                ] {
+                    find_speaker_text(&mut app, &ctx, size, value);
+                }
+            }
+            let row_before = find_speaker_text(&mut app, &ctx, size, "Front left");
+            app.controller.state.job = Some(companion_service::controller::Job::Alignment {
+                output_ids: vec!["Front left".into(), "Front right".into()],
+                current: 0,
+                pass: 1,
+            });
+            for phase in [
+                companion_service::measurement::MeasureProgress::OpeningInput,
+                companion_service::measurement::MeasureProgress::Tail,
+                companion_service::measurement::MeasureProgress::Analyzing,
+            ] {
+                app.controller.state.progress = Some(phase);
+                let text = labels(&frame(&mut app, &ctx, vec![], size));
+                let row_after = text
+                    .iter()
+                    .find(|(s, r)| s == "Front left" && r.left() > 310.0)
+                    .unwrap()
+                    .1;
+                assert!(
+                    (row_after.top() - row_before.top()).abs() < 0.1,
+                    "alignment row moved during capture: {row_before:?} -> {row_after:?}"
+                );
+                assert!(
+                    text.iter()
+                        .any(|(s, _)| s == "Front right · Measurement result")
+                );
+            }
+            app.controller.state.job = None;
+            app.controller.state.progress = None;
+            // A new/updated alignment cannot replace the individual selection or reopen a tab.
+            app.controller.state.alignment.as_mut().unwrap().directory =
+                "synthetic-updated-alignment".into();
+            find_result_text(&mut app, &ctx, size, "Front right · Measurement result");
+            find_result_text(
+                &mut app,
+                &ctx,
+                size,
+                "Arrival relative to Front left: +2.400 ms",
+            );
+            assert_eq!(starts.load(Ordering::Relaxed), 0);
+        }
     }
 }
 
@@ -808,6 +990,7 @@ fn restart_restores_graph_selection_and_speaker_results_even_without_the_rendere
         selected_take: Some(folder.clone()),
         selected_output: Some("Front left".into()),
         saved_selected: true,
+        show_alignment: true, // Legacy tab preference must not take over the individual result.
         ..Default::default()
     });
     store.update(&settings, "127.0.0.1:9000", &Default::default(), "");
@@ -1056,12 +1239,7 @@ fn loaded_alignment_pass_opens_its_latest_analysis_and_labels_the_original_verdi
     let size = Vec2::new(1160.0, 1400.0);
     finish_worker(&mut app, &ctx, size);
     assert_eq!(app.controller.state.analyses.len(), 2);
-    let output = frame(&mut app, &ctx, vec![], size);
-    let button = labels(&output)
-        .into_iter()
-        .find(|(s, _)| s == "View result")
-        .unwrap()
-        .1;
+    let button = find_speaker_text(&mut app, &ctx, size, "View result");
     click(&mut app, &ctx, button.center(), size);
     finish_worker(&mut app, &ctx, size);
     let text = labels(&frame(&mut app, &ctx, vec![], size));

@@ -52,6 +52,9 @@ The Rust/egui desktop window lets you:
   selected at a time. **Original capture details** retains the historical verdict;
   it is separate from the current analysis status. Alignment summarizes both passes,
   while each measurement result identifies its individual pass.
+- Read the two-pass arrival, level, repeat spread, quality and proposed gain/delay
+  directly in each speaker row. The lower panel contains only individual results;
+  session-wide reanalysis/apply/verify/restore controls sit above the speaker rows.
 - Measure alignment in two passes, inspect gain/delay proposals, explicitly apply,
   verify with two further passes, and restore the original settings.
 - Reopen a saved alignment folder without automatically measuring or applying it.

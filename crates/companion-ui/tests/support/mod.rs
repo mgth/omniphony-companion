@@ -244,3 +244,127 @@ pub fn missing_target_review() -> companion_service::review::SavedReview {
     review.diagnostics.messages = vec!["The reference sweeps were found, but no target sweep was detected above background. Check the selected speaker's output route, mute, amplifier and connection. Increasing the overall volume is not the first step.".into()];
     review
 }
+
+pub fn alignment(
+    controller: &Controller,
+    proposal: bool,
+) -> companion_service::alignment::Alignment {
+    use calibration_core::{
+        CalibrationPolicy, CalibrationProfile, InstallationSnapshot, ObservationOrigin,
+        OutputSettings, Speaker, SpeakerRole,
+        repeatability::{QualifiedEstimate, RepeatEstimate},
+    };
+    use companion_service::{
+        alignment::{Alignment, PassReport, Row},
+        quality::{Grade, Indicator, Report},
+    };
+    let snapshot = controller.state.snapshot.clone().unwrap();
+    let base = InstallationSnapshot {
+        installation_id: "synthetic-room".into(),
+        layout_revision: snapshot.revision.clone(),
+        sample_rate_hz: 48000,
+        speakers: snapshot
+            .outputs
+            .iter()
+            .take(2)
+            .map(|o| Speaker {
+                id: o.id.clone(),
+                label: o.name.clone(),
+                role: SpeakerRole::FullRange,
+                settings: OutputSettings {
+                    gain_db: o.gain_db as f64,
+                    delay_ms: o.delay_ms as f64,
+                },
+            })
+            .collect(),
+    };
+    let mut target = base.clone();
+    target.speakers[0].settings.gain_db -= 1.0;
+    target.speakers[0].settings.delay_ms += 1.0;
+    let rows = snapshot
+        .outputs
+        .iter()
+        .take(if proposal { 2 } else { 3 })
+        .enumerate()
+        .map(|(i, o)| {
+            let weak = i == 2;
+            let arrival = [0.125, 0.325, 160.0][i];
+            let level = [-6.5, -7.5, -25.0][i];
+            let indicator = || Indicator {
+                grade: if weak { Grade::Poor } else { Grade::Good },
+                details: vec!["Synthetic presentation fixture".into()],
+            };
+            Row {
+                output_id: o.id.clone(),
+                take_folders: vec![
+                    format!("synthetic-pass-1-{i}").into(),
+                    format!("synthetic-pass-2-{i}").into(),
+                ],
+                repeats: [0.0, 0.02]
+                    .iter()
+                    .map(|offset| RepeatEstimate {
+                        arrival_ms: Some(arrival + offset),
+                        level_db: Some(level),
+                        minimum_snr_db: Some(if weak { 8.0 } else { 35.0 }),
+                        reference_level_db: Some(0.0),
+                        reasons: vec![],
+                    })
+                    .collect(),
+                quality: vec![Report {
+                    method: "synthetic-preview".into(),
+                    acquisition: indicator(),
+                    timing: indicator(),
+                    level: indicator(),
+                    level_db: Some(level),
+                    level_band_snr_db: Some(if weak { 8.0 } else { 35.0 }),
+                    minimum_frequency_snr_db: None,
+                }],
+                qualified: (!weak).then_some(QualifiedEstimate {
+                    arrival_ms: arrival,
+                    level_db: level,
+                    minimum_snr_db: 35.0,
+                    arrival_repeat_spread_ms: 0.02,
+                    level_repeat_spread_db: 0.10,
+                }),
+                reason: weak.then(|| "Weak target signal · diagnostic estimate only".into()),
+            }
+        })
+        .collect();
+    Alignment {
+        schema_version: 1,
+        directory: "synthetic-alignment".into(),
+        endpoint: "127.0.0.1:9000".parse().unwrap(),
+        settings: controller.settings.clone(),
+        snapshot,
+        rows,
+        pass_reports: Some(vec![
+            PassReport {
+                analyzed_speakers: if proposal { 2 } else { 3 },
+                error: None
+            };
+            2
+        ]),
+        verification_pass_reports: None,
+        blockers: if proposal {
+            vec![]
+        } else {
+            vec!["A speaker has not qualified for correction".into()]
+        },
+        session: None,
+        profile: proposal.then_some(CalibrationProfile {
+            origin: ObservationOrigin::Simulated,
+            schema_version: 1,
+            source_session_id: "synthetic-preview".into(),
+            source_batch_id: "synthetic-baseline".into(),
+            reference_position_id: "reference-seat".into(),
+            policy: CalibrationPolicy::default(),
+            base_snapshot: base,
+            target_snapshot: target,
+        }),
+        applied_snapshot: None,
+        restored_snapshot: None,
+        verification: None,
+        verification_note: None,
+        application_uncertain: false,
+    }
+}

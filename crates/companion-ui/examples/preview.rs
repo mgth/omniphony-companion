@@ -27,6 +27,9 @@ fn main() -> eframe::Result {
             }) {
                 controller.state.review = Some(support::arrival_review());
             }
+            if std::env::args().any(|a| a == "--alignment") {
+                controller.state.alignment = Some(support::alignment(&controller, true));
+            }
             if std::env::args().any(|a| a == "--missing-target-review") {
                 controller.state.review = Some(support::missing_target_review());
             }

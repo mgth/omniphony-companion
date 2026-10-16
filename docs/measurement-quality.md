@@ -84,7 +84,8 @@ No automatic gain increase, playback or correction is introduced by this feature
 ## Existing recordings
 
 Loading saved state does not silently rerun analysis. Use **Reanalyze this take**
-for one result, or **Reanalyze saved passes** in the Alignment tab for both passes.
+for one result, or **Reanalyze saved passes** in the alignment session controls
+above the speaker rows for both passes.
 The corresponding commands are:
 
 ```sh

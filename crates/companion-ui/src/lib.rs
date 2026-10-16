@@ -28,8 +28,6 @@ pub struct CompanionApp {
     pub controller: Controller,
     pending_view: Option<ViewPreferences>,
     last_workspace_revision: u64,
-    show_alignment: bool,
-    last_alignment: Option<std::path::PathBuf>,
     pub result_plot: ResultPlot,
     waveform_view: waveform_plot::State,
     saved_selected: bool,
@@ -76,7 +74,6 @@ impl CompanionApp {
         app.waveform_view.frequency = prefs.view.burst_frequency;
         app.waveform_view.overview = prefs.view.burst_overview;
         app.waveform_view.overlay = prefs.view.burst_overlay;
-        app.show_alignment = prefs.view.show_alignment;
         app.saved_selected = prefs.view.saved_selected;
         app.preferences = Some(store);
         let index = if reconnect {
@@ -103,8 +100,6 @@ impl CompanionApp {
             controller,
             pending_view: None,
             last_workspace_revision: u64::MAX,
-            show_alignment: false,
-            last_alignment: None,
             result_plot: ResultPlot::default(),
             waveform_view: waveform_plot::State::default(),
             pending_review_folder: None,
@@ -150,33 +145,8 @@ impl CompanionApp {
                 .cloned();
             if self.controller.state.workspace_imported && self.selected_result.is_none() {
                 self.selected_result = self.controller.state.takes.last().cloned();
-                self.show_alignment = self.controller.state.alignment.as_ref().is_some_and(|a| {
-                    self.selected_result
-                        .as_ref()
-                        .and_then(|t| t.outcome.as_ref().ok())
-                        .is_none_or(|o| o.directory.starts_with(&a.directory))
-                });
             }
-            self.show_alignment &= self.controller.state.alignment.is_some();
             self.saved_selected &= self.controller.state.review.is_some();
-            self.last_alignment = self
-                .controller
-                .state
-                .alignment
-                .as_ref()
-                .map(|a| a.directory.clone());
-        }
-        let alignment_path = self
-            .controller
-            .state
-            .alignment
-            .as_ref()
-            .map(|a| a.directory.clone());
-        if alignment_path != self.last_alignment {
-            if self.selected_result.is_none() && !self.saved_selected {
-                self.show_alignment = alignment_path.is_some();
-            }
-            self.last_alignment = alignment_path;
         }
         self.sync_selected_analysis();
         if ctx.input(|i| i.viewport().close_requested())
@@ -339,9 +309,8 @@ impl CompanionApp {
                 let height = ui.available_height();
                 let has_result = self.selected_result.is_some()
                     || self.saved_selected
-                    || self.controller.state.review.is_some()
-                    || self.controller.state.alignment.is_some();
-                let reserved = if self.show_alignment { 260.0 } else { 190.0 };
+                    || self.controller.state.review.is_some();
+                let reserved = 190.0;
                 let panel = if has_result {
                     egui::TopBottomPanel::bottom("results_panel")
                         .resizable(true)
@@ -357,39 +326,15 @@ impl CompanionApp {
                             .inner_margin(egui::Margin::same(10)),
                     )
                     .show_inside(ui, |ui| {
-                        if self.controller.state.alignment.is_some() {
-                            ui.horizontal(|ui| {
-                                ui.selectable_value(&mut self.show_alignment, true, "Alignment");
-                                ui.selectable_value(
-                                    &mut self.show_alignment,
-                                    false,
-                                    "Measurement results",
-                                );
-                            });
-                        }
-                        if self.show_alignment {
-                            let mut action = None;
-                            if let Some(a) = &self.controller.state.alignment {
-                                egui::ScrollArea::vertical()
-                                    .id_salt("alignment_scroll")
-                                    .show(ui, |ui| {
-                                        action =
-                                            alignment_view::draw(ui, a, self.controller.busy());
-                                    });
-                            }
-                            if let Some(action) = action {
-                                if action == "reanalyze" {
-                                    self.controller.reanalyze_alignment();
-                                } else {
-                                    self.controller.alignment_action(action);
-                                }
-                            }
-                        } else {
-                            self.results(ui);
-                        }
+                        self.results(ui);
                     });
                 ui.set_clip_rect(ui.available_rect_before_wrap().intersect(ui.clip_rect()));
-                self.speakers(ui);
+                if !matches!(self.controller.state.job, Some(Job::RestoreWorkspace)) {
+                    egui::ScrollArea::vertical()
+                        .id_salt("speakers_scroll")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| self.speakers(ui));
+                }
             });
         self.persist_preferences();
     }
@@ -415,7 +360,7 @@ impl CompanionApp {
                 }
                 store.update_view(ViewPreferences {
                     plot: self.result_plot,
-                    show_alignment: self.show_alignment,
+                    show_alignment: false,
                     saved_selected: self.saved_selected,
                     selected_take: self
                         .selected_result
@@ -699,7 +644,6 @@ impl CompanionApp {
                 )
                 .clicked()
             {
-                self.show_alignment = true;
                 self.controller.load_alignment(&self.review_path);
             }
             ui.label(
@@ -782,7 +726,6 @@ impl CompanionApp {
                 .on_disabled_hover_text(ready.as_ref().err().map(String::as_str).unwrap_or(""))
                 .clicked()
             {
-                self.show_alignment = true;
                 self.controller.start_alignment();
             }
             ui.label(
@@ -852,10 +795,19 @@ impl CompanionApp {
             });
             ui.add_space(10.0);
         }
-        // Do not render an empty scroll area while loading: it would clamp the
-        // persisted speaker scroll offset to zero before the rows return.
-        if matches!(self.controller.state.job, Some(Job::RestoreWorkspace)) {
-            return;
+        let mut alignment_action = None;
+        if let Some(alignment) = &self.controller.state.alignment {
+            card().show(ui, |ui| {
+                alignment_action = alignment_view::session(ui, alignment, self.controller.busy());
+            });
+            ui.add_space(10.0);
+        }
+        if let Some(action) = alignment_action {
+            if action == "reanalyze" {
+                self.controller.reanalyze_alignment();
+            } else {
+                self.controller.alignment_action(action);
+            }
         }
         let outputs = self
             .controller
@@ -872,107 +824,263 @@ impl CompanionApp {
                 "Saved speaker layout · connect to refresh live settings",
             );
         }
-        egui::ScrollArea::vertical().id_salt("speakers_scroll").auto_shrink([false, false]).show(ui, |ui| {
-            match outputs {
-                None => {
+        match outputs {
+            None => {
+                card().show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.add_space(30.0);
+                    ui.vertical_centered(|ui| {
+                        ui.label(
+                            RichText::new("Your speakers will appear here")
+                                .size(20.0)
+                                .strong(),
+                        );
+                        ui.add_space(10.0);
+                        ui.label(
+                            RichText::new(
+                                "Start Omniphony, then connect using its local address above.",
+                            )
+                            .color(MUTED),
+                        );
+                        ui.label(
+                            RichText::new("Choose your microphone input while you get connected.")
+                                .small()
+                                .color(MUTED),
+                        );
+                    });
+                    ui.add_space(30.0);
+                });
+            }
+            Some(outputs) if outputs.is_empty() => {
+                ui.label("Omniphony reported no physical outputs. Check its speaker layout, then refresh.");
+            }
+            Some(outputs) => {
+                for output in outputs {
+                    let readiness = self.controller.can_measure(&output.id);
+                    let take = self.controller.display_take(&output.id).cloned();
+                    let active = self.controller.active_output() == Some(output.id.as_str());
                     card().show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
-                        ui.add_space(30.0);
-                        ui.vertical_centered(|ui| {
-                            ui.label(RichText::new("Your speakers will appear here").size(20.0).strong());
-                            ui.add_space(10.0);
-                            ui.label(RichText::new("Start Omniphony, then connect using its local address above.").color(MUTED));
-                            ui.label(RichText::new("Choose your microphone input while you get connected.").small().color(MUTED));
-                        });
-                        ui.add_space(30.0);
-                    });
-                }
-                Some(outputs) if outputs.is_empty() => {
-                    ui.label("Omniphony reported no physical outputs. Check its speaker layout, then refresh.");
-                }
-                Some(outputs) => {
-                    for output in outputs {
-                        let readiness = self.controller.can_measure(&output.id);
-                        let take = self.controller.display_take(&output.id).cloned();
-                        let active = self.controller.active_output() == Some(output.id.as_str());
-                        card().show(ui, |ui| {
-                            ui.set_min_width(ui.available_width());
-                            ui.horizontal(|ui| {
-                                let mut included=!self.controller.excluded_outputs.contains(&output.id) && self.controller.output_readiness(&output.id).is_ok();
-                                if ui.add_enabled(!self.controller.busy() && readiness.is_ok(),egui::Checkbox::without_text(&mut included)).on_hover_text("Include in whole-system capture. Uncheck unwired speakers.").changed() {
-                                    if included {self.controller.excluded_outputs.remove(&output.id);} else {self.controller.excluded_outputs.insert(output.id.clone());}
+                        ui.horizontal(|ui| {
+                            let mut included =
+                                !self.controller.excluded_outputs.contains(&output.id)
+                                    && self.controller.output_readiness(&output.id).is_ok();
+                            if ui
+                                .add_enabled(
+                                    !self.controller.busy() && readiness.is_ok(),
+                                    egui::Checkbox::without_text(&mut included),
+                                )
+                                .on_hover_text(
+                                    "Include in whole-system capture. Uncheck unwired speakers.",
+                                )
+                                .changed()
+                            {
+                                if included {
+                                    self.controller.excluded_outputs.remove(&output.id);
+                                } else {
+                                    self.controller.excluded_outputs.insert(output.id.clone());
                                 }
-                                let (icon, _) = ui.allocate_exact_size(Vec2::new(24.0, 44.0), egui::Sense::hover());
-                                let ink = if output.muted { MUTED } else { ACCENT };
-                                ui.painter().rect_stroke(icon.shrink2(Vec2::new(6.0, 4.0)), 4.0, Stroke::new(1.3_f32, ink), egui::StrokeKind::Inside);
-                                ui.painter().circle_stroke(icon.center()+Vec2::new(0.0, 6.0), 5.0, Stroke::new(1.3_f32, ink));
-                                ui.painter().circle_filled(icon.center()+Vec2::new(0.0,-8.0), 2.0, ink);
-                                let name_width = (ui.available_width()-272.0).max(100.0);
-                                ui.allocate_ui_with_layout(Vec2::new(name_width, 48.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                            }
+                            let (icon, _) =
+                                ui.allocate_exact_size(Vec2::new(24.0, 44.0), egui::Sense::hover());
+                            let ink = if output.muted { MUTED } else { ACCENT };
+                            ui.painter().rect_stroke(
+                                icon.shrink2(Vec2::new(6.0, 4.0)),
+                                4.0,
+                                Stroke::new(1.3_f32, ink),
+                                egui::StrokeKind::Inside,
+                            );
+                            ui.painter().circle_stroke(
+                                icon.center() + Vec2::new(0.0, 6.0),
+                                5.0,
+                                Stroke::new(1.3_f32, ink),
+                            );
+                            ui.painter().circle_filled(
+                                icon.center() + Vec2::new(0.0, -8.0),
+                                2.0,
+                                ink,
+                            );
+                            let name_width = (ui.available_width() - 272.0).max(100.0);
+                            ui.allocate_ui_with_layout(
+                                Vec2::new(name_width, 48.0),
+                                egui::Layout::top_down(egui::Align::Min),
+                                |ui| {
                                     ui.set_min_width(name_width);
-                                    ui.add(egui::Label::new(RichText::new(&output.name).size(18.0).strong()).truncate()).on_hover_text(&output.name);
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(&output.name).size(18.0).strong(),
+                                        )
+                                        .truncate(),
+                                    )
+                                    .on_hover_text(&output.name);
                                     let band = match (output.freq_low_hz, output.freq_high_hz) {
                                         (Some(lo), Some(hi)) => format!("{lo:.0}–{hi:.0} Hz"),
                                         (Some(lo), None) => format!("From {lo:.0} Hz"),
                                         (None, Some(hi)) => format!("Up to {hi:.0} Hz"),
                                         _ => "No band restriction".into(),
                                     };
-                                    ui.label(RichText::new(format!("Output {} · {band}", output.index + 1)).size(12.0).color(MUTED));
-                                });
-                                ui.allocate_ui_with_layout(Vec2::new(72.0, 45.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "Output {} · {band}",
+                                            output.index + 1
+                                        ))
+                                        .size(12.0)
+                                        .color(MUTED),
+                                    );
+                                },
+                            );
+                            ui.allocate_ui_with_layout(
+                                Vec2::new(72.0, 45.0),
+                                egui::Layout::top_down(egui::Align::Min),
+                                |ui| {
                                     ui.set_min_width(72.0);
                                     caption(ui, "GAIN");
-                                    ui.label(RichText::new(format!("{:+.1} dB", output.gain_db)).monospace());
-                                });
-                                ui.allocate_ui_with_layout(Vec2::new(77.0, 45.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                                    ui.label(
+                                        RichText::new(format!("{:+.1} dB", output.gain_db))
+                                            .monospace(),
+                                    );
+                                },
+                            );
+                            ui.allocate_ui_with_layout(
+                                Vec2::new(77.0, 45.0),
+                                egui::Layout::top_down(egui::Align::Min),
+                                |ui| {
                                     ui.set_min_width(77.0);
                                     caption(ui, "DELAY");
-                                    ui.label(RichText::new(format!("{:.2} ms", output.delay_ms)).monospace());
-                                });
-                                let button = ui.add_enabled(if active { !self.controller.state.stopping } else { readiness.is_ok() }, egui::Button::new(
-                                    RichText::new(if active { "Stop" } else { "Measure" }).color(if readiness.is_ok() { BG } else { MUTED }))
-                                    .fill(if readiness.is_ok() { ACCENT } else { PANEL })
-                                    .min_size(Vec2::new(92.0, 34.0)));
-                                if button.clicked() { if active {self.controller.cancel();} else { self.controller.start(&output.id); } }
-                                if let Err(reason) = &readiness { button.on_disabled_hover_text(reason); }
-                            });
-                            ui.add_space(5.0);
-                            let (status_rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 25.0), egui::Sense::hover());
-                            ui.scope_builder(egui::UiBuilder::new().max_rect(status_rect).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
-                                if output.muted { badge(ui, "MUTED", WARM); }
-                                if self.controller.settings.reference_output.as_ref() == Some(&output.id) {
+                                    ui.label(
+                                        RichText::new(format!("{:.2} ms", output.delay_ms))
+                                            .monospace(),
+                                    );
+                                },
+                            );
+                            let button = ui.add_enabled(
+                                if active {
+                                    !self.controller.state.stopping
+                                } else {
+                                    readiness.is_ok()
+                                },
+                                egui::Button::new(
+                                    RichText::new(if active { "Stop" } else { "Measure" })
+                                        .color(if readiness.is_ok() { BG } else { MUTED }),
+                                )
+                                .fill(if readiness.is_ok() { ACCENT } else { PANEL })
+                                .min_size(Vec2::new(92.0, 34.0)),
+                            );
+                            if button.clicked() {
+                                if active {
+                                    self.controller.cancel();
+                                } else {
+                                    self.controller.start(&output.id);
+                                }
+                            }
+                            if let Err(reason) = &readiness {
+                                button.on_disabled_hover_text(reason);
+                            }
+                        });
+                        if let Some(alignment) = &self.controller.state.alignment
+                            && let Some(row) =
+                                alignment.rows.iter().find(|r| r.output_id == output.id)
+                        {
+                            ui.separator();
+                            let older = alignment.settings != self.controller.settings
+                                || self.controller.state.snapshot.as_ref().is_some_and(
+                                    |snapshot| {
+                                        let expected = alignment
+                                            .restored_snapshot
+                                            .as_ref()
+                                            .or(alignment.applied_snapshot.as_ref())
+                                            .unwrap_or(&alignment.snapshot);
+                                        snapshot.revision != expected.revision
+                                    },
+                                )
+                                || take
+                                    .as_ref()
+                                    .and_then(|t| t.outcome.as_ref().ok())
+                                    .is_some_and(|o| {
+                                        !row.take_folders.iter().any(|p| {
+                                            companion_service::workspace::absolute(p)
+                                                == companion_service::workspace::absolute(
+                                                    &o.directory,
+                                                )
+                                        })
+                                    });
+                            alignment_view::speaker(ui, alignment, row, older);
+                        }
+                        ui.add_space(5.0);
+                        let (status_rect, _) = ui.allocate_exact_size(
+                            Vec2::new(ui.available_width(), 25.0),
+                            egui::Sense::hover(),
+                        );
+                        ui.scope_builder(
+                            egui::UiBuilder::new()
+                                .max_rect(status_rect)
+                                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                            |ui| {
+                                if output.muted {
+                                    badge(ui, "MUTED", WARM);
+                                }
+                                if self.controller.settings.reference_output.as_ref()
+                                    == Some(&output.id)
+                                {
                                     badge(ui, "TIMING REFERENCE", ACCENT);
                                 }
-                                if active { self.row_progress(ui); }
-                                else if let Some(take) = &take {
+                                if active {
+                                    self.row_progress(ui);
+                                } else if let Some(take) = &take {
                                     let (text, color) = self.measurement_status(take);
-                                    ui.add(egui::Label::new(RichText::new(text).small().color(color)).truncate());
+                                    ui.add(
+                                        egui::Label::new(RichText::new(text).small().color(color))
+                                            .truncate(),
+                                    );
                                     if ui.small_button("View result").clicked() {
                                         self.select_take(take.clone());
                                     }
                                 } else if let Err(reason) = &readiness {
-                                    ui.add(egui::Label::new(RichText::new(reason).small().color(MUTED)).truncate()).on_hover_text(reason);
-                                } else { ui.label(RichText::new("Ready for a first take").small().color(MUTED)); }
-                            });
-                        });
-                        ui.add_space(10.0);
-                    }
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(reason).small().color(MUTED),
+                                        )
+                                        .truncate(),
+                                    )
+                                    .on_hover_text(reason);
+                                } else {
+                                    ui.label(
+                                        RichText::new("Ready for a first take")
+                                            .small()
+                                            .color(MUTED),
+                                    );
+                                }
+                            },
+                        );
+                    });
+                    ui.add_space(10.0);
                 }
             }
-            if !self.controller.state.takes.is_empty() {
-                ui.add_space(8.0);
-                egui::CollapsingHeader::new(format!("Recent takes ({})", self.controller.state.takes.len())).show(ui, |ui| {
-                    let mut selected = None;
-                    for take in self.controller.state.takes.iter().rev() {
-                        let (status, color) = self.measurement_status(take);
-                        if ui.button(RichText::new(format!("{} · {status}", take.output_id)).color(color)).clicked() {
-                            selected = Some(take.clone());
-                        }
+        }
+        if !self.controller.state.takes.is_empty() {
+            ui.add_space(8.0);
+            egui::CollapsingHeader::new(format!(
+                "Recent takes ({})",
+                self.controller.state.takes.len()
+            ))
+            .show(ui, |ui| {
+                let mut selected = None;
+                for take in self.controller.state.takes.iter().rev() {
+                    let (status, color) = self.measurement_status(take);
+                    if ui
+                        .button(
+                            RichText::new(format!("{} · {status}", take.output_id)).color(color),
+                        )
+                        .clicked()
+                    {
+                        selected = Some(take.clone());
                     }
-                    if let Some(take) = selected { self.select_take(take); }
-                });
-            }
-        });
+                }
+                if let Some(take) = selected {
+                    self.select_take(take);
+                }
+            });
+        }
     }
 
     fn row_progress(&self, ui: &mut egui::Ui) {
@@ -1023,7 +1131,6 @@ impl CompanionApp {
 
     fn select_take(&mut self, take: Take) {
         self.selected_result = Some(take);
-        self.show_alignment = false;
         self.saved_selected = false;
         self.pending_review_folder = None;
         self.attempted_analysis = None;
@@ -1033,7 +1140,6 @@ impl CompanionApp {
     fn analyze_selected_folder(&mut self, path: String) {
         self.review_path = path.trim().to_owned();
         self.selected_result = None;
-        self.show_alignment = false;
         self.saved_selected = true;
         self.pending_review_folder = Some(companion_service::workspace::absolute(
             std::path::Path::new(&self.review_path),
