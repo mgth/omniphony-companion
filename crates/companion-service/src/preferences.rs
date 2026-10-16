@@ -11,8 +11,46 @@ use std::{
     time::Duration,
 };
 
-const LIMIT: u64 = 128 * 1024;
+const LIMIT: u64 = 1024 * 1024;
 const SAVE_DELAY: Duration = Duration::from_millis(400);
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResultPlot {
+    #[default]
+    Impulse,
+    FrequencyResponse,
+    EnergyArrival,
+    GroupDelay,
+    SignedWaveform,
+    ToneBurst,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ViewPreferences {
+    pub plot: ResultPlot,
+    pub show_alignment: bool,
+    pub saved_selected: bool,
+    pub selected_take: Option<PathBuf>,
+    pub selected_output: Option<String>,
+    pub burst_frequency: f64,
+    pub burst_overview: bool,
+    pub burst_overlay: bool,
+}
+impl Default for ViewPreferences {
+    fn default() -> Self {
+        Self {
+            plot: ResultPlot::default(),
+            show_alignment: false,
+            saved_selected: false,
+            selected_take: None,
+            selected_output: None,
+            burst_frequency: 1000.0,
+            burst_overview: false,
+            burst_overlay: true,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -22,6 +60,8 @@ pub struct Preferences {
     pub settings: Settings,
     pub excluded_outputs: BTreeSet<String>,
     pub review_path: String,
+    pub workspace: Option<crate::workspace::WorkspaceIndex>,
+    pub view: ViewPreferences,
 }
 impl Default for Preferences {
     fn default() -> Self {
@@ -31,6 +71,8 @@ impl Default for Preferences {
             settings: Settings::default(),
             excluded_outputs: BTreeSet::new(),
             review_path: String::new(),
+            workspace: None,
+            view: ViewPreferences::default(),
         }
     }
 }
@@ -38,6 +80,14 @@ impl Preferences {
     fn validate(&self) -> AppResult<()> {
         if self.schema_version != 1 {
             return Err("unsupported settings version; existing file was kept".into());
+        }
+        if let Some(index) = &self.workspace {
+            index.validate()?;
+        }
+        if !self.view.burst_frequency.is_finite()
+            || !(0.0..=192000.0).contains(&self.view.burst_frequency)
+        {
+            return Err("invalid saved graph frequency".into());
         }
         let s = &self.settings;
         if self.excluded_outputs.len() > 512
@@ -106,7 +156,7 @@ impl PreferenceStore {
                 let mut bytes = Vec::new();
                 file.take(LIMIT + 1).read_to_end(&mut bytes)?;
                 if bytes.len() as u64 > LIMIT {
-                    return Err("settings file exceeds 128 KiB; existing file was kept".into());
+                    return Err("settings file exceeds 1 MiB; existing file was kept".into());
                 }
                 let prefs: Preferences = serde_json::from_slice(&bytes)?;
                 prefs.validate()?;
@@ -174,6 +224,19 @@ impl PreferenceStore {
         let _ = self.sender.as_ref().unwrap().try_send(());
     }
 
+    pub fn update_workspace(&mut self, workspace: crate::workspace::WorkspaceIndex) {
+        if self.current.workspace.as_ref() != Some(&workspace) {
+            self.current.workspace = Some(workspace);
+            self.retry();
+        }
+    }
+    pub fn update_view(&mut self, view: ViewPreferences) {
+        if self.current.view != view {
+            self.current.view = view;
+            self.retry();
+        }
+    }
+
     pub fn update(
         &mut self,
         settings: &Settings,
@@ -193,7 +256,7 @@ impl PreferenceStore {
             endpoint: endpoint.into(),
             excluded_outputs: excluded.clone(),
             review_path: review_path.into(),
-            ..Preferences::default()
+            ..self.current.clone()
         };
         // A full wake queue already guarantees the latest state will be consumed.
         self.retry();
@@ -212,7 +275,7 @@ fn save(path: &Path, preferences: &Preferences) -> AppResult<()> {
     let mut bytes = serde_json::to_vec_pretty(preferences)?;
     bytes.push(b'\n');
     if bytes.len() as u64 > LIMIT {
-        return Err("settings exceed 128 KiB".into());
+        return Err("settings exceed 1 MiB".into());
     }
     fs::create_dir_all(parent(path))?;
     let mut file = tempfile::NamedTempFile::new_in(parent(path))?;

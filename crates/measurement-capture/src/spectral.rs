@@ -2,11 +2,11 @@
 //! All timing shares the segment's correlation anchor, never a per-band zero.
 use omniphony_osc_contract::measurement::Sweep;
 use rustfft::{FftPlanner, num_complex::Complex};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpectralReport {
-    pub method: &'static str,
+    pub method: String,
     pub frequency_bounds_hz: [f64; 2],
     pub response_window_ms: [f64; 2],
     pub smoothing_octaves: f64,
@@ -14,7 +14,7 @@ pub struct SpectralReport {
     pub points: Vec<SpectralPoint>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpectralPoint {
     pub frequency_hz: f64,
     /// Capture/source amplitude ratio, including speaker, room, microphone and gains.
@@ -196,7 +196,7 @@ pub fn analyze(
         });
     }
     Ok(SpectralReport {
-        method: "windowed-transfer-and-band-energy-v1",
+        method: "windowed-transfer-and-band-energy-v1".into(),
         frequency_bounds_hz: bounds,
         response_window_ms: [
             -(anchor as f64) / rate * 1000.0,

@@ -21,19 +21,13 @@ const ACCENT: Color32 = Color32::from_rgb(113, 219, 201);
 const WARM: Color32 = Color32::from_rgb(243, 194, 123);
 const RED: Color32 = Color32::from_rgb(248, 136, 139);
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub enum ResultPlot {
-    #[default]
-    Impulse,
-    FrequencyResponse,
-    EnergyArrival,
-    GroupDelay,
-    SignedWaveform,
-    ToneBurst,
-}
+pub use companion_service::preferences::ResultPlot;
+use companion_service::preferences::ViewPreferences;
 
 pub struct CompanionApp {
     pub controller: Controller,
+    pending_view: Option<ViewPreferences>,
+    last_workspace_revision: u64,
     show_alignment: bool,
     last_alignment: Option<std::path::PathBuf>,
     pub result_plot: ResultPlot,
@@ -76,9 +70,21 @@ impl CompanionApp {
         let mut app = Self::with_controller(ctx, controller, false);
         app.endpoint = prefs.endpoint;
         app.review_path = prefs.review_path;
+        app.pending_view = Some(prefs.view.clone());
+        app.result_plot = prefs.view.plot;
+        app.waveform_view.frequency = prefs.view.burst_frequency;
+        app.waveform_view.overview = prefs.view.burst_overview;
+        app.waveform_view.overlay = prefs.view.burst_overlay;
+        app.show_alignment = prefs.view.show_alignment;
+        app.saved_selected = prefs.view.saved_selected;
         app.preferences = Some(store);
+        let index = if reconnect {
+            prefs.workspace
+        } else {
+            Some(Default::default())
+        };
         app.controller
-            .initialize(reconnect.then(|| app.endpoint.clone()));
+            .restore_workspace(index, reconnect.then(|| app.endpoint.clone()));
         app
     }
     /// Inject a service for deterministic UI tests; the live app never installs fake devices.
@@ -93,6 +99,8 @@ impl CompanionApp {
         }
         Self {
             controller,
+            pending_view: None,
+            last_workspace_revision: u64::MAX,
             show_alignment: false,
             last_alignment: None,
             result_plot: ResultPlot::default(),
@@ -119,6 +127,49 @@ impl CompanionApp {
 
     pub fn draw(&mut self, ctx: &egui::Context) {
         self.controller.poll();
+        if self.controller.state.workspace_ready
+            && let Some(view) = self.pending_view.take()
+        {
+            self.selected_result = self
+                .controller
+                .state
+                .takes
+                .iter()
+                .rev()
+                .find(|t| {
+                    if let Some(path) = &view.selected_take {
+                        t.outcome.as_ref().is_ok_and(|o| {
+                            companion_service::workspace::absolute(&o.directory) == *path
+                        })
+                    } else {
+                        view.selected_output.as_ref() == Some(&t.output_id)
+                    }
+                })
+                .cloned();
+            if self.controller.state.workspace_imported && self.selected_result.is_none() {
+                self.selected_result = self.controller.state.takes.last().cloned();
+                self.show_alignment = self.controller.state.alignment.as_ref().is_some_and(|a| {
+                    self.selected_result
+                        .as_ref()
+                        .and_then(|t| t.outcome.as_ref().ok())
+                        .is_none_or(|o| o.directory.starts_with(&a.directory))
+                });
+            }
+            self.show_alignment &= self.controller.state.alignment.is_some();
+            self.saved_selected &= self.controller.state.review.is_some();
+            self.last_alignment = self
+                .controller
+                .state
+                .alignment
+                .as_ref()
+                .map(|a| a.directory.clone());
+            self.last_review_file = self
+                .controller
+                .state
+                .review
+                .as_ref()
+                .map(|r| r.report_file.clone());
+        }
         let alignment_path = self
             .controller
             .state
@@ -246,6 +297,19 @@ impl CompanionApp {
                 if let Some(error) = &self.controller.state.connection_error {
                     ui.label(RichText::new(error).small().color(RED));
                 }
+                if matches!(self.controller.state.job, Some(Job::RestoreWorkspace)) {
+                    ui.label(RichText::new("Restoring previous measurements…").color(MUTED));
+                }
+                if !self.controller.state.workspace_warnings.is_empty() {
+                    egui::CollapsingHeader::new("Some saved results could not be restored").show(
+                        ui,
+                        |ui| {
+                            for warning in &self.controller.state.workspace_warnings {
+                                ui.colored_label(WARM, warning);
+                            }
+                        },
+                    );
+                }
                 let save_error = self.preferences.as_ref().and_then(PreferenceStore::error);
                 if let Some(error) = self.preferences_error.as_ref().or(save_error.as_ref()) {
                     ui.label(RichText::new(error).small().color(WARM));
@@ -346,6 +410,32 @@ impl CompanionApp {
                 &self.controller.excluded_outputs,
                 &self.review_path,
             );
+            if self.pending_view.is_none() {
+                if self.last_workspace_revision != self.controller.state.workspace_revision
+                    && !self.controller.busy()
+                {
+                    store.update_workspace(
+                        companion_service::workspace::WorkspaceIndex::from_state(
+                            &self.controller.state,
+                        ),
+                    );
+                    self.last_workspace_revision = self.controller.state.workspace_revision;
+                }
+                store.update_view(ViewPreferences {
+                    plot: self.result_plot,
+                    show_alignment: self.show_alignment,
+                    saved_selected: self.saved_selected,
+                    selected_take: self
+                        .selected_result
+                        .as_ref()
+                        .and_then(|t| t.outcome.as_ref().ok())
+                        .map(|o| companion_service::workspace::absolute(&o.directory)),
+                    selected_output: self.selected_result.as_ref().map(|t| t.output_id.clone()),
+                    burst_frequency: self.waveform_view.frequency,
+                    burst_overview: self.waveform_view.overview,
+                    burst_overlay: self.waveform_view.overlay,
+                });
+            }
         }
     }
 
@@ -769,12 +859,26 @@ impl CompanionApp {
             });
             ui.add_space(10.0);
         }
+        // Do not render an empty scroll area while loading: it would clamp the
+        // persisted speaker scroll offset to zero before the rows return.
+        if matches!(self.controller.state.job, Some(Job::RestoreWorkspace)) {
+            return;
+        }
         let outputs = self
             .controller
             .state
             .snapshot
             .as_ref()
+            .or(self.controller.state.saved_snapshot.as_ref())
             .map(|s| s.outputs.clone());
+        if self.controller.state.snapshot.is_none()
+            && self.controller.state.saved_snapshot.is_some()
+        {
+            ui.colored_label(
+                WARM,
+                "Saved speaker layout · connect to refresh live settings",
+            );
+        }
         egui::ScrollArea::vertical().id_salt("speakers_scroll").auto_shrink([false, false]).show(ui, |ui| {
             match outputs {
                 None => {
@@ -796,7 +900,7 @@ impl CompanionApp {
                 Some(outputs) => {
                     for output in outputs {
                         let readiness = self.controller.can_measure(&output.id);
-                        let take = self.controller.current_take(&output.id).cloned();
+                        let take = self.controller.display_take(&output.id).cloned();
                         let active = self.controller.active_output() == Some(output.id.as_str());
                         card().show(ui, |ui| {
                             ui.set_min_width(ui.available_width());
@@ -927,6 +1031,41 @@ impl CompanionApp {
     fn results(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("Results").size(18.0).strong());
+            egui::ComboBox::from_id_salt("measurement_history")
+                .selected_text("Previous measurements")
+                .show_ui(ui, |ui| {
+                    for take in self.controller.state.takes.iter().rev() {
+                        let folder = take
+                            .outcome
+                            .as_ref()
+                            .ok()
+                            .map(|o| {
+                                let folder = companion_service::workspace::absolute(&o.directory);
+                                let root = companion_service::workspace::absolute(
+                                    std::path::Path::new(&take.settings.output_root),
+                                );
+                                folder
+                                    .strip_prefix(root)
+                                    .unwrap_or(&folder)
+                                    .display()
+                                    .to_string()
+                            })
+                            .unwrap_or_else(|| "failed capture".into());
+                        if ui
+                            .selectable_label(
+                                false,
+                                format!(
+                                    "{} · {} · {}",
+                                    take.output_id, take.settings.position_id, folder
+                                ),
+                            )
+                            .clicked()
+                        {
+                            self.selected_result = Some(take.clone());
+                            self.saved_selected = false;
+                        }
+                    }
+                });
             if let Some(take) = &self.selected_result {
                 ui.selectable_value(
                     &mut self.saved_selected,
@@ -949,11 +1088,11 @@ impl CompanionApp {
                 .state
                 .review
                 .as_ref()
-                .map(|r| &r.report_file),
+                .map(|r| companion_service::workspace::absolute(&r.report_file)),
             self.selected_result
                 .as_ref()
                 .and_then(|t| t.outcome.as_ref().ok())
-                .map(|o| &o.directory),
+                .map(|o| companion_service::workspace::absolute(&o.directory)),
         ));
         egui::ScrollArea::vertical()
             .id_salt(scroll_id)
@@ -980,6 +1119,9 @@ impl CompanionApp {
         ui.push_id("live_result", |ui| {
                 let (status, color) = take_status(take);
                 ui.label(RichText::new(status).size(20.0).color(color).strong());
+                if self.controller.state.snapshot.as_ref().is_none_or(|s| s.revision != take.revision) || self.controller.settings != take.settings {
+                    ui.colored_label(WARM, "Previous measurement · current renderer or capture settings differ");
+                }
                 ui.label(RichText::new(format!("{} · {} · Channel {} · Reference: {}", take.settings.microphone_id, take.settings.position_id, take.settings.input_channel, take.settings.reference_output.as_deref().unwrap_or("—"))).small().color(MUTED));
                 match &take.outcome {
                     Ok(outcome) => {
@@ -1091,6 +1233,12 @@ impl Drop for CompanionApp {
 }
 
 impl eframe::App for CompanionApp {
+    fn persist_egui_memory(&self) -> bool {
+        !self.preview
+    }
+    fn auto_save_interval(&self) -> Duration {
+        Duration::from_secs(2)
+    }
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.draw(ctx);
     }
@@ -1207,7 +1355,7 @@ fn draw_diagnostics(ui: &mut egui::Ui, report: &companion_service::review::Acqui
                 }
                 ui.end_row();
                 for segment in segments {
-                    ui.label(segment.role);
+                    ui.label(&segment.role);
                     ui.monospace(format!("{:.1}", segment.rms_dbfs));
                     ui.monospace(format!("{:.1} dB", segment.signal_to_noise_db));
                     ui.monospace(format!("{:.1}", segment.peak_dbfs));

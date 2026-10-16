@@ -155,6 +155,7 @@ pub enum Job {
     },
     ApplyAlignment,
     LoadAlignment,
+    RestoreWorkspace,
     Review,
     Inputs,
     Discover,
@@ -184,6 +185,12 @@ pub struct InputCheck {
 
 #[derive(Default)]
 pub struct State {
+    pub saved_snapshot: Option<Snapshot>,
+    pub restored_index: Option<crate::workspace::WorkspaceIndex>,
+    pub workspace_warnings: Vec<String>,
+    pub workspace_ready: bool,
+    pub workspace_imported: bool,
+    pub workspace_revision: u64,
     pub input_check: Option<InputCheck>,
     pub alignment: Option<alignment::Alignment>,
     pub review: Option<SavedReview>,
@@ -200,6 +207,7 @@ pub struct State {
     pub error: Option<String>,
 }
 enum Event {
+    WorkspaceRestored(Box<Result<crate::workspace::RestoredWorkspace, String>>),
     InputLevel(measurement_capture::input::InputLevel),
     InputChecked(Result<(), String>),
     AlignmentProgress(usize, usize, MeasureProgress),
@@ -367,6 +375,24 @@ impl Controller {
             let _ = sender.send(Event::Inputs(result));
         });
     }
+    pub fn restore_workspace(
+        &mut self,
+        index: Option<crate::workspace::WorkspaceIndex>,
+        endpoint: Option<String>,
+    ) {
+        if self.busy() {
+            return;
+        }
+        self.startup_endpoint = endpoint;
+        self.state.job = Some(Job::RestoreWorkspace);
+        let settings = self.settings.clone();
+        let sender = self.sender.clone();
+        std::thread::spawn(move || {
+            let result = catch_job(|| crate::workspace::restore(index, &settings));
+            let _ = sender.send(Event::WorkspaceRestored(Box::new(result)));
+        });
+    }
+
     /// Enumerate first, then discover the saved renderer without starting audio.
     pub fn initialize(&mut self, endpoint: Option<String>) {
         if !self.busy() {
@@ -856,7 +882,37 @@ impl Controller {
     /// Reading events is nonblocking. A slow/minimized frontend never owns keepalives.
     pub fn poll(&mut self) {
         while let Ok(event) = self.receiver.try_recv() {
+            if !matches!(
+                &event,
+                Event::InputLevel(_)
+                    | Event::AlignmentProgress(..)
+                    | Event::BatchProgress(..)
+                    | Event::Progress(_)
+            ) {
+                self.state.workspace_revision = self.state.workspace_revision.wrapping_add(1);
+            }
             match event {
+                Event::WorkspaceRestored(result) => {
+                    match *result {
+                        Ok(saved) => {
+                            self.state.restored_index = Some(saved.index);
+                            self.state.takes = saved.takes;
+                            self.state.saved_snapshot = saved.snapshot;
+                            self.state.alignment = saved.alignment;
+                            self.state.review = saved.review;
+                            self.state.error = saved.error;
+                            self.state.workspace_warnings = saved.warnings;
+                            self.state.workspace_imported = saved.imported;
+                        }
+                        Err(e) => self
+                            .state
+                            .workspace_warnings
+                            .push(format!("Workspace could not be restored: {e}")),
+                    }
+                    self.state.workspace_ready = true;
+                    self.state.job = None;
+                    self.refresh_inputs();
+                }
                 Event::InputLevel(level) => {
                     if let Some(check) = &mut self.state.input_check {
                         check.level = Some(level);
@@ -905,6 +961,7 @@ impl Controller {
                                 snapshot.revision.clone(),
                                 takes,
                             );
+                            self.state.saved_snapshot = Some(snapshot.clone());
                             self.state.snapshot = Some(snapshot);
                         }
                         Err(e) => self.state.error = Some(e),
@@ -998,6 +1055,7 @@ impl Controller {
                                     .map(|o| o.id.clone());
                             }
                             self.state.endpoint = Some(endpoint);
+                            self.state.saved_snapshot = Some(snapshot.clone());
                             self.state.snapshot = Some(snapshot);
                         }
                         Err(error) => {
@@ -1025,6 +1083,17 @@ impl Controller {
         if self.input_check().is_none() {
             self.state.input_check = None;
         }
+    }
+    /// Historic results remain viewable after a renderer restart or settings edit.
+    /// They do not become current evidence or enable acquisition without discovery.
+    pub fn display_take(&self, output_id: &str) -> Option<&Take> {
+        self.current_take(output_id).or_else(|| {
+            self.state
+                .takes
+                .iter()
+                .rev()
+                .find(|t| t.output_id == output_id)
+        })
     }
     pub fn current_take(&self, output_id: &str) -> Option<&Take> {
         let revision = &self.state.snapshot.as_ref()?.revision;

@@ -17,7 +17,7 @@ use std::{
     sync::Arc,
 };
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedReview {
     pub schema_version: u32,
     #[serde(skip)]

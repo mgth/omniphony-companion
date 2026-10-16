@@ -2,11 +2,11 @@
 //! Repeated reference sweeps remove capture offset and estimate linear clock drift.
 use omniphony_osc_contract::measurement::{SETTLE_MS, Sweep};
 use rustfft::{FftPlanner, num_complex::Complex};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimingReport {
-    pub method: &'static str,
+    pub method: String,
     /// Candidate correlation peaks, not verified direct arrivals. Their timing
     /// relationship is withheld below when competing peaks are present.
     pub reference_start_frames: [f64; 2],
@@ -132,7 +132,7 @@ pub fn analyze(
         return Err("reference levels changed by more than 1 dB during the take".into());
     }
     Ok(TimingReport {
-        method: "repeated-reference-correlation-v3",
+        method: "repeated-reference-correlation-v3".into(),
         reference_start_frames: [peaks[0].position, peaks[2].position],
         target_start_frame: peaks[1].position,
         clock_drift_ppm: (!ambiguous_peaks).then_some(ppm),

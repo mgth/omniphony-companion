@@ -1,25 +1,25 @@
 //! Signed, bounded display traces and virtual tone bursts. No new acoustic evidence.
 use crate::spectral::SpectralReport;
 use rustfft::{FftPlanner, num_complex::Complex};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 const MAX_BUCKETS: usize = 1600;
 const CYCLES: usize = 6;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WaveformReport {
-    pub method: &'static str,
+    pub method: String,
     pub impulse: TracePair,
     pub bursts: Vec<BurstResponse>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TracePair {
     pub overview: SignedTrace,
     pub detail: SignedTrace,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignedTrace {
     pub start_ms: f64,
     pub bucket_ms: f64,
@@ -28,7 +28,7 @@ pub struct SignedTrace {
     pub peak: f64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BurstResponse {
     pub frequency_hz: f64,
     pub cycles: usize,
@@ -150,7 +150,7 @@ pub fn analyze(
         });
     }
     Some(WaveformReport {
-        method: "signed-ir-and-virtual-burst-v1",
+        method: "signed-ir-and-virtual-burst-v1".into(),
         impulse: impulse_traces,
         bursts,
     })

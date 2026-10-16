@@ -74,7 +74,10 @@ loop. Whole-system acquisition now adds selectable outputs and a continuous
 reference–speaker–reference sequence whose intervening references are shared.
 Progress stays in the active speaker row. Acquisition preferences and speaker
 checkboxes now persist locally, with startup device enumeration and renderer
-reconnection. Unavailable saved choices remain selected and block acquisition.
+reconnection. Startup also restores the last 100 result references, saved review,
+alignment and graph/view choices; existing sessions are imported once when upgrading
+from settings-only versions. Restoring a view never resumes playback or applies a
+profile. See `docs/workspace-restoration.md`. Unavailable saved choices remain selected and block acquisition.
 Automatic optimization iterations and guided microphone positioning remain pending.
 See `docs/batch-capture.md`.
 

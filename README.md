@@ -35,6 +35,9 @@ The Rust/egui desktop window lets you:
   capture with shared reference sweeps. **Stop** cancels the complete run.
 - Restore input/channel/rate, renderer address, reference, microphone/position,
   sweep settings, recording/calibration paths and speaker checkboxes on startup.
+- Resume the previous workspace: recent measurements, saved review, alignment,
+  selected result/graph, burst options, window size and panel layout. Saved results
+  remain viewable while the renderer is offline. See `docs/workspace-restoration.md`.
 - Review reference/target levels, clipping, missing sweep diagnostics and arrival evidence.
 - Reanalyze completed rejected takes without playing audio; the original verdict is retained.
 - Reanalyze saved recordings without playback; view impulse envelopes and
@@ -142,9 +145,12 @@ file is `$XDG_CONFIG_HOME/omniphony-companion/settings.json`, or
 `~/.config/omniphony-companion/settings.json` when XDG_CONFIG_HOME is unset.
 Windows uses `%APPDATA%/omniphony-companion/settings.json`; macOS uses
 `~/Library/Application Support/omniphony-companion/settings.json`.
-The last saved-take review path is also retained; recordings and analysis results
-remain in their own session folders. Relative paths remain relative to the
-application's working directory.
+The previous measurement results, alignment, selected graph and window layout
+also return on startup. The first upgrade imports up to 100 recent takes from
+the recording folder. Recordings and analysis results remain in their session
+folders; their saved references use absolute paths. Relative acquisition paths
+still resolve from the application's working directory. See
+[workspace restoration](docs/workspace-restoration.md) for details and limits.
 
 Startup enumerates inputs and reconnects to the saved local renderer address.
 It does not start capture or playback. Missing devices, unsupported channels and
