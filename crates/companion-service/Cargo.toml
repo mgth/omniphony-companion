@@ -8,6 +8,7 @@ repository.workspace = true
 description = "UI-independent discovery and acquisition services for Omniphony Companion"
 
 [dependencies]
+calibration-core.workspace = true
 omniphony-adapter.workspace = true
 measurement-capture = { path = "../measurement-capture" }
 serde = { workspace = true, features = ["rc"] }

@@ -1,4 +1,5 @@
 //! Native presentation only. Workers and measurement ownership live in companion-service.
+mod alignment_view;
 mod spectral_plot;
 mod waveform_plot;
 use companion_service::{
@@ -32,6 +33,8 @@ pub enum ResultPlot {
 
 pub struct CompanionApp {
     pub controller: Controller,
+    show_alignment: bool,
+    last_alignment: Option<std::path::PathBuf>,
     pub result_plot: ResultPlot,
     waveform_view: waveform_plot::State,
     saved_selected: bool,
@@ -89,6 +92,8 @@ impl CompanionApp {
         }
         Self {
             controller,
+            show_alignment: false,
+            last_alignment: None,
             result_plot: ResultPlot::default(),
             waveform_view: waveform_plot::State::default(),
             saved_selected: false,
@@ -113,6 +118,16 @@ impl CompanionApp {
 
     pub fn draw(&mut self, ctx: &egui::Context) {
         self.controller.poll();
+        let alignment_path = self
+            .controller
+            .state
+            .alignment
+            .as_ref()
+            .map(|a| a.directory.clone());
+        if alignment_path != self.last_alignment {
+            self.show_alignment = alignment_path.is_some();
+            self.last_alignment = alignment_path;
+        }
         let review_file = self
             .controller
             .state
@@ -125,12 +140,15 @@ impl CompanionApp {
             }
             self.last_review_file = review_file;
         }
-        if ctx.input(|i| i.viewport().close_requested()) && self.controller.measuring() {
+        if ctx.input(|i| i.viewport().close_requested())
+            && (self.controller.measuring()
+                || matches!(self.controller.state.job, Some(Job::ApplyAlignment)))
+        {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.closing = true;
             self.controller.cancel();
         }
-        if self.closing && !self.controller.measuring() {
+        if self.closing && !self.controller.busy() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         ctx.request_repaint_after(if self.controller.busy() {
@@ -241,7 +259,7 @@ impl CompanionApp {
         egui::TopBottomPanel::bottom("footer")
             .frame(egui::Frame::new().fill(BG).inner_margin(egui::Margin::symmetric(24, 10)))
             .show(ctx, |ui| {
-                ui.label(RichText::new("Capture and timing diagnostics · No speaker settings are changed · Automatic correction comes later")
+                ui.label(RichText::new("Measurement and experimental alignment · Settings change only through Apply or Restore")
                     .size(12.0).color(MUTED));
             });
         egui::SidePanel::left("setup")
@@ -267,13 +285,15 @@ impl CompanionApp {
             )
             .show(ctx, |ui| {
                 let height = ui.available_height();
-                let has_result =
-                    self.selected_result.is_some() || self.controller.state.review.is_some();
+                let has_result = self.selected_result.is_some()
+                    || self.controller.state.review.is_some()
+                    || self.controller.state.alignment.is_some();
+                let reserved = if self.show_alignment { 260.0 } else { 190.0 };
                 let panel = if has_result {
                     egui::TopBottomPanel::bottom("results_panel")
                         .resizable(true)
-                        .default_height((height * 0.65).min((height - 190.0).max(140.0)))
-                        .height_range(140.0..=(height - 190.0).max(140.0))
+                        .default_height((height * 0.65).min((height - reserved).max(140.0)))
+                        .height_range(140.0..=(height - reserved).max(140.0))
                 } else {
                     egui::TopBottomPanel::bottom("empty_results_panel").exact_height(75.0)
                 };
@@ -283,7 +303,34 @@ impl CompanionApp {
                             .fill(PANEL)
                             .inner_margin(egui::Margin::same(10)),
                     )
-                    .show_inside(ui, |ui| self.results(ui));
+                    .show_inside(ui, |ui| {
+                        if self.controller.state.alignment.is_some() {
+                            ui.horizontal(|ui| {
+                                ui.selectable_value(&mut self.show_alignment, true, "Alignment");
+                                ui.selectable_value(
+                                    &mut self.show_alignment,
+                                    false,
+                                    "Measurement results",
+                                );
+                            });
+                        }
+                        if self.show_alignment {
+                            let mut action = None;
+                            if let Some(a) = &self.controller.state.alignment {
+                                egui::ScrollArea::vertical()
+                                    .id_salt("alignment_scroll")
+                                    .show(ui, |ui| {
+                                        action =
+                                            alignment_view::draw(ui, a, self.controller.busy());
+                                    });
+                            }
+                            if let Some(action) = action {
+                                self.controller.alignment_action(action);
+                            }
+                        } else {
+                            self.results(ui);
+                        }
+                    });
                 ui.set_clip_rect(ui.available_rect_before_wrap().intersect(ui.clip_rect()));
                 self.speakers(ui);
             });
@@ -552,7 +599,17 @@ impl CompanionApp {
                 )
                 .clicked()
             {
+                self.show_alignment = false;
                 self.controller.review_saved(&self.review_path);
+            }
+            if ui
+                .add_enabled(
+                    !self.controller.busy(),
+                    egui::Button::new("Load alignment session"),
+                )
+                .clicked()
+            {
+                self.controller.load_alignment(&self.review_path);
             }
             ui.label(
                 RichText::new("Creates a new analysis report. The original take is preserved.")
@@ -601,6 +658,16 @@ impl CompanionApp {
                 self.controller.cancel();
             }
             let text = match &self.controller.state.job {
+                Some(Job::Alignment {
+                    output_ids,
+                    current,
+                    pass,
+                }) => format!(
+                    "Pass {} / 2 · Speaker {} / {}",
+                    pass + 1,
+                    current + 1,
+                    output_ids.len()
+                ),
                 Some(Job::Batch {
                     output_ids,
                     current,
@@ -611,6 +678,24 @@ impl CompanionApp {
                     .unwrap_or_default(),
             };
             ui.add(egui::Label::new(RichText::new(text).small().color(MUTED)).truncate());
+        });
+        ui.horizontal_wrapped(|ui| {
+            let ready = self.controller.alignment_readiness();
+            if ui
+                .add_enabled(
+                    ready.is_ok(),
+                    egui::Button::new("Measure alignment · 2 passes"),
+                )
+                .on_disabled_hover_text(ready.as_ref().err().map(String::as_str).unwrap_or(""))
+                .clicked()
+            {
+                self.controller.start_alignment();
+            }
+            ui.label(
+                RichText::new("Keep microphone and input gain fixed for both passes.")
+                    .small()
+                    .color(MUTED),
+            );
         });
         ui.add_space(12.0);
         if let Some(error) = &self.controller.state.error {
@@ -718,7 +803,7 @@ impl CompanionApp {
                                     let (text, color) = take_status(take);
                                     ui.add(egui::Label::new(RichText::new(text).small().color(color)).truncate());
                                     if ui.small_button("View result").clicked() {
-                                        self.selected_result = Some(take.clone());
+                                        self.show_alignment = false; self.selected_result = Some(take.clone());
                                         self.saved_selected = false;
                                     }
                                 } else if let Err(reason) = &readiness {
@@ -736,7 +821,7 @@ impl CompanionApp {
                     for take in self.controller.state.takes.iter().rev() {
                         let (status, color) = take_status(take);
                         if ui.button(RichText::new(format!("{} · {status}", take.output_id)).color(color)).clicked() {
-                            self.selected_result = Some(take.clone());
+                            self.show_alignment = false; self.selected_result = Some(take.clone());
                             self.saved_selected = false;
                         }
                     }

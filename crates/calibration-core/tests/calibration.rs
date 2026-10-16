@@ -128,7 +128,7 @@ fn rejects_bad_quality_or_non_finite_observations() {
             3 => observation.arrival_ms = f64::NAN,
             4 => observation.level_dbfs = f64::INFINITY,
             5 => observation.snr_db = f64::NEG_INFINITY,
-            _ => observation.arrival_ms = -1.0,
+            _ => observation.arrival_ms = -100.1,
         }
         assert!(
             propose(&session, &CalibrationPolicy::default()).is_err(),
@@ -317,4 +317,19 @@ fn fractional_measurements_survive_saved_profile_roundtrip() {
         )
         .unwrap();
     }
+}
+
+#[test]
+fn signed_relative_times_and_positive_transfer_levels_do_not_add_common_offsets() {
+    let mut s = fixture();
+    s.baseline.origin = ObservationOrigin::Measured;
+    s.baseline.observations[0].arrival_ms = -8.0;
+    s.baseline.observations[1].arrival_ms = -5.0;
+    s.baseline.observations[0].level_dbfs = 5.0;
+    s.baseline.observations[1].level_dbfs = 2.0;
+    let p = propose(&s, &CalibrationPolicy::default()).unwrap();
+    assert_eq!(p.target_snapshot.speakers[0].settings.delay_ms, 4.0);
+    assert_eq!(p.target_snapshot.speakers[1].settings.delay_ms, 2.0);
+    assert_eq!(p.target_snapshot.speakers[0].settings.gain_db, -4.0);
+    assert_eq!(p.target_snapshot.speakers[1].settings.gain_db, -3.0);
 }

@@ -566,8 +566,14 @@ fn capture_progress_keeps_speaker_rows_in_place_for_single_and_batch_capture() {
             .filter(|(s, r)| r.left() > 310.0 && (s == "Front left" || s == "Front right"))
             .cloned()
             .collect();
-        for batch in [false, true] {
-            app.controller.state.job = Some(if batch {
+        for kind in 0..3 {
+            app.controller.state.job = Some(if kind == 2 {
+                Job::Alignment {
+                    output_ids: vec!["Front left".into(), "Front right".into()],
+                    current: 0,
+                    pass: 1,
+                }
+            } else if kind == 1 {
                 Job::Batch {
                     output_ids: vec!["Front left".into(), "Front right".into()],
                     current: 0,
@@ -598,5 +604,46 @@ fn capture_progress_keeps_speaker_rows_in_place_for_single_and_batch_capture() {
                 assert!(text.iter().any(|(s, _)| s == "Stop"));
             }
         }
+    }
+}
+
+#[test]
+fn alignment_is_inline_and_unqualified_results_never_apply_or_play() {
+    for size in [Vec2::new(850.0, 640.0), Vec2::new(1160.0, 800.0)] {
+        let ctx = egui::Context::default();
+        let (mut controller, starts) = support::ready();
+        controller.state.alignment = Some(companion_service::alignment::Alignment {
+            schema_version: 1,
+            directory: "preview-alignment".into(),
+            endpoint: "127.0.0.1:9000".parse().unwrap(),
+            settings: controller.settings.clone(),
+            snapshot: controller.state.snapshot.clone().unwrap(),
+            rows: vec![],
+            blockers: vec!["Two independent captures are required".into()],
+            session: None,
+            profile: None,
+            applied_snapshot: None,
+            restored_snapshot: None,
+            verification: None,
+            verification_note: None,
+            application_uncertain: false,
+        });
+        let mut app = CompanionApp::preview(&ctx, controller);
+        for _ in 0..3 {
+            frame(&mut app, &ctx, vec![], size);
+        }
+        let text = labels(&frame(&mut app, &ctx, vec![], size));
+        let speakers = text.iter().find(|(t, _)| t == "Speakers").unwrap().1;
+        let alignment = text
+            .iter()
+            .find(|(t, _)| t == "Delay and level alignment")
+            .unwrap()
+            .1;
+        assert!(alignment.top() > speakers.bottom());
+        assert!(text.iter().all(|(_, r)| r.is_finite()));
+        let apply = find_result_text(&mut app, &ctx, size, "Apply gains and delays");
+        click(&mut app, &ctx, apply.center(), size);
+        assert!(!app.controller.busy());
+        assert_eq!(starts.load(Ordering::Relaxed), 0);
     }
 }

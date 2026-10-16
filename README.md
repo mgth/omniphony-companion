@@ -2,13 +2,15 @@
 
 Acoustic calibration companion for [Omniphony](https://github.com/mgth/Omniphony).
 
-**Status: native desktop UI, microphone capture, offline impulse-response review and an offline calibration core.**
+**Status: native desktop UI, microphone capture, experimental repeated gain/delay alignment, and offline response review.**
 The companion discovers renderer outputs, plays finite measurement sequences,
 records a selected interface input channel and saves raw audio with quality reports.
 The offline core can propose gains/delays from already-estimated observations.
 Experimental arrival candidates can now be reviewed against impulse responses.
-Validated direct-arrival observations and live application of calibration profiles
-are still pending. The demonstration is explicitly simulated.
+A separate two-pass workflow qualifies repeated arrival/level estimates, proposes
+absolute gain/delay settings, applies them explicitly, and verifies them through
+new captures. Hardware accuracy and direct-path identification remain experimental.
+The CLI demonstration is explicitly simulated.
 
 The [development plan](PLAN.md) describes the first mission's seven milestones
 and later extensions: bass, subwoofers, reflections and overall refinement.
@@ -40,11 +42,15 @@ The Rust/egui desktop window lets you:
 - Inspect signed impulse waveforms and predicted six-cycle tone bursts at
   selectable frequencies, including source overlays and relative phase.
 - Browse results in a resizable, scrollable panel below the speaker list.
+- Measure alignment in two passes, inspect gain/delay proposals, explicitly apply,
+  verify with two further passes, and restore the original settings.
+- Reopen a saved alignment folder without automatically measuring or applying it.
 
 **Captured · arrival candidate** means the new impulse analysis found a repeatable
 early peak. **Captured · arrival unresolved** means the impulse responses are
 available but the timing evidence disagrees. Both are acquisition successes;
-neither authorizes correction. The older correlation diagnostics remain in the saved report and may still
+neither alone authorizes correction. The separate alignment workflow additionally
+requires independent target repeats and comparable levels. The older correlation diagnostics remain in the saved report and may still
 show **Unresolved**. Increasing volume does not resolve
 arrival ambiguity.
 
@@ -65,7 +71,8 @@ The **Measure** button becomes available when the renderer, microphone, channel,
 reference and sweep settings are usable. Each take plays a sweep on the reference,
 the selected speaker, then the reference again. It uses the same acquisition
 service as the CLI. A fresh renderer snapshot is checked before opening the input.
-No corrections or persistent renderer settings are applied.
+Ordinary Measure actions apply no corrections. Alignment has separate explicit
+Apply/Restore actions; neither writes the persistent renderer configuration.
 
 Whole-system capture plays **reference → speaker 1 → reference → speaker 2 →
 reference → …**. The reference between two speakers is recorded once and reused
@@ -74,8 +81,8 @@ Uncheck unwired speakers before starting; muted outputs and outputs incompatible
 with the chosen sweep are excluded. See [batch capture](docs/batch-capture.md)
 for recording limits, cancellation and saved-take review.
 
-Connect to a build from the [Omniphony calibration PR](https://github.com/mgth/Omniphony/pull/863), normally
-`127.0.0.1:9000`; the dedicated calibration workflow uses port 9003.
+Connect to a build from the [Omniphony calibration PR](https://github.com/mgth/Omniphony/pull/864), normally
+`127.0.0.1:9000`; use the OSC port configured for your dedicated calibration workflow.
 The UI does not launch Omniphony itself. Change the address and press **Connect**
 or **Refresh speakers** after changing its speaker layout or settings.
 
@@ -130,6 +137,39 @@ unsupported settings file is kept untouched with a visible load error; write
 failures show an error and a **Retry saving settings** action. Preview fixtures
 never read or write personal settings. See [the application boundaries](docs/ui-architecture.md).
 
+## Experimental delay and level alignment
+
+1. Select the working broadband speakers, one microphone input and a fixed timing
+   reference. Keep the microphone at the listening position and the preamp gain fixed.
+2. Choose **Measure alignment · 2 passes**. Each pass uses the shared-reference
+   sequence. Progress remains in the active speaker row; Stop cancels the run.
+3. Inspect the **Alignment** tab below the speakers. Levels use equal log-frequency
+   power weighting over 500–2000 Hz, including the room response. They are transfer
+   dB, not sweep RMS, calibrated SPL or microphone-corrected levels.
+4. A proposal requires all selected speakers to pass acquisition/arrival checks,
+   20 dB estimated SNR across the level band, at most 0.15 ms arrival variation and
+   0.50 dB level variation between independent target captures, and stable reference
+   levels. These are prototype gates, not certified accuracy. Ambiguous speakers
+   remain unresolved; they are never silently omitted.
+5. **Apply gains and delays** changes live absolute settings. Existing gains and
+   delays are included; the policy attenuates louder speakers and delays earlier
+   arrivals. Application requires the unchanged renderer snapshot.
+6. **Verify · 2 passes** measures again and reports before/after arrival and level
+   spread. A failed or unresolved verification is not success. **Restore original
+   settings** restores the baseline only if the renderer has not changed meanwhile.
+7. Save in Studio after a satisfactory result if you want persistent renderer
+   settings. Companion never sends the configuration-save command automatically.
+
+The session folder retains `alignment-plan.json`, `alignment-state.json`, both raw
+capture passes and verification captures. Use **Load alignment session** in the
+saved-take section to reopen it. Loading never emits audio or writes renderer
+settings. Restarting/reconfiguring the renderer invalidates an old application
+revision. An uncertain application must be inspected before further changes.
+
+No subwoofer alignment, EQ or independent-driver correction is enabled. A repeatable
+reflection can still resemble a direct arrival; the user must keep an unobstructed
+measurement geometry. See [the method and validation](docs/gain-delay-alignment.md).
+
 ## Try it
 
 Requires Rust 1.89 or later. On Linux, install ALSA and PipeWire development
@@ -167,8 +207,8 @@ again. Local sessions are ignored by Git.
 ## Renderer measurement control
 
 Requires an Omniphony build with OSC contract revision 9 and measurement protocol
-version 3 from the calibration development branch. Update the renderer and
-Companion together. Saved version-2 single-speaker takes remain reviewable.
+version 4 from the calibration development branch. Update the renderer and
+Companion together. Saved version-2 and version-3 takes remain reviewable.
 The adapter uses its existing local TCP listener, normally port 9000.
 It shares the typed protocol through a pinned revision of Omniphony's
 `omniphony-osc-contract` crate; no local sibling checkout is needed to build.
@@ -273,7 +313,8 @@ failure can prevent saving; the renderer still has its own stop limits.
 **Timing reports are diagnostics, not calibration observations.** A dominant
 reflection can obscure the direct sound. Two references estimate linear drift
 but cannot establish clock stability throughout the take. No capture is marked
-valid for correction, and there is no automatic capture-to-profile conversion.
+valid for correction on its own. The separate two-pass alignment workflow qualifies
+new repeated measurements before offering a proposal.
 
 Callbacks only convert the selected channel into a bounded queue. File writes
 and FFT correlation happen off the audio thread. Captures are capped at 30 s;
@@ -314,12 +355,13 @@ thresholds. Timing is withheld when those choices disagree or the repeated
 reference waveforms do not match. A reported sensitivity bound describes those
 choices; it is **not a calibrated accuracy or statistical confidence interval**.
 An undetectable or obstructed direct sound can still leave a repeatable reflection:
-no candidate is a validated direct-path observation. All reports retain
-`valid_for_correction: false` and cannot be converted automatically into profiles.
+no candidate is a validated direct-path observation. Individual reports retain `valid_for_correction: false`. A separate alignment
+session evaluates two independent target captures and their level evidence before
+offering an experimental proposal; existing single takes are not promoted.
 
 This increment targets broadband speakers, not subwoofer alignment. Microphone
-calibration, representative level estimation, nonlinear clock validation and
-hardware accuracy assessment remain pending. See [the analysis method and
+calibration, nonlinear clock validation and hardware accuracy assessment remain
+pending. The alignment workflow adds a fixed-band relative level estimator. See [the analysis method and
 validation](docs/arrival-review.md) for the versioned algorithm, gates and limits.
 
 See [acquisition diagnostics](docs/acquisition-diagnostics.md) for reference-pair
@@ -343,7 +385,8 @@ gain estimate.
 Imported observations must already be comparable: the same stimulus/emission
 level, level measurement method, microphone calibration and timing reference.
 Declarative fields alone do not establish this quality. Capture diagnostics are stored separately and do not yet produce
-these validated observations.
+these observations on their own. The repeated alignment workflow derives a
+separate session with origin `measured` and records its qualification evidence.
 
 The initial policy requires the same microphone for observations at the reference
 position. Other positions and microphones are retained for later stages; they
@@ -367,17 +410,17 @@ does not assess the entire listening area.
 - `crates/omniphony-adapter`: typed TCP requests, acknowledgements, session
   ownership and protocol validation; independent of the calibration core and UI.
 
-The core accepts validated arrival/level observations; experimental arrival
-candidates from recordings are kept separate until hardware validation. Application functions return a target
-state: a future adapter must verify and apply it atomically in the renderer.
-Profile application and restoration have no live network implementation yet.
+The core accepts qualified arrival/level observations. Single-capture diagnostics
+remain separate; repeated alignment records experimental measured observations.
+The live adapter applies absolute targets using a renderer revision check and
+one live-state publication, then checks the returned settings. Restoration refuses
+intervening changes. Missing acknowledgements leave application uncertain.
 The adapter's snapshots and render reports are separate from acoustic observation
 sessions; renderer instance IDs are not permanent installation IDs.
 
-The next steps are real-interface validation, arrival repeatability assessment
-and representative-level analysis. The native assistant can already launch
-individual takes; guided multi-speaker workflows, automatic iterations and
-advanced corrections follow after that.
+The next checks are real-interface repeatability and before/after acoustic
+validation. Guided multipoint acquisition, automatic optimization iterations and
+advanced corrections remain deferred until delay/level alignment is qualified.
 
 ## Development checks
 

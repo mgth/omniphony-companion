@@ -1,5 +1,6 @@
 //! Frontend-neutral state and background jobs. No device/network I/O in paint calls.
 use crate::{
+    alignment,
     batch::{self, BatchOutcome},
     measurement::{self, MeasureProgress, MeasureRequest, TakeOutcome},
     review::{self, SavedReview},
@@ -18,6 +19,15 @@ use std::{
 };
 
 pub trait Backend: Send + Sync + 'static {
+    fn set_outputs(
+        &self,
+        endpoint: SocketAddr,
+        expected: Snapshot,
+        settings: Vec<omniphony_adapter::protocol::OutputSetting>,
+    ) -> Result<Snapshot, String> {
+        let _ = (endpoint, expected, settings);
+        Err("Profile application is unavailable in this backend.".into())
+    }
     fn measure_batch(
         &self,
         request: MeasureRequest,
@@ -43,6 +53,16 @@ pub trait Backend: Send + Sync + 'static {
 }
 pub struct LiveBackend;
 impl Backend for LiveBackend {
+    fn set_outputs(
+        &self,
+        endpoint: SocketAddr,
+        expected: Snapshot,
+        settings: Vec<omniphony_adapter::protocol::OutputSetting>,
+    ) -> Result<Snapshot, String> {
+        Client::connect(endpoint, Duration::from_secs(2))
+            .and_then(|mut c| c.set_outputs(&expected, settings))
+            .map_err(|e| e.to_string())
+    }
     fn measure_batch(
         &self,
         request: MeasureRequest,
@@ -109,6 +129,13 @@ impl Default for Settings {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Job {
+    Alignment {
+        output_ids: Vec<String>,
+        current: usize,
+        pass: usize,
+    },
+    ApplyAlignment,
+    LoadAlignment,
     Review,
     Inputs,
     Discover,
@@ -131,6 +158,7 @@ pub struct Take {
 
 #[derive(Default)]
 pub struct State {
+    pub alignment: Option<alignment::Alignment>,
     pub review: Option<SavedReview>,
     pub review_error: Option<String>,
     pub inputs: Vec<InputDevice>,
@@ -145,6 +173,13 @@ pub struct State {
     pub error: Option<String>,
 }
 enum Event {
+    AlignmentProgress(usize, usize, MeasureProgress),
+    Aligned(Box<Result<alignment::Outcome, String>>),
+    AlignmentUpdated(
+        Box<alignment::Alignment>,
+        Result<(Snapshot, Vec<(String, TakeOutcome)>), String>,
+    ),
+    AlignmentLoaded(Box<Result<alignment::Alignment, String>>),
     Reviewed(Box<Result<SavedReview, String>>),
     Inputs(Result<Vec<InputDevice>, String>),
     Discovered(SocketAddr, Result<Snapshot, String>),
@@ -190,7 +225,7 @@ impl Controller {
     pub fn measuring(&self) -> bool {
         matches!(
             self.state.job,
-            Some(Job::Measure { .. } | Job::Batch { .. })
+            Some(Job::Measure { .. } | Job::Batch { .. } | Job::Alignment { .. })
         )
     }
 
@@ -432,12 +467,201 @@ impl Controller {
             })));
         });
     }
+    pub fn alignment_readiness(&self) -> Result<Vec<String>, String> {
+        let outputs = self.batch_outputs()?;
+        if outputs.len() < 2 {
+            return Err("Select at least two broadband speakers.".into());
+        }
+        if self.selected_input().is_some_and(|i| i.is_monitor) {
+            return Err("Choose an acoustic microphone, not a sink monitor.".into());
+        }
+        if self.settings.sweep.start_hz > 450.0 || self.settings.sweep.end_hz < 5000.0 {
+            return Err(
+                "Alignment needs broadband arrival analysis and the full 500–2000 Hz level band."
+                    .into(),
+            );
+        }
+        if self
+            .state
+            .alignment
+            .as_ref()
+            .is_some_and(|a| a.applied_snapshot.is_some() || a.application_uncertain)
+        {
+            return Err("Restore the active alignment before starting another baseline.".into());
+        }
+        Ok(outputs)
+    }
+    pub fn start_alignment(&mut self) {
+        let outputs = match self.alignment_readiness() {
+            Ok(o) => o,
+            Err(e) => {
+                self.state.error = Some(e);
+                return;
+            }
+        };
+        let snapshot = self.state.snapshot.clone().expect("validated");
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let request = match alignment::request(
+            self.state.endpoint.expect("validated"),
+            snapshot,
+            &self.settings,
+            outputs[0].clone(),
+            PathBuf::from(&self.settings.output_root).join(format!("alignment-{stamp}")),
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                self.state.error = Some(e);
+                return;
+            }
+        };
+        self.state.alignment = None;
+        self.state.job = Some(Job::Alignment {
+            output_ids: outputs.clone(),
+            current: 0,
+            pass: 0,
+        });
+        self.state.error = None;
+        self.state.progress = Some(MeasureProgress::Preparing);
+        self.state.stopping = false;
+        self.cancelled = Arc::new(AtomicBool::new(false));
+        let (backend, sender, cancel, settings) = (
+            self.backend.clone(),
+            self.sender.clone(),
+            self.cancelled.clone(),
+            self.settings.clone(),
+        );
+        std::thread::spawn(move || {
+            let result = catch_job(|| {
+                alignment::capture(
+                    backend.as_ref(),
+                    request,
+                    settings,
+                    outputs,
+                    &cancel,
+                    &mut |pass, i, p| {
+                        let _ = sender.send(Event::AlignmentProgress(pass, i, p));
+                    },
+                )
+            });
+            let _ = sender.send(Event::Aligned(Box::new(result)));
+        });
+    }
+    pub fn alignment_action(&mut self, action: &str) {
+        if self.busy() {
+            return;
+        }
+        let Some(mut a) = self.state.alignment.clone() else {
+            return;
+        };
+        if self.state.endpoint != Some(a.endpoint) {
+            self.state.error =
+                Some("Connect to the renderer used for this alignment first.".into());
+            return;
+        }
+        if action != "restore" && self.settings != a.settings {
+            self.state.error=Some("Restore the original measurement settings before applying or verifying this alignment.".into());
+            return;
+        }
+        if !matches!(action, "apply" | "restore" | "verify") {
+            return;
+        }
+        let action = action.to_owned();
+        if action == "verify"
+            && let Some(current) = &mut self.state.alignment
+        {
+            current.verification = None;
+            current.verification_note = Some("Verification in progress.".into());
+        }
+        self.state.job = if action == "verify" {
+            Some(Job::Alignment {
+                output_ids: a.rows.iter().map(|r| r.output_id.clone()).collect(),
+                current: 0,
+                pass: 0,
+            })
+        } else {
+            Some(Job::ApplyAlignment)
+        };
+        self.state.error = None;
+        self.state.stopping = false;
+        self.cancelled = Arc::new(AtomicBool::new(false));
+        let (backend, sender, cancel) = (
+            self.backend.clone(),
+            self.sender.clone(),
+            self.cancelled.clone(),
+        );
+        std::thread::spawn(move || {
+            let result = catch_job(|| {
+                if action == "verify" {
+                    let outcome =
+                        alignment::verify(backend.as_ref(), &mut a, &cancel, &mut |pass, i, p| {
+                            let _ = sender.send(Event::AlignmentProgress(pass, i, p));
+                        })?;
+                    Ok((
+                        a.applied_snapshot.clone().ok_or("missing applied state")?,
+                        outcome.takes,
+                    ))
+                } else {
+                    alignment::apply(backend.as_ref(), &mut a, action == "restore")
+                        .map(|s| (s, vec![]))
+                }
+            });
+            let _ = sender.send(Event::AlignmentUpdated(Box::new(a), result));
+        });
+    }
+    pub fn load_alignment(&mut self, directory: &str) {
+        if self.busy() {
+            return;
+        }
+        if self
+            .state
+            .alignment
+            .as_ref()
+            .is_some_and(|a| a.applied_snapshot.is_some() || a.application_uncertain)
+        {
+            self.state.error = Some("Restore the current alignment before loading another.".into());
+            return;
+        }
+        self.state.job = Some(Job::LoadAlignment);
+        self.state.error = None;
+        let path = PathBuf::from(directory.trim());
+        let sender = self.sender.clone();
+        std::thread::spawn(move || {
+            let result = catch_job(|| alignment::load(&path));
+            let _ = sender.send(Event::AlignmentLoaded(Box::new(result)));
+        });
+    }
+    fn append_alignment_takes(
+        &mut self,
+        settings: Settings,
+        revision: String,
+        takes: Vec<(String, TakeOutcome)>,
+    ) {
+        for (output_id, outcome) in takes {
+            self.state.takes.push(Take {
+                output_id,
+                revision: revision.clone(),
+                settings: settings.clone(),
+                outcome: Ok(outcome),
+            });
+        }
+        if self.state.takes.len() > 100 {
+            self.state.takes.drain(..self.state.takes.len() - 100);
+        }
+    }
     pub fn active_output(&self) -> Option<&str> {
         match &self.state.job {
             Some(Job::Measure { output_id }) => Some(output_id),
             Some(Job::Batch {
                 output_ids,
                 current,
+            })
+            | Some(Job::Alignment {
+                output_ids,
+                current,
+                ..
             }) => output_ids.get(*current).map(String::as_str),
             _ => None,
         }
@@ -529,6 +753,58 @@ impl Controller {
     pub fn poll(&mut self) {
         while let Ok(event) = self.receiver.try_recv() {
             match event {
+                Event::AlignmentProgress(pass, index, p) => {
+                    if let Some(Job::Alignment {
+                        output_ids,
+                        current,
+                        pass: active_pass,
+                    }) = &mut self.state.job
+                    {
+                        *current = index.min(output_ids.len().saturating_sub(1));
+                        *active_pass = pass;
+                    }
+                    self.state.progress = Some(p);
+                }
+                Event::Aligned(result) => {
+                    match *result {
+                        Ok(outcome) => {
+                            self.append_alignment_takes(
+                                outcome.alignment.settings.clone(),
+                                outcome.alignment.snapshot.revision.clone(),
+                                outcome.takes,
+                            );
+                            self.state.alignment = Some(outcome.alignment);
+                        }
+                        Err(e) => self.state.error = Some(e),
+                    }
+                    self.state.job = None;
+                    self.state.progress = None;
+                    self.state.stopping = false;
+                }
+                Event::AlignmentUpdated(a, result) => {
+                    match result {
+                        Ok((snapshot, takes)) => {
+                            self.append_alignment_takes(
+                                a.settings.clone(),
+                                snapshot.revision.clone(),
+                                takes,
+                            );
+                            self.state.snapshot = Some(snapshot);
+                        }
+                        Err(e) => self.state.error = Some(e),
+                    }
+                    self.state.alignment = Some(*a);
+                    self.state.job = None;
+                    self.state.progress = None;
+                    self.state.stopping = false;
+                }
+                Event::AlignmentLoaded(result) => {
+                    match *result {
+                        Ok(a) => self.state.alignment = Some(a),
+                        Err(e) => self.state.error = Some(e),
+                    }
+                    self.state.job = None;
+                }
                 Event::BatchProgress(index, progress) => {
                     if let Some(Job::Batch {
                         output_ids,

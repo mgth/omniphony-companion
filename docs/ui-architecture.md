@@ -98,3 +98,20 @@ a diagnostic take as a completed calibration.
 
 Hardware repeatability and a complete correction/apply/remeasure loop are still
 pending; see the capture validation checklist.
+
+
+## Experimental alignment
+
+The alignment action owns two complete acquisition passes on a service worker.
+Each target keeps its own repeated evidence. The pure core qualifies repeatability
+and creates proposals; the capture crate estimates the common-band transfer level.
+The alignment tab reads bounded rows and emits Apply/Verify/Restore actions only.
+It shares the inline result panel and keeps capture progress inside speaker rows.
+
+Profile application uses the adapter's absolute, revision-checked settings command.
+The worker persists an uncertain state before mutation and confirms readback before
+reporting success. Window closure waits for an in-flight application or acquisition;
+no UI timer owns correctness. Loading a saved alignment does not touch hardware.
+Verification uses the original settings and fresh repeated captures, clears old
+verification success, and retains unresolved results. Configuration persistence
+remains an explicit Studio action.

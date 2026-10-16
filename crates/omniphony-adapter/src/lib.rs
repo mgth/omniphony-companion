@@ -139,6 +139,56 @@ impl Client {
         }
     }
 
+    /// Absolute, revision-checked live settings. A lost acknowledgement is not success.
+    pub fn set_outputs(
+        &mut self,
+        expected: &Snapshot,
+        settings: Vec<protocol::OutputSetting>,
+    ) -> Result<Snapshot> {
+        if self.session.is_some() {
+            return Err(Error::Protocol(
+                "end measurement before applying settings".into(),
+            ));
+        }
+        validate_snapshot(expected).map_err(Error::Protocol)?;
+        let mut target = expected.clone();
+        let mut seen = std::collections::HashSet::new();
+        if settings.is_empty() {
+            return Err(Error::Protocol("no output settings".into()));
+        }
+        for setting in &settings {
+            if !seen.insert(&setting.output_id)
+                || !setting.gain_db.is_finite()
+                || !(-60.0..=24.0).contains(&setting.gain_db)
+                || !setting.delay_ms.is_finite()
+                || !(0.0..=expected.max_delay_ms).contains(&setting.delay_ms)
+            {
+                return Err(Error::Protocol("invalid gain/delay target".into()));
+            }
+            let output = target
+                .outputs
+                .iter_mut()
+                .find(|o| o.id == setting.output_id)
+                .ok_or_else(|| Error::Protocol("unknown output target".into()))?;
+            output.gain_db = setting.gain_db;
+            output.delay_ms = setting.delay_ms;
+        }
+        let reply = self.exchange(protocol::Command::SetOutputs {
+            expected_revision: expected.revision.clone(),
+            settings,
+        })?;
+        let protocol::Reply::Snapshot { snapshot } = reply else {
+            return Err(
+                self.fail("missing settings acknowledgement; application outcome is uncertain")
+            );
+        };
+        validate_snapshot(&snapshot).map_err(|e| self.fail(&e))?;
+        if !same_configuration(&snapshot, &target) {
+            return Err(self.fail("applied state differs from target; refresh before proceeding"));
+        }
+        Ok(snapshot)
+    }
+
     pub fn begin(&mut self, snapshot: &Snapshot) -> Result<()> {
         if self.session.is_some() {
             return Err(Error::Protocol("a session is already open".into()));
@@ -387,4 +437,26 @@ fn valid_sequence(p: &Progress, snapshot: &Snapshot) -> bool {
             .all(|id| seen.insert(id) && snapshot.outputs.iter().any(|o| &o.id == id))
         && protocol::sequence_frames(p.signal, snapshot.sample_rate, p.sequence_outputs.len())
             == Ok(p.total_frames)
+}
+
+/// Compare physical state while ignoring the revision assigned to its publication.
+/// Gain conversion through a float linear amplitude permits a tiny roundoff only.
+pub fn same_configuration(a: &Snapshot, b: &Snapshot) -> bool {
+    let mut normalized = a.clone();
+    normalized.revision.clone_from(&b.revision);
+    if a.outputs.len() != b.outputs.len() {
+        return false;
+    }
+    for (out, expected) in normalized.outputs.iter_mut().zip(&b.outputs) {
+        if !out.gain_db.is_finite()
+            || !out.delay_ms.is_finite()
+            || (out.gain_db - expected.gain_db).abs() > 0.0001
+            || (out.delay_ms - expected.delay_ms).abs() > 0.0001
+        {
+            return false;
+        }
+        out.gain_db = expected.gain_db;
+        out.delay_ms = expected.delay_ms;
+    }
+    normalized == *b
 }
