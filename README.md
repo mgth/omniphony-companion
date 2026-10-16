@@ -47,14 +47,18 @@ The Rust/egui desktop window lets you:
 - Inspect signed impulse waveforms and predicted six-cycle tone bursts at
   selectable frequencies, including source overlays and relative phase.
 - Browse results in a resizable, scrollable panel below the speaker list.
-- **View result** opens the latest saved analysis for that exact speaker/take,
-  including analyses created by **Reanalyze saved passes**. One speaker/result is
+- Click a speaker row to open the latest saved analysis for that exact speaker/take.
+  The selected row is highlighted; inclusion checkboxes and Measure/Stop act independently.
+  This includes analyses created by **Reanalyze saved passes**. One speaker/result is
   selected at a time. **Original capture details** retains the historical verdict;
   it is separate from the current analysis status. Alignment summarizes both passes,
   while each measurement result identifies its individual pass.
 - Read the two-pass arrival, level, repeat spread, quality and proposed gain/delay
   directly in each speaker row. The lower panel contains only individual results;
   session-wide reanalysis/apply/verify/restore controls sit above the speaker rows.
+- Read quality at a glance: green check (Good), amber warning triangle (Limited),
+  red cross (Poor), grey dash (Unavailable/Not rated). Labels and tooltips explain
+  each grade; the symbols use vector drawing rather than emoji fonts.
 - Measure alignment in two passes, inspect gain/delay proposals, explicitly apply,
   verify with two further passes, and restore the original settings.
 - Reopen a saved alignment folder without automatically measuring or applying it.

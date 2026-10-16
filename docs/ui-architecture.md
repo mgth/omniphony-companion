@@ -81,7 +81,11 @@ A reanalysis error remains visible when the saved-take panel is collapsed.
 Live results and saved analyses share one selection in a resizable panel below
 the speaker list. The individual result scrolls independently of the speaker list;
 background completion cannot replace the selected speaker. Results never open
-floating windows.
+floating windows. Clicking a speaker card selects its latest result; nested
+checkboxes and Measure/Stop controls retain their independent actions. The selected
+speaker has a persistent tint and outline. Selecting an unmeasured speaker clears
+the previous result and shows an explicit empty state. Quality badges share vector
+symbols, colours, text labels and detail tooltips across rows and individual results.
 Signed-waveform and virtual-burst traces are computed on the existing analysis
 worker and saved in the report. UI frequency selection only chooses precomputed
 traces, each bounded to 1600 signed min/max buckets. Panel clipping keeps speaker

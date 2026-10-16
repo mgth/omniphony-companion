@@ -193,21 +193,25 @@ pub fn speaker(ui: &mut egui::Ui, a: &Alignment, row: &Row, older: bool) {
         let grade = row.quality.iter().map(|q| q.grade()).min();
         ui.vertical(|ui| {
             super::caption(ui, "Quality");
-            ui.label(grade.map(|g| g.label()).unwrap_or("Not rated"))
-                .on_hover_text(
-                    row.quality
+            let details = row
+                .quality
+                .iter()
+                .flat_map(|q| {
+                    q.acquisition
+                        .details
                         .iter()
-                        .flat_map(|q| {
-                            q.acquisition
-                                .details
-                                .iter()
-                                .chain(&q.timing.details)
-                                .chain(&q.level.details)
-                        })
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                );
+                        .chain(&q.timing.details)
+                        .chain(&q.level.details)
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n");
+            super::quality_view::badge(
+                ui,
+                grade,
+                grade.map(|g| g.label()).unwrap_or("Not rated"),
+                &details,
+            );
         });
     });
     if let Some(target) = a.profile.as_ref().and_then(|p| {

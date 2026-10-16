@@ -161,7 +161,7 @@ fn find_speaker_text(
             let mut text = vec![];
             texts(&shape.shape, &mut text);
             if let Some((_, rect)) = text.iter().find(|(s, r)| {
-                (if matches!(needle, "Front left" | "Front right") {
+                (if matches!(needle, "Front left" | "Front right" | "Center" | "Measure") {
                     s == needle
                 } else {
                     s.contains(needle)
@@ -494,8 +494,8 @@ fn captured_sweeps_with_ambiguous_arrivals_show_levels_and_withhold_timing() {
         text.iter()
             .any(|(t, _)| t == "Captured · timing unresolved")
     );
-    let (_, button) = text.iter().find(|(t, _)| t == "View result").unwrap();
-    click(&mut app, &ctx, button.center(), size);
+    let row = find_speaker_text(&mut app, &ctx, size, "Front left");
+    click(&mut app, &ctx, row.center(), size);
     frame(&mut app, &ctx, vec![], size);
     let output = frame(&mut app, &ctx, vec![], size);
     let text = labels(&output);
@@ -1239,7 +1239,7 @@ fn loaded_alignment_pass_opens_its_latest_analysis_and_labels_the_original_verdi
     let size = Vec2::new(1160.0, 1400.0);
     finish_worker(&mut app, &ctx, size);
     assert_eq!(app.controller.state.analyses.len(), 2);
-    let button = find_speaker_text(&mut app, &ctx, size, "View result");
+    let button = find_speaker_text(&mut app, &ctx, size, "Front right");
     click(&mut app, &ctx, button.center(), size);
     finish_worker(&mut app, &ctx, size);
     let text = labels(&frame(&mut app, &ctx, vec![], size));
@@ -1368,8 +1368,7 @@ fn an_unrelated_review_finishing_later_cannot_steal_the_selected_speaker() {
     let mut app = CompanionApp::preview(&ctx, controller);
     let size = Vec2::new(1160.0, 1000.0);
     frame(&mut app, &ctx, vec![], size);
-    let text = labels(&frame(&mut app, &ctx, vec![], size));
-    let button = text.iter().find(|(s, _)| s == "View result").unwrap().1;
+    let button = find_speaker_text(&mut app, &ctx, size, "Front right");
     click(&mut app, &ctx, button.center(), size);
     release_tx.send(()).unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -1446,4 +1445,159 @@ pub fn saved_result(
         }),
     };
     (take, review)
+}
+
+fn speaker_card(output: &egui::FullOutput, name: Rect) -> (Rect, bool) {
+    output
+        .shapes
+        .iter()
+        .find_map(|shape| match &shape.shape {
+            Shape::Rect(r)
+                if r.rect.width() > 300.0
+                    && r.stroke.width == 1.5
+                    && r.rect.contains(name.center()) =>
+            {
+                Some((r.rect, r.stroke.color != egui::Color32::TRANSPARENT))
+            }
+            _ => None,
+        })
+        .expect("speaker card background")
+}
+
+#[test]
+fn speaker_row_clicks_select_highlight_and_clear_results_without_activating_controls() {
+    use companion_service::analysis_cache::CachedAnalysis;
+    for size in [Vec2::new(850.0, 640.0), Vec2::new(1160.0, 800.0)] {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut controller, starts) = support::ready();
+        controller
+            .state
+            .snapshot
+            .as_mut()
+            .unwrap()
+            .outputs
+            .truncate(3);
+        for id in ["Front left", "Front right"] {
+            let (take, review) = saved_result(&controller, &dir.path().join(id), id);
+            controller.state.analyses.insert(
+                review.directory.clone(),
+                CachedAnalysis::from_review(&review),
+            );
+            controller.state.takes.push(take);
+        }
+        let ctx = egui::Context::default();
+        let mut app = CompanionApp::preview(&ctx, controller);
+        let name = find_speaker_text(&mut app, &ctx, size, "Front left");
+        click(&mut app, &ctx, name.center(), size);
+        finish_worker(&mut app, &ctx, size);
+        find_result_text(&mut app, &ctx, size, "Front left · Measurement result");
+        let name = find_speaker_text(&mut app, &ctx, size, "Front left");
+        assert!(speaker_card(&frame(&mut app, &ctx, vec![], size), name).1);
+        let name = find_speaker_text(&mut app, &ctx, size, "Front right");
+        let (card, selected) = speaker_card(&frame(&mut app, &ctx, vec![], size), name);
+        assert!(!selected);
+        // The padding is selectable too, without requiring a label or dedicated button.
+        click(
+            &mut app,
+            &ctx,
+            Pos2::new(card.left() + 6.0, name.center().y),
+            size,
+        );
+        finish_worker(&mut app, &ctx, size);
+        find_result_text(&mut app, &ctx, size, "Front right · Measurement result");
+        let name = find_speaker_text(&mut app, &ctx, size, "Front right");
+        let text_output = frame(&mut app, &ctx, vec![], size);
+        assert!(speaker_card(&text_output, name).1);
+        assert!(!labels(&text_output).iter().any(|(s, _)| s == "View result"));
+        let measure = find_speaker_text(&mut app, &ctx, size, "Measure");
+        let text_output = frame(&mut app, &ctx, vec![], size);
+        let name = labels(&text_output)
+            .into_iter()
+            .find(|(s, r)| s == "Front left" && r.left() > 310.0)
+            .unwrap()
+            .1;
+        let (card, selected) = speaker_card(&text_output, name);
+        assert!(!selected, "only one row should be highlighted");
+        // The include checkbox and Measure button keep their own interactions.
+        click(
+            &mut app,
+            &ctx,
+            Pos2::new(card.left() + 25.0, measure.center().y),
+            size,
+        );
+        assert!(app.controller.excluded_outputs.contains("Front left"));
+        find_result_text(&mut app, &ctx, size, "Front right · Measurement result");
+        assert_eq!(starts.load(Ordering::Relaxed), 0);
+        let measure = find_speaker_text(&mut app, &ctx, size, "Measure");
+        click(&mut app, &ctx, measure.center(), size);
+        finish_worker(&mut app, &ctx, size);
+        assert_eq!(starts.load(Ordering::Relaxed), 1);
+        find_result_text(&mut app, &ctx, size, "Front right · Measurement result");
+        let name = find_speaker_text(&mut app, &ctx, size, "Center");
+        click(&mut app, &ctx, name.center(), size);
+        find_result_text(&mut app, &ctx, size, "Center · Measurement result");
+        find_result_text(&mut app, &ctx, size, "No measurement for Center yet");
+        let name = find_speaker_text(&mut app, &ctx, size, "Center");
+        assert!(speaker_card(&frame(&mut app, &ctx, vec![], size), name).1);
+        app.controller.start("Center"); // The injected backend fails without opening audio.
+        finish_worker(&mut app, &ctx, size);
+        assert_eq!(starts.load(Ordering::Relaxed), 2);
+        find_result_text(&mut app, &ctx, size, "Measurement failed");
+        find_result_text(&mut app, &ctx, size, "Center · Measurement result");
+    }
+}
+
+#[test]
+fn quality_grades_draw_distinct_colored_symbols_with_readable_labels() {
+    use companion_service::quality::{Grade, Indicator, Report};
+    let size = Vec2::new(1160.0, 1000.0);
+    for grade in [Grade::Good, Grade::Limited, Grade::Poor, Grade::Unavailable] {
+        let (mut controller, starts) = support::ready();
+        let mut review = support::arrival_review();
+        let indicator = || Indicator {
+            grade,
+            details: vec!["Quality detail for inspection".into()],
+        };
+        review.quality = Some(Report {
+            method: "synthetic-preview".into(),
+            acquisition: indicator(),
+            timing: indicator(),
+            level: indicator(),
+            level_db: None,
+            level_band_snr_db: None,
+            minimum_frequency_snr_db: None,
+        });
+        controller.state.review = Some(review);
+        let ctx = egui::Context::default();
+        let mut app = CompanionApp::preview(&ctx, controller);
+        let label = find_result_text(
+            &mut app,
+            &ctx,
+            size,
+            &format!("Acquisition: {}", grade.label()),
+        );
+        let output = frame(&mut app, &ctx, vec![], size);
+        let icon_region = Rect::from_min_max(
+            Pos2::new(label.left() - 27.0, label.center().y - 10.0),
+            Pos2::new(label.left() - 5.0, label.center().y + 10.0),
+        );
+        let symbols: Vec<_> = output
+            .shapes
+            .iter()
+            .map(|s| &s.shape)
+            .filter(|s| icon_region.contains_rect(s.visual_bounding_rect()))
+            .collect();
+        let expected_color = match grade {
+            Grade::Good => egui::Color32::from_rgb(100, 220, 145),
+            Grade::Limited => egui::Color32::from_rgb(243, 194, 123),
+            Grade::Poor => egui::Color32::from_rgb(248, 136, 139),
+            Grade::Unavailable => egui::Color32::from_rgb(151, 167, 184),
+        };
+        match grade {
+            Grade::Good | Grade::Limited => assert!(symbols.iter().any(|s| matches!(s, Shape::Path(p) if p.points.len()==3 && p.closed == (grade==Grade::Limited) && p.stroke.color == egui::epaint::ColorMode::Solid(expected_color)))),
+            Grade::Poor => assert_eq!(symbols.iter().filter(|s| matches!(s, Shape::LineSegment { stroke,.. } if stroke.color == expected_color)).count(), 2),
+            Grade::Unavailable => assert_eq!(symbols.iter().filter(|s| matches!(s, Shape::LineSegment { stroke,.. } if stroke.color == expected_color)).count(), 1),
+        }
+        assert_eq!(starts.load(Ordering::Relaxed), 0);
+    }
 }
