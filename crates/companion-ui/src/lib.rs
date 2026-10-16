@@ -1000,6 +1000,9 @@ impl CompanionApp {
                                 ui.label("Speaker sweep RMS"); ui.monospace(format!("{:.1} dBFS", timing.sweep_rms_dbfs[1])); ui.end_row();
                                 ui.label("Background RMS"); ui.monospace(format!("{:.1} dBFS", timing.noise_rms_dbfs)); ui.end_row();
                             });
+                            if let Some(warning) = timing.relative_peak_delay_ms.and_then(calibration_core::long_delay_warning).filter(|_| outcome.impulse.is_none()) {
+                                ui.colored_label(WARM, warning);
+                            }
                             if let Some(warning) = timing.timing_warning().filter(|_| outcome.impulse.is_none()) {
                                 ui.add_space(10.0);
                                 ui.label(RichText::new(warning).color(WARM));
@@ -1269,6 +1272,12 @@ fn draw_impulse(
     plot: &mut ResultPlot,
     waveform: &mut waveform_plot::State,
 ) {
+    if let Some(warning) = report
+        .relative_arrival_ms
+        .and_then(calibration_core::long_delay_warning)
+    {
+        ui.colored_label(WARM, warning);
+    }
     draw_impulse_plot(ui, report, plot, waveform);
     if report.relative_arrival_ms.is_none() {
         ui.label(

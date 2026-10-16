@@ -128,7 +128,7 @@ fn rejects_bad_quality_or_non_finite_observations() {
             3 => observation.arrival_ms = f64::NAN,
             4 => observation.level_dbfs = f64::INFINITY,
             5 => observation.snr_db = f64::NEG_INFINITY,
-            _ => observation.arrival_ms = -100.1,
+            _ => observation.arrival_ms = -10_000.1,
         }
         assert!(
             propose(&session, &CalibrationPolicy::default()).is_err(),

@@ -28,8 +28,8 @@ impl SegmentStatus {
 #[derive(Debug, Clone, Serialize)]
 pub struct SegmentDiagnostics {
     pub role: &'static str,
-    /// Sweep-body window predicted from the two reference correlation peaks.
-    /// The target does not need to be detected to locate this approximate window.
+    /// Body aligned to its sweep match when detected, otherwise predicted from
+    /// the references. These remain diagnostic rather than direct-arrival windows.
     pub body_start_frame: usize,
     pub body_end_frame: usize,
     pub rms_dbfs: f64,
@@ -73,7 +73,7 @@ pub fn analyze(
     }
     let noise = rms(&samples[..capture_rate as usize / 10]);
     let mut report = AcquisitionDiagnostics {
-        method: "reference-pair-acquisition-v1",
+        method: "reference-pair-acquisition-v2",
         noise_rms_dbfs: db(noise),
         total_clipped_samples: samples.iter().filter(|x| x.abs() >= 0.999).count(),
         reference_start_frames: None,
@@ -88,8 +88,9 @@ pub fn analyze(
         report.messages.push(crate::input::NO_SIGNAL.into());
         return Ok(report);
     }
-    match locate_segments(samples, capture_rate, render_rate, sweep, noise) {
-        Ok((references, segments)) => {
+    match locate_segments(samples, capture_rate, render_rate, sweep) {
+        Ok((references, segments, noise)) => {
+            report.noise_rms_dbfs = db(noise);
             let target = &segments[1];
             match target.status {
                 SegmentStatus::NoSweepDetected => report.messages.push("The reference sweeps were found, but no target sweep was detected above background. Check the selected speaker's output route, mute, amplifier and connection. Increasing the overall volume is not the first step.".into()),
@@ -109,6 +110,18 @@ pub fn analyze(
                         .into(),
                 );
             }
+            if segments[0].signal_to_noise_db < 20.0 || segments[2].signal_to_noise_db < 20.0 {
+                report.messages.push("Reference sweeps have insufficient signal / noise. These windows are diagnostic only; the acquisition quality gate still applies.".into());
+            }
+            if target.normalized_correlation >= 0.2 {
+                let relative_ms = (target.body_start_frame as f64
+                    - (segments[0].body_start_frame + segments[2].body_start_frame) as f64 * 0.5)
+                    / capture_rate as f64
+                    * 1000.0;
+                if relative_ms.abs() > 100.0 {
+                    report.messages.push(format!("Long delay: approximately {relative_ms:+.1} ms relative to the reference. Device latency is allowed; this sweep match is not yet a qualified arrival estimate."));
+                }
+            }
             report.reference_start_frames = Some(references);
             report.segments = Some(segments);
         }
@@ -124,8 +137,7 @@ fn locate_segments(
     capture_rate: u32,
     render_rate: u32,
     sweep: Sweep,
-    noise: f64,
-) -> Result<([f64; 2], [SegmentDiagnostics; 3]), String> {
+) -> Result<([f64; 2], [SegmentDiagnostics; 3], f64), String> {
     let source = sweep.samples(render_rate)?;
     let nominal = capture_rate as f64 / render_rate as f64;
     let spacing = source.len() as f64 * nominal;
@@ -147,6 +159,7 @@ fn locate_segments(
         return Err("no quiet lead-in before the first reference".into());
     }
     let rate = render_rate as f64 * ratio;
+    let noise = crate::timing::reference_noise(samples, pair[0].position, rate)?;
     let starts = [
         pair[0].position,
         (pair[0].position + pair[1].position) * 0.5,
@@ -154,6 +167,28 @@ fn locate_segments(
     ];
     let mut segments = Vec::with_capacity(3);
     for (index, start) in starts.into_iter().enumerate() {
+        // Match timing's target identity window. Long device latency must not
+        // become "uncorrelated signal" merely because it exceeds 100 ms.
+        let radius = if index == 1 {
+            crate::timing::target_search_radius(source.len() as f64 * ratio)
+        } else {
+            rate * 0.1
+        };
+        let center = start.round() as usize;
+        let score_lo = center.saturating_sub(radius.ceil() as usize);
+        let score_hi = (center + radius.ceil() as usize + 1).min(scores.len());
+        let (offset, &correlation) = scores
+            .get(score_lo..score_hi)
+            .ok_or("incomplete correlation window")?
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(b.1))
+            .ok_or("empty correlation window")?;
+        let start = if correlation >= 0.2 {
+            (score_lo + offset) as f64
+        } else {
+            start
+        };
         let body_start_frame = (start + rate * SETTLE_MS as f64 / 1000.0).round() as usize;
         let body_end_frame =
             body_start_frame + (rate * sweep.duration_ms as f64 / 1000.0).round() as usize;
@@ -166,16 +201,6 @@ fn locate_segments(
         let rms = rms(&samples[body_start_frame..body_end_frame]);
         let window = &samples[lo..hi];
         let clipped_samples = window.iter().filter(|x| x.abs() >= 0.999).count();
-        let center = start.round() as usize;
-        let score_lo = center.saturating_sub(margin);
-        let score_hi = (center + margin + 1).min(scores.len());
-        if score_lo >= score_hi {
-            return Err("incomplete correlation window".into());
-        }
-        let correlation = scores[score_lo..score_hi]
-            .iter()
-            .copied()
-            .fold(0.0, f64::max);
         let snr = db(rms) - db(noise);
         let status = if clipped_samples > 0 {
             SegmentStatus::Clipped
@@ -200,11 +225,8 @@ fn locate_segments(
             status,
         });
     }
-    if segments[0].signal_to_noise_db < 20.0 || segments[2].signal_to_noise_db < 20.0 {
-        return Err("reference sweeps have insufficient signal / noise".into());
-    }
     let segments = segments.try_into().map_err(|_| "invalid segment count")?;
-    Ok(([pair[0].position, pair[1].position], segments))
+    Ok(([pair[0].position, pair[1].position], segments, noise))
 }
 
 fn reference_pair(scores: &[f64], spacing: f64) -> Result<[Peak; 2], String> {
@@ -267,6 +289,28 @@ mod tests {
             }
         }
         samples
+    }
+    #[test]
+    fn long_target_latency_remains_visible_with_weak_references() {
+        let mut samples = fixture([0.005, 0.0, 0.005], 48000, 0.0);
+        let source = sweep().samples(48000).unwrap();
+        for (dst, src) in samples[24000 + source.len() + 7680..]
+            .iter_mut()
+            .zip(&source)
+        {
+            *dst += src;
+        }
+        assert!(crate::timing::analyze(&samples, 48000, 48000, sweep()).is_err());
+        let report = analyze(&samples, 48000, 48000, sweep()).unwrap();
+        assert_eq!(report.segments.unwrap()[1].status, SegmentStatus::Detected);
+        assert!(report.messages.iter().any(|m| m.contains("Long delay:")));
+        assert!(
+            report
+                .messages
+                .iter()
+                .any(|m| m.contains("Reference sweeps have insufficient"))
+        );
+        assert!(!report.valid_for_correction);
     }
     #[test]
     fn missing_target_is_distinct_from_missing_references_across_rates_and_drift() {

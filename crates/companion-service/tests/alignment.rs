@@ -19,6 +19,7 @@ use std::{
 
 struct Rig {
     snapshot: Mutex<Snapshot>,
+    slow_output: bool,
     writes: AtomicUsize,
     lose_ack: AtomicBool,
     bad_repeat: AtomicBool,
@@ -28,6 +29,7 @@ struct Rig {
 impl Rig {
     fn new() -> Self {
         Self {
+            slow_output: false,
             snapshot: Mutex::new(Snapshot {
                 instance_id: "rig".into(),
                 revision: "rig:0".into(),
@@ -132,7 +134,13 @@ impl Backend for Rig {
                     .iter()
                     .find(|o| o.id == *output_id)
                     .unwrap();
-                let physical_delay = if *output_id == "L" { 144 } else { 288 };
+                let physical_delay = if *output_id == "L" {
+                    144
+                } else if self.slow_output {
+                    7824
+                } else {
+                    288
+                };
                 let delay = physical_delay + (o.delay_ms as f64 * 48.0).round() as usize;
                 let gain = if *output_id == "L" { 0.5 } else { 0.25 };
                 let gain = gain * 10_f32.powf(o.gain_db / 20.0);
@@ -322,4 +330,41 @@ fn unstable_target_retains_level_evidence_but_cannot_make_or_apply_a_profile() {
     assert!(a.rows[1].repeats[0].level_db.is_some());
     assert!(alignment::apply(&rig, &mut a, false).is_err());
     assert_eq!(rig.writes.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn stable_projector_latency_warns_and_aligns_within_advertised_capacity() {
+    let root = tempfile::tempdir().unwrap();
+    let mut rig = Rig::new();
+    rig.slow_output = true;
+    rig.snapshot.lock().unwrap().max_delay_ms = 250.0;
+    let mut a = acquire(&rig, root.path());
+    assert!(a.profile.is_some(), "{:?} {:?}", a.rows, a.blockers);
+    assert_eq!(a.profile.as_ref().unwrap().policy.maximum_delay_ms, 250.0);
+    assert!(
+        calibration_core::long_delay_warning(a.rows[1].qualified.as_ref().unwrap().arrival_ms)
+            .is_some()
+    );
+    assert!((a.targets(false).unwrap()[0].delay_ms - 160.0).abs() < 0.05);
+    alignment::apply(&rig, &mut a, false).unwrap();
+    alignment::verify(&rig, &mut a, &AtomicBool::new(false), &mut |_, _, _| {}).unwrap();
+    assert!(
+        a.verification.as_ref().unwrap().passed,
+        "{:?}",
+        a.verification_note
+    );
+    alignment::apply(&rig, &mut a, true).unwrap();
+
+    let old_root = tempfile::tempdir().unwrap();
+    rig.snapshot.lock().unwrap().max_delay_ms = 100.0;
+    let a = acquire(&rig, old_root.path());
+    assert!(
+        a.rows.iter().all(|r| r.qualified.is_some()),
+        "long latency remains valid evidence"
+    );
+    assert!(
+        a.profile.is_none(),
+        "cannot exceed the older renderer's real capacity"
+    );
+    assert!(!a.blockers.is_empty());
 }

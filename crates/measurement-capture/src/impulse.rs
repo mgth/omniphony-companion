@@ -298,9 +298,6 @@ pub fn analyze(
         }
         if let Some(b) = segments[1].candidate_start_frame {
             let delay = (b - (a + c) * 0.5) / (render_rate as f64 * candidate_ratio) * 1000.0;
-            if delay.abs() > 100.0 {
-                reasons.push("candidate relative arrival exceeds 100 ms".into());
-            }
             if reasons.is_empty() {
                 relative = Some(delay);
                 drift = Some(ppm);
@@ -315,7 +312,7 @@ pub fn analyze(
         }
     }
     Ok(ImpulseReport {
-        method: "regularized-sweep-arrival-review-v1",
+        method: "regularized-sweep-arrival-review-v2",
         bands_hz: bands,
         segments,
         reference_similarity: similarity,
@@ -443,6 +440,8 @@ mod tests {
             (48000, 0.0, 7.35),
             (44100, 300.0, -3.7),
             (48000, -250.0, 12.1),
+            (48000, 0.0, 160.0),
+            (44100, 300.0, -160.0),
         ] {
             let samples = recording(
                 rate,

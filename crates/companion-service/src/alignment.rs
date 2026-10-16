@@ -282,9 +282,15 @@ pub fn capture<B: Backend + ?Sized>(
     }
     if alignment.blockers.is_empty() && alignment.rows.iter().all(|r| r.qualified.is_some()) {
         match make_session(&alignment).and_then(|s| {
-            core::propose(&s, &core::CalibrationPolicy::default())
-                .map(|p| (s, p))
-                .map_err(err)
+            core::propose(
+                &s,
+                &core::CalibrationPolicy {
+                    maximum_delay_ms: alignment.snapshot.max_delay_ms as f64,
+                    ..Default::default()
+                },
+            )
+            .map(|p| (s, p))
+            .map_err(err)
         }) {
             Ok((s, p)) => {
                 alignment.session = Some(s);

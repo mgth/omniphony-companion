@@ -5,7 +5,7 @@ clipping or a missing sweep prevented timing analysis. They preserve the origina
 recording and verdict. These diagnostics cannot establish a direct arrival,
 identify the actual loudspeaker, or generate correction gains.
 
-## Method: reference-pair-acquisition-v1
+## Method: reference-pair-acquisition-v2
 
 The offline analyzer correlates the recording against the exact finite sweep.
 It looks for two reference candidates separated by two segments, independently
@@ -13,16 +13,20 @@ of target detection. A second pass compensates the template's clock ratio.
 Candidates require normalized correlation of at least 0.2; another plausible
 pair within 80% of the best pair's weakest score makes the sequence ambiguous.
 The final reference spacing must remain within 2000 ppm of the nominal clock
-ratio, and both reference body levels must exceed the lead-in noise by 20 dB.
-Insufficient, ambiguous or truncated evidence leaves per-interval results absent;
+ratio. Reference levels below 20 dB SNR remain visible as diagnostic evidence
+but do not pass acquisition. Missing, ambiguous or truncated references leave
+per-interval results absent;
 it does not imply a silent target.
 
 Reference correlation peaks anchor the three approximate sweep-body windows.
-The target window is predicted at their midpoint, so it can be inspected even
-when no target sweep is detected. Body RMS uses the predicted one-sweep duration;
+A detected target match anchors its body window; otherwise the midpoint predicts
+the window so it can be inspected even when no target sweep is detected. Body RMS
+uses one sweep duration;
 peak and clipping counts include a 100 ms margin on each side. Values are
-relative to `analysis_start_frame`, like the existing timing reports. The first
-100 ms of that analysis slice provides background RMS. Values use a -200 dBFS
+relative to `analysis_start_frame`, like the existing timing reports. Background RMS uses 100 ms of the first reference's pre-padding, ending 20 ms
+before its sweep body, to avoid the preceding delayed target in a batch excerpt.
+If reference localization fails, whole-take diagnostics retain the initial
+100 ms background estimate. Values use a -200 dBFS
 floor for finite serialization of silence. Total clipping counts cover the
 analysis slice; original capture metadata retains whole-recording counts.
 
@@ -36,7 +40,9 @@ The interval classification, in priority order, is:
 | Correlation below 0.2 despite sufficient energy | Signal without a reliable sweep match |
 | Remaining cases | Sweep detected |
 
-Correlation is searched within 100 ms of each predicted segment start. The
+Target correlation is searched within ±45% of segment spacing; reference
+neighborhoods remain ±100 ms. Long target latency is reported as an advisory,
+including when weak reference SNR prevents qualification. The
 thresholds are prototype diagnostics, not a proof of absent sound or a hardware
 fault. Output routing, a mute, amplifier power, cabling, interference, an
 unexpected delay or microphone selection can require further checking. Changed

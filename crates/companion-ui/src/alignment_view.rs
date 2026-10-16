@@ -101,6 +101,17 @@ pub fn draw(ui: &mut egui::Ui, a: &Alignment, busy: bool) -> Option<&'static str
                             ui.label("—");
                         }
                         ui.end_row();
+                        if let Some(warning) = row
+                            .qualified
+                            .as_ref()
+                            .map(|q| q.arrival_ms)
+                            .or_else(|| row.repeats.last().and_then(|r| r.arrival_ms))
+                            .and_then(calibration_core::long_delay_warning)
+                        {
+                            ui.label("");
+                            ui.colored_label(super::WARM, warning);
+                            ui.end_row();
+                        }
                         if let Some(reason) = &row.reason {
                             ui.label("");
                             ui.colored_label(super::WARM, reason);

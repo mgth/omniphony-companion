@@ -222,7 +222,7 @@ impl Session {
                 pairs.insert((&observation.speaker_id, &observation.position_id)),
                 "duplicate speaker/position observation; put repeats in separate batches",
             )?;
-            finite_range(observation.arrival_ms, -100.0, 10_000.0, "arrival")?;
+            finite_range(observation.arrival_ms, -10_000.0, 10_000.0, "arrival")?;
             finite_range(observation.level_dbfs, -300.0, 300.0, "relative level")?;
             finite_range(observation.snr_db, -100.0, 200.0, "signal-to-noise ratio")?;
         }

@@ -12,6 +12,7 @@ name = "omniphony-companion-ui"
 path = "src/main.rs"
 
 [dependencies]
+calibration-core.workspace = true
 companion-service = { path = "../companion-service" }
 eframe = { version = "0.32.3", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
 

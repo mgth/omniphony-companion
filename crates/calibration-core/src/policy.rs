@@ -285,3 +285,11 @@ pub fn verify(
         passed,
     })
 }
+
+/// Advisory only: stable route latency is valid measurement evidence.
+/// Actual output capacity is checked separately by the proposal policy.
+pub fn long_delay_warning(delay_ms: f64) -> Option<String> {
+    (delay_ms.is_finite() && delay_ms.abs() > 100.0).then(|| format!(
+        "Long delay: {delay_ms:+.1} ms. This is allowed when repeatable. Matching a slow device delays the earlier speakers and may affect audio/video sync."
+    ))
+}
