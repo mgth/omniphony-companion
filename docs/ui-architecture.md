@@ -74,6 +74,13 @@ renderer/input. File validation, FFT work and unique report publication live in
 the service worker; the UI draws bounded envelope data and shared impulse reports.
 A reanalysis error remains visible when the saved-take panel is collapsed.
 
+Live results and saved analyses share a resizable panel below the speaker list,
+with separate selection and scrolling. They never open floating result windows.
+Signed-waveform and virtual-burst traces are computed on the existing analysis
+worker and saved in the report. UI frequency selection only chooses precomputed
+traces, each bounded to 1600 signed min/max buckets. Panel clipping keeps speaker
+cards from painting over the result panel; opening diagnostics scrolls internally.
+
 The example preview installs a synthetic backend explicitly and labels the
 window accordingly. It never records or plays audio. Production starts with
 real input enumeration and no fabricated speaker list. The frontend never marks

@@ -86,6 +86,20 @@ fn offline_reanalysis_uses_wav_not_old_estimates_and_preserves_every_source_file
         "bulk extraction offset must be removed"
     );
     assert!(point.peak_time_ms.unwrap().abs() < 0.1);
+    let waveforms = a.impulse.as_ref().unwrap().segments[1]
+        .waveforms
+        .as_ref()
+        .unwrap();
+    let burst = waveforms
+        .bursts
+        .iter()
+        .find(|b| b.frequency_hz == 1000.0)
+        .unwrap();
+    assert!(
+        burst.phase_deg.unwrap().abs() < 2.0,
+        "phase uses the same extraction zero"
+    );
+    assert!((burst.predicted.detail.peak / burst.input.detail.peak - 0.7).abs() < 0.01);
     for (name, bytes) in originals {
         assert_eq!(bytes, fs::read(dir.path().join(name)).unwrap());
     }
@@ -94,6 +108,10 @@ fn offline_reanalysis_uses_wav_not_old_estimates_and_preserves_every_source_file
     assert_eq!(json["impulse"]["valid_for_correction"], false);
     assert_eq!(json["origin"], "microphone_capture");
     assert_eq!(json["microphone_id"], "synthetic-mic");
+    assert_eq!(
+        json["impulse"]["segments"][1]["waveforms"]["method"],
+        "signed-ir-and-virtual-burst-v1"
+    );
 }
 #[test]
 fn cancelled_faulty_or_inconsistent_takes_cannot_be_promoted() {

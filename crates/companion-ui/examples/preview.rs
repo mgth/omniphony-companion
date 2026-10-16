@@ -19,6 +19,8 @@ fn main() -> eframe::Result {
                     "--frequency-response",
                     "--energy-arrival",
                     "--group-delay",
+                    "--signed-waveform",
+                    "--tone-burst",
                 ]
                 .contains(&a.as_str())
             }) {
@@ -63,6 +65,8 @@ fn main() -> eframe::Result {
                     "--frequency-response" => companion_ui::ResultPlot::FrequencyResponse,
                     "--energy-arrival" => companion_ui::ResultPlot::EnergyArrival,
                     "--group-delay" => companion_ui::ResultPlot::GroupDelay,
+                    "--signed-waveform" => companion_ui::ResultPlot::SignedWaveform,
+                    "--tone-burst" => companion_ui::ResultPlot::ToneBurst,
                     _ => app.result_plot,
                 };
             }

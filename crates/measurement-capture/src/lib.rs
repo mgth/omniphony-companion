@@ -8,6 +8,7 @@ mod pipewire_capture;
 pub mod sequence;
 pub mod spectral;
 pub mod timing;
+pub mod waveform;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample, SampleFormat, SizedSample};

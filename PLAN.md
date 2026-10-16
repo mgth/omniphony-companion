@@ -92,6 +92,12 @@ origin per segment and expose weak/ambiguous regions. They support investigation
 of multiway-speaker timing without claiming isolated driver delays or changing
 correction eligibility; see `docs/spectral-timing.md`.
 
+Signed impulse traces and virtual six-cycle tone bursts now expose oscillations
+and relative phase without a new acoustic acquisition. Results share a resizable
+panel below the speaker list. These inspection views do not change arrival
+acceptance; independent burst capture and improved onset detection remain pending.
+See `docs/virtual-bursts.md`.
+
 A further acquisition increment diagnoses completed rejected takes using the two
 reference sweeps independently of the target. Per-interval levels distinguish
 clipping, missing target evidence and weak or uncorrelated sound. UI and CLI
