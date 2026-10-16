@@ -2,9 +2,9 @@
 //! arrival time, speaker identity, a hardware fault or a calibration gain.
 use crate::timing::{Peak, correlation_scores, peak_candidates, resample};
 use omniphony_osc_contract::measurement::{SETTLE_MS, Sweep};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SegmentStatus {
     Detected,
@@ -25,9 +25,9 @@ impl SegmentStatus {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SegmentDiagnostics {
-    pub role: &'static str,
+    pub role: String,
     /// Body aligned to its sweep match when detected, otherwise predicted from
     /// the references. These remain diagnostic rather than direct-arrival windows.
     pub body_start_frame: usize,
@@ -42,9 +42,9 @@ pub struct SegmentDiagnostics {
     pub status: SegmentStatus,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AcquisitionDiagnostics {
-    pub method: &'static str,
+    pub method: String,
     pub noise_rms_dbfs: f64,
     pub total_clipped_samples: usize,
     pub reference_start_frames: Option<[f64; 2]>,
@@ -73,7 +73,7 @@ pub fn analyze(
     }
     let noise = rms(&samples[..capture_rate as usize / 10]);
     let mut report = AcquisitionDiagnostics {
-        method: "reference-pair-acquisition-v2",
+        method: "reference-pair-acquisition-v2".into(),
         noise_rms_dbfs: db(noise),
         total_clipped_samples: samples.iter().filter(|x| x.abs() >= 0.999).count(),
         reference_start_frames: None,
@@ -214,7 +214,7 @@ fn locate_segments(
             SegmentStatus::Detected
         };
         segments.push(SegmentDiagnostics {
-            role: ["Reference before", "Speaker", "Reference after"][index],
+            role: ["Reference before", "Speaker", "Reference after"][index].into(),
             body_start_frame,
             body_end_frame,
             rms_dbfs: db(rms),

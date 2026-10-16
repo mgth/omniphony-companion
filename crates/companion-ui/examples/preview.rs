@@ -1,4 +1,4 @@
-//! Synthetic UI fixture. No live discovery, microphone, playback or file writes.
+//! Synthetic UI fixture. No live discovery, microphone, playback or session writes.
 #[path = "../tests/support/mod.rs"]
 mod support;
 
@@ -6,6 +6,7 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Omniphony Companion · UI preview · No audio",
         eframe::NativeOptions {
+            persist_window: false,
             viewport: eframe::egui::ViewportBuilder::default()
                 .with_inner_size([1160.0, 800.0])
                 .with_min_inner_size([850.0, 640.0]),

@@ -3,7 +3,7 @@
 use crate::timing::{TimingReport, resample};
 use omniphony_osc_contract::measurement::Sweep;
 use rustfft::{FftPlanner, num_complex::Complex};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 const PRE_SECONDS: f64 = 0.1;
 const POST_SECONDS: f64 = 0.15;
@@ -11,9 +11,9 @@ const REGULARIZATION: f64 = 1e-5;
 const MAX_FFT: usize = 4_194_304;
 const MAX_BAND_SPREAD_MS: f64 = 0.6;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImpulseReport {
-    pub method: &'static str,
+    pub method: String,
     pub bands_hz: [[f64; 2]; 3],
     pub segments: [ImpulseSegment; 3],
     /// Signed waveform correlation after aligning the same reference speaker.
@@ -29,9 +29,9 @@ pub struct ImpulseReport {
     pub valid_for_correction: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImpulseSegment {
-    pub role: &'static str,
+    pub role: String,
     /// Relative to the analysis start in the recording, as in TimingReport.
     pub correlation_start_frame: f64,
     pub candidate_start_frame: Option<f64>,
@@ -245,7 +245,7 @@ pub fn analyze(
             crate::waveform::analyze(&full_response, rate, pre, s, candidate.or(candidates[0]))
         });
         segments.push(ImpulseSegment {
-            role,
+            role: role.into(),
             correlation_start_frame: peak,
             // The extraction window is anchored on the rounded sample, not peak's interpolated fraction.
             candidate_start_frame: candidate.map(|offset| center as f64 + offset / 1000.0 * rate),
@@ -312,7 +312,7 @@ pub fn analyze(
         }
     }
     Ok(ImpulseReport {
-        method: "regularized-sweep-arrival-review-v2",
+        method: "regularized-sweep-arrival-review-v2".into(),
         bands_hz: bands,
         segments,
         reference_similarity: similarity,

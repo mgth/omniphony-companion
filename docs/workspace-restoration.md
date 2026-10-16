@@ -1,0 +1,56 @@
+# Workspace restoration
+
+Reopening the companion restores acquisition preferences and the previous working
+view: the last 100 take results (the existing in-memory history limit), selected
+take or saved review, current alignment, graph mode, and virtual-burst choices.
+Eframe persistence retains window size/position where supported by the desktop,
+panel extents, scrolling, expanded sections and reference/target graph selection.
+The **Previous measurements** selector also exposes historical takes when their
+speaker is no longer in the connected renderer's layout.
+
+The service stores a small workspace index and view preferences with the existing
+atomic, debounced `settings.json`. Normal exit flushes pending saves. Entries use
+absolute session/report paths so a different launch directory cannot redirect
+restoration. The index contains no audio or duplicated plots. Reports remain in
+their original session folders; moving/deleting those folders requires restoring
+them or opening the new location explicitly. Missing/corrupt entries are reported
+individually and their references are retained; healthy results still open.
+
+On the first upgrade from settings-only preferences, a bounded scan of the selected
+recording folder imports recent single takes, batch children and alignment-pass
+children, plus the latest alignment. The previous version did not record a selected
+result or graph, so that first import selects the latest available result. Subsequent
+launches use the saved index and exact view choices rather than rescanning.
+
+## Display state and live state
+
+Loading runs on a background worker and reads the saved reports as they were written.
+It does not reanalyze PCM, generate new analysis files, replace an original verdict,
+start the microphone meter, play sound, resume an interrupted capture, or apply a
+profile. **Reanalyze this take** remains an explicit separate operation.
+
+A cached speaker layout is labeled **Saved speaker layout** while disconnected.
+Device enumeration and renderer discovery then refresh live state independently.
+A historical take stays accessible if settings or renderer revision changed, and
+is labeled as a previous measurement. It does not become current calibration evidence.
+
+Alignment reload uses the existing validation path and retains applied, verified,
+restored and uncertain-application state. Apply/Restore/Verify remain explicit,
+revision-checked actions. Restarting a renderer does not make a saved profile fresh.
+
+## Bounds and validation
+
+- Settings/index file: 1 MiB, at most 100 take references and 512 cached outputs.
+- Display report: 32 MiB; cumulative take/review report budget: 256 MiB, newest first.
+  Dense waveform reports can exceed 8 MiB. The core observation reader retains its
+  separate 8 MiB limit; increasing the display limit does not relax correction checks.
+- First-import discovery: at most 4096 directory entries, four levels, only known
+  session directory prefixes, with no directory-symlink traversal.
+- Result references update on completed controller events; large report arrays are
+  not serialized, copied or written on every UI frame.
+
+Tests cover immediate exit/restart, read-only loading, accepted/rejected/cancelled
+verdicts, missing/corrupt entries, first-import directory shapes, reports above the
+old limit, graph/result selection with an offline renderer, and alignment application
+state without repeated mutation. Audio and network operations are never recovered
+from serialized job state.

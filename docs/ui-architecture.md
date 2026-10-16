@@ -115,3 +115,10 @@ no UI timer owns correctness. Loading a saved alignment does not touch hardware.
 Verification uses the original settings and fresh repeated captures, clears old
 verification success, and retains unresolved results. Configuration persistence
 remains an explicit Studio action.
+
+Workspace restoration also belongs to the service: a background controller job
+loads retained display reports and the last alignment, then enumerates inputs and
+refreshes the renderer. The UI restores its selected result and graph preferences;
+eframe owns persisted window/widget geometry. Cached speaker layouts remain separate
+from live discovery and cannot authorize measurement or mutation. See
+`workspace-restoration.md` for storage bounds and upgrade behavior.

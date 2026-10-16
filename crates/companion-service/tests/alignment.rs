@@ -241,6 +241,24 @@ fn measured_pipeline_proposes_applies_verifies_reloads_and_restores_without_accu
     alignment::apply(&rig, &mut a, false).unwrap();
     alignment::apply(&rig, &mut a, false).unwrap();
     assert_eq!(rig.writes.load(Ordering::Relaxed), 1);
+    let restored = companion_service::workspace::restore(
+        Some(companion_service::workspace::WorkspaceIndex {
+            alignment: Some(a.directory.clone()),
+            ..Default::default()
+        }),
+        &a.settings,
+    )
+    .unwrap();
+    assert!(restored.warnings.is_empty());
+    assert_eq!(
+        restored.alignment.unwrap().applied_snapshot,
+        a.applied_snapshot
+    );
+    assert_eq!(
+        rig.writes.load(Ordering::Relaxed),
+        1,
+        "restore must not reapply settings"
+    );
     alignment::verify(&rig, &mut a, &AtomicBool::new(false), &mut |_, _, _| {}).unwrap();
     assert!(
         a.verification.as_ref().unwrap().passed,
@@ -310,6 +328,15 @@ fn uncertain_mutation_is_persisted_and_never_retried() {
     assert!(a.application_uncertain);
     let mut loaded = alignment::load(&a.directory).unwrap();
     assert!(loaded.application_uncertain);
+    let restored = companion_service::workspace::restore(
+        Some(companion_service::workspace::WorkspaceIndex {
+            alignment: Some(a.directory.clone()),
+            ..Default::default()
+        }),
+        &a.settings,
+    )
+    .unwrap();
+    assert!(restored.alignment.unwrap().application_uncertain);
     assert!(alignment::apply(&rig, &mut loaded, false).is_err());
     assert_eq!(rig.writes.load(Ordering::Relaxed), 1);
 }

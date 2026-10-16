@@ -105,7 +105,7 @@ pub fn arrival_review() -> companion_service::review::SavedReview {
     let waveforms =
         measurement_capture::waveform::analyze(&h, 48000.0, 4800, &spectral, Some(-5.0));
     let segment = ImpulseSegment {
-        role: "speaker",
+        role: "speaker".into(),
         correlation_start_frame: 10000.0,
         candidate_start_frame: Some(9760.0),
         band_candidate_offset_ms: [Some(-5.0), Some(-5.1), Some(-4.9)],
@@ -118,7 +118,7 @@ pub fn arrival_review() -> companion_service::review::SavedReview {
         response: Vec::new(),
         envelope_step_ms: 0.2,
         spectral: Some(companion_service::review::SpectralReport {
-            method: "synthetic-preview",
+            method: "synthetic-preview".into(),
             frequency_bounds_hz: [220.0, 9000.0],
             response_window_ms: [-100.0, 150.0],
             smoothing_octaves: 1.0 / 12.0,
@@ -171,7 +171,7 @@ pub fn arrival_review() -> companion_service::review::SavedReview {
         original_accepted_for_analysis: true,
         original_rejection_reason: None,
         diagnostics: measurement_capture::diagnostics::AcquisitionDiagnostics {
-            method: "synthetic-preview",
+            method: "synthetic-preview".into(),
             noise_rms_dbfs: -50.0,
             total_clipped_samples: 0,
             reference_start_frames: None,
@@ -181,7 +181,7 @@ pub fn arrival_review() -> companion_service::review::SavedReview {
         },
         analysis_error: None,
         timing: Some(TimingReport {
-            method: "synthetic-preview",
+            method: "synthetic-preview".into(),
             reference_start_frames: [10000.0, 154000.0],
             target_start_frame: 82000.0,
             clock_drift_ppm: None,
@@ -195,7 +195,7 @@ pub fn arrival_review() -> companion_service::review::SavedReview {
             valid_for_correction: false,
         }),
         impulse: Some(Arc::new(ImpulseReport {
-            method: "synthetic-preview",
+            method: "synthetic-preview".into(),
             bands_hz: [[300.0, 9000.0], [300.0, 2500.0], [2500.0, 9000.0]],
             segments: [segment.clone(), segment.clone(), segment],
             reference_similarity: Some(0.98),
@@ -222,7 +222,7 @@ pub fn missing_target_review() -> companion_service::review::SavedReview {
     review.analysis_error = Some("Original acquisition rejected; diagnostics only. Record a new take after resolving its cause.".into());
     review.diagnostics.reference_start_frames = Some([24000.0, 168000.0]);
     review.diagnostics.segments = Some(std::array::from_fn(|i| SegmentDiagnostics {
-        role: ["Reference before", "Speaker", "Reference after"][i],
+        role: ["Reference before", "Speaker", "Reference after"][i].into(),
         body_start_frame: 36000 + i * 72000,
         body_end_frame: 84000 + i * 72000,
         rms_dbfs: if i == 1 { -50.0 } else { -26.0 },

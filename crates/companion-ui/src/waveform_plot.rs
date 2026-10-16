@@ -3,9 +3,9 @@ use companion_service::review::{SignedTrace, WaveformReport};
 use eframe::egui::{self, FontId, RichText, Stroke, Vec2};
 
 pub(super) struct State {
-    frequency: f64,
-    overview: bool,
-    overlay: bool,
+    pub(super) frequency: f64,
+    pub(super) overview: bool,
+    pub(super) overlay: bool,
 }
 impl Default for State {
     fn default() -> Self {

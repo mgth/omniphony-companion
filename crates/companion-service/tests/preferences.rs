@@ -70,7 +70,7 @@ fn bad_and_future_files_are_not_overwritten_and_missing_fields_get_defaults() {
     for bytes in [
         b"broken {".as_slice(),
         br#"{"schema_version":2}"#,
-        &vec![b' '; 128 * 1024 + 1],
+        &vec![b' '; 1024 * 1024 + 1],
     ] {
         fs::write(&path, bytes).unwrap();
         assert!(PreferenceStore::open(path.clone()).is_err());

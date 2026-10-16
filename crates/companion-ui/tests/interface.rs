@@ -277,6 +277,7 @@ fn restart_restores_settings_reconnects_and_never_measures_automatically() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("settings.json");
     let (mut controller, _) = support::ready();
+    controller.settings.output_root = dir.path().join("sessions").display().to_string();
     controller.settings.input_channel = 2;
     controller.settings.reference_output = Some("Front right".into());
     controller.excluded_outputs.insert("Center".into());
@@ -398,7 +399,7 @@ fn captured_sweeps_with_ambiguous_arrivals_show_levels_and_withhold_timing() {
             impulse: None,
             impulse_error: None,
             timing: Some(TimingReport {
-                method: "synthetic-ui-fixture",
+                method: "synthetic-ui-fixture".into(),
                 reference_start_frames: [24000.0, 168000.0],
                 target_start_frame: 96000.0,
                 clock_drift_ppm: None,
@@ -727,4 +728,175 @@ fn alignment_is_inline_and_unqualified_results_never_apply_or_play() {
         assert!(!app.controller.busy());
         assert_eq!(starts.load(Ordering::Relaxed), 0);
     }
+}
+
+#[test]
+fn restart_restores_graph_selection_and_speaker_results_even_without_the_renderer() {
+    use companion_service::{
+        controller::{Backend, Controller, Take},
+        files::write_json,
+        measurement::{MeasureProgress, MeasureRequest, TakeOutcome},
+        preferences::PreferenceStore,
+    };
+    use std::{
+        net::SocketAddr,
+        sync::{Arc, atomic::AtomicBool},
+    };
+    struct Offline;
+    impl Backend for Offline {
+        fn inputs(&self) -> Result<Vec<measurement_capture::InputDevice>, String> {
+            Ok(vec![])
+        }
+        fn discover(&self, _: SocketAddr) -> Result<omniphony_adapter::Snapshot, String> {
+            Err("renderer is offline".into())
+        }
+        fn measure(
+            &self,
+            _: MeasureRequest,
+            _: &AtomicBool,
+            _: &mut dyn FnMut(MeasureProgress),
+        ) -> Result<TakeOutcome, String> {
+            panic!("startup must never measure")
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let folder = dir.path().join("take-1");
+    std::fs::create_dir(&folder).unwrap();
+    let path = dir.path().join("settings.json");
+    let (mut controller, _) = support::ready();
+    controller.settings.output_root = dir.path().display().to_string();
+    let settings = controller.settings.clone();
+    let snapshot = controller.state.snapshot.clone().unwrap();
+    let review = support::arrival_review();
+    let mut saved_review = review.clone();
+    saved_review.directory = folder.clone();
+    saved_review.report_file = folder.join("analysis-test.json");
+    write_json(&saved_review.report_file, &saved_review).unwrap();
+    controller.state.review = Some(saved_review);
+    write_json(&folder.join("snapshot.json"), &snapshot).unwrap();
+    write_json(&folder.join("stimulus.json"),&serde_json::json!({"output_id":"Front left","microphone_id":settings.microphone_id,"position_id":settings.position_id,"reference_output_id":"Front left","signal":settings.sweep})).unwrap();
+    write_json(&folder.join("capture-report.json"),&serde_json::json!({"schema_version":3,"accepted_for_analysis":true,"rejection_reason":null,"capture":{},"impulse":review.impulse,"timing":review.timing,"diagnostics":review.diagnostics})).unwrap();
+    std::fs::write(folder.join("recording.wav"), b"cached UI fixture").unwrap();
+    let take = Take {
+        output_id: "Front left".into(),
+        revision: snapshot.revision.clone(),
+        settings: settings.clone(),
+        outcome: Ok(TakeOutcome {
+            directory: folder.clone(),
+            accepted: true,
+            cancelled: false,
+            rejection_reason: None,
+            diagnostics: Some(review.diagnostics),
+            timing: review.timing,
+            impulse: review.impulse,
+            impulse_error: None,
+        }),
+    };
+    // Seed the index as a completed session, then make a real view choice in egui.
+    controller.state.takes.push(take);
+    let mut store = PreferenceStore::open(path.clone()).unwrap();
+    store.update(&settings, "127.0.0.1:9000", &Default::default(), "");
+    store.update_workspace(companion_service::workspace::WorkspaceIndex::from_state(
+        &controller.state,
+    ));
+    drop(store);
+    let ctx = egui::Context::default();
+    let size = Vec2::new(1160.0, 1000.0);
+    let mut app = CompanionApp::with_preferences(
+        &ctx,
+        controller,
+        PreferenceStore::open(path.clone()).unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while app.controller.busy() {
+        frame(&mut app, &ctx, vec![], size);
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let output = frame(&mut app, &ctx, vec![], size);
+    let button = labels(&output)
+        .into_iter()
+        .find(|(s, _)| s == "Previous measurements")
+        .unwrap()
+        .1
+        .center();
+    click(&mut app, &ctx, button, size);
+    let output = frame(&mut app, &ctx, vec![], size);
+    let item = labels(&output)
+        .into_iter()
+        .find(|(s, _)| s.starts_with("Front left ·") && s.ends_with("take-1"))
+        .unwrap()
+        .1
+        .center();
+    click(&mut app, &ctx, item, size);
+    app.result_plot = companion_ui::ResultPlot::FrequencyResponse;
+    let output = frame(&mut app, &ctx, vec![], size);
+    let segment = labels(&output)
+        .into_iter()
+        .find(|(s, _)| s == "Speaker")
+        .unwrap()
+        .1
+        .center();
+    click(&mut app, &ctx, segment, size);
+    let output = frame(&mut app, &ctx, vec![], size);
+    let reference = labels(&output)
+        .into_iter()
+        .find(|(s, _)| s == "Reference after")
+        .unwrap()
+        .1
+        .center();
+    click(&mut app, &ctx, reference, size);
+    frame(&mut app, &ctx, vec![], size);
+    // Use eframe's real serializer, independently of the service preferences.
+    #[derive(Default)]
+    struct MemoryStorage(std::collections::BTreeMap<String, String>);
+    impl eframe::Storage for MemoryStorage {
+        fn get_string(&self, key: &str) -> Option<String> {
+            self.0.get(key).cloned()
+        }
+        fn set_string(&mut self, key: &str, value: String) {
+            self.0.insert(key.into(), value);
+        }
+        fn flush(&mut self) {}
+    }
+    let mut storage = MemoryStorage::default();
+    ctx.memory(|m| eframe::set_value(&mut storage, "memory", m));
+    drop(app);
+
+    let ctx = egui::Context::default();
+    ctx.memory_mut(|m| *m = eframe::get_value(&storage, "memory").unwrap());
+    let mut app = CompanionApp::with_preferences(
+        &ctx,
+        Controller::new(Arc::new(Offline)),
+        PreferenceStore::open(path.clone()).unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while app.controller.busy() {
+        frame(&mut app, &ctx, vec![], size);
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(app.result_plot, companion_ui::ResultPlot::FrequencyResponse);
+    assert!(app.controller.state.snapshot.is_none());
+    assert!(app.controller.state.saved_snapshot.is_some());
+    assert!(app.controller.current_take("Front left").is_none());
+    assert!(app.controller.display_take("Front left").is_some());
+    assert!(app.controller.can_measure("Front left").is_err());
+    let output = frame(&mut app, &ctx, vec![], size);
+    let text = labels(&output);
+    assert!(text.iter().any(|(s, _)| s.contains("Saved speaker layout")));
+    assert!(text.iter().any(|(s, _)| s.contains("Take · Front left")));
+    assert!(text.iter().any(|(s, _)| s.contains("Frequency response")));
+    assert!(text.iter().any(|(s, _)| s == "Reference after"));
+    assert!(app.controller.state.workspace_warnings.is_empty());
+    assert_eq!(
+        app.controller.state.review.as_ref().unwrap().report_file,
+        folder.join("analysis-test.json")
+    );
+    assert_eq!(
+        std::fs::read_dir(&folder).unwrap().count(),
+        5,
+        "startup must not generate analysis files"
+    );
+    assert_eq!(app.controller.settings, settings);
 }
