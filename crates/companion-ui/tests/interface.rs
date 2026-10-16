@@ -354,6 +354,61 @@ fn offline_arrival_review_renders_without_a_renderer_and_keeps_geometry_finite()
 }
 
 #[test]
+fn frequency_and_timing_views_switch_without_playback_and_handle_missing_points() {
+    use companion_ui::ResultPlot;
+    let ctx = egui::Context::default();
+    let (mut controller, starts) = support::ready();
+    controller.disconnect();
+    controller.state.review = Some(support::arrival_review());
+    let mut app = CompanionApp::preview(&ctx, controller);
+    for size in [Vec2::new(850.0, 640.0), Vec2::new(1160.0, 800.0)] {
+        for (mode, title) in [
+            (
+                ResultPlot::FrequencyResponse,
+                "Frequency response · relative dB",
+            ),
+            (
+                ResultPlot::EnergyArrival,
+                "Peak-energy arrival vs frequency · ms",
+            ),
+            (ResultPlot::GroupDelay, "Group delay vs frequency · ms"),
+        ] {
+            app.result_plot = mode;
+            frame(&mut app, &ctx, vec![], size);
+            let output = frame(&mut app, &ctx, vec![], size);
+            let text = labels(&output);
+            assert!(text.iter().any(|(t, _)| t == title), "{mode:?}");
+            assert!(text.iter().all(|(_, rect)| rect.is_finite()));
+            assert_eq!(starts.load(Ordering::Relaxed), 0);
+        }
+    }
+    let size = Vec2::new(1160.0, 800.0);
+    let output = frame(&mut app, &ctx, vec![], size);
+    let position = labels(&output)
+        .iter()
+        .find(|(t, _)| t == "Frequency response")
+        .unwrap()
+        .1
+        .center();
+    click(&mut app, &ctx, position, size);
+    assert_eq!(app.result_plot, ResultPlot::FrequencyResponse);
+    let review = app.controller.state.review.as_mut().unwrap();
+    let report = std::sync::Arc::make_mut(review.impulse.as_mut().unwrap());
+    for point in &mut report.segments[1].spectral.as_mut().unwrap().points {
+        point.magnitude_db = None;
+        point.peak_time_ms = None;
+        point.group_delay_ms = None;
+    }
+    let output = frame(&mut app, &ctx, vec![], size);
+    assert!(
+        labels(&output)
+            .iter()
+            .any(|(t, _)| t == "No reliable points in this view.")
+    );
+    assert!(labels(&output).iter().all(|(_, r)| r.is_finite()));
+}
+
+#[test]
 fn unresolved_impulse_review_shows_reasons_instead_of_a_delay() {
     let ctx = egui::Context::default();
     let (mut controller, _) = support::ready();

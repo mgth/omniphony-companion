@@ -13,7 +13,15 @@ fn main() -> eframe::Result {
         },
         Box::new(|cc| {
             let (mut controller, _) = support::ready();
-            if std::env::args().any(|a| a == "--arrival-review") {
+            if std::env::args().any(|a| {
+                [
+                    "--arrival-review",
+                    "--frequency-response",
+                    "--energy-arrival",
+                    "--group-delay",
+                ]
+                .contains(&a.as_str())
+            }) {
                 controller.state.review = Some(support::arrival_review());
             }
             if std::env::args().any(|a| a == "--missing-target-review") {
@@ -49,10 +57,16 @@ fn main() -> eframe::Result {
                         },
                     ));
             }
-            Ok(Box::new(companion_ui::CompanionApp::preview(
-                &cc.egui_ctx,
-                controller,
-            )))
+            let mut app = companion_ui::CompanionApp::preview(&cc.egui_ctx, controller);
+            for arg in std::env::args() {
+                app.result_plot = match arg.as_str() {
+                    "--frequency-response" => companion_ui::ResultPlot::FrequencyResponse,
+                    "--energy-arrival" => companion_ui::ResultPlot::EnergyArrival,
+                    "--group-delay" => companion_ui::ResultPlot::GroupDelay,
+                    _ => app.result_plot,
+                };
+            }
+            Ok(Box::new(app))
         }),
     )
 }

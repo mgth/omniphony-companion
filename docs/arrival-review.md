@@ -75,6 +75,7 @@ cargo run --locked -p companion-cli -- capture review --take sessions/example-ta
 ```
 
 The result dialog lets you select reference-before, speaker or reference-after.
+Its graph tabs also offer [frequency response and frequency-dependent timing](spectral-timing.md).
 Plot time is relative to that segment's correlation peak; it is not absolute
 propagation delay. Markers can remain visible while the combined arrival estimate
 is withheld. The source microphone/position/reference are shown, without changing

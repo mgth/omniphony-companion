@@ -6,6 +6,7 @@ pub mod impulse;
 #[cfg(target_os = "linux")]
 mod pipewire_capture;
 pub mod sequence;
+pub mod spectral;
 pub mod timing;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};

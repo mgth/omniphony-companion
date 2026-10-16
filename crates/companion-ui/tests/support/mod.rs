@@ -105,6 +105,29 @@ pub fn arrival_review() -> companion_service::review::SavedReview {
         response_step_ms: 0.02,
         response: Vec::new(),
         envelope_step_ms: 0.2,
+        spectral: Some(companion_service::review::SpectralReport {
+            method: "synthetic-preview",
+            frequency_bounds_hz: [220.0, 9000.0],
+            response_window_ms: [-100.0, 150.0],
+            smoothing_octaves: 1.0 / 12.0,
+            peak_band_octaves: 1.0 / 3.0,
+            points: (0..64)
+                .map(|i| {
+                    let hz = 220.0 * (9000_f64 / 220.0).powf(i as f64 / 63.0);
+                    let delay = -3.0 + 2.0 / (1.0 + (-5.0 * (hz / 2200.0).ln()).exp());
+                    companion_service::review::SpectralPoint {
+                        frequency_hz: hz,
+                        magnitude_db: Some(-20.0 + 3.0 * (hz / 600.0).ln().sin()),
+                        group_delay_ms: (i != 30).then_some(delay + 0.15 * (hz / 700.0).sin()),
+                        peak_time_ms: (3..61).contains(&i).then_some(delay),
+                        ambiguous_peak: i == 32,
+                        time_resolution_ms: 2000.0 / (hz * 0.23),
+                        estimated_snr_db: 35.0,
+                    }
+                })
+                .collect(),
+        }),
+        spectral_error: None,
         envelope_db: (0..1250)
             .map(|i| {
                 let ms = i as f32 * 0.2 - 100.0;

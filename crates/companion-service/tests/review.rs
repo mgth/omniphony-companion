@@ -71,6 +71,21 @@ fn offline_reanalysis_uses_wav_not_old_estimates_and_preserves_every_source_file
     let b = saved_take(dir.path()).unwrap();
     assert_ne!(a.report_file, b.report_file);
     assert!((a.impulse.as_ref().unwrap().relative_arrival_ms.unwrap() - 5.0).abs() < 0.05);
+    let spectral = a.impulse.as_ref().unwrap().segments[1]
+        .spectral
+        .as_ref()
+        .unwrap();
+    let point = spectral
+        .points
+        .iter()
+        .find(|p| p.frequency_hz >= 1000.0)
+        .unwrap();
+    assert!((point.magnitude_db.unwrap() - 20.0_f64 * 0.7_f64.log10()).abs() < 0.15);
+    assert!(
+        point.group_delay_ms.unwrap().abs() < 0.05,
+        "bulk extraction offset must be removed"
+    );
+    assert!(point.peak_time_ms.unwrap().abs() < 0.1);
     for (name, bytes) in originals {
         assert_eq!(bytes, fs::read(dir.path().join(name)).unwrap());
     }

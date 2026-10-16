@@ -86,6 +86,12 @@ validated direct-path observation or an automatic correction input. Representati
 levels, microphone-calibration application, hardware accuracy and profile
 conversion remain pending; see `docs/arrival-review.md`.
 
+Spectral review now adds transfer magnitude, a denser band-energy arrival curve
+and group delay from the same retained responses. These preserve a common time
+origin per segment and expose weak/ambiguous regions. They support investigation
+of multiway-speaker timing without claiming isolated driver delays or changing
+correction eligibility; see `docs/spectral-timing.md`.
+
 A further acquisition increment diagnoses completed rejected takes using the two
 reference sweeps independently of the target. Per-interval levels distinguish
 clipping, missing target evidence and weak or uncorrelated sound. UI and CLI
