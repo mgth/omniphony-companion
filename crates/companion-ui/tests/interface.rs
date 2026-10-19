@@ -2399,7 +2399,9 @@ fn a_card_measures_its_speaker_again_into_the_alignment_or_takes_one_diagnostic_
 fn an_alignment_applied_to_another_renderer_does_not_block_a_new_one() {
     let size = Vec2::new(1160.0, 800.0);
     let ctx = egui::Context::default();
+    let dir = tempfile::tempdir().unwrap();
     let (mut controller, starts) = support::ready();
+    controller.settings.output_root = dir.path().display().to_string();
     let mut alignment = support::alignment(&controller, true);
     // Saved as applied, but this renderer has the original settings: nothing to undo.
     alignment.applied_snapshot = controller.state.snapshot.clone();
