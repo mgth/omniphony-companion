@@ -99,7 +99,7 @@ pub fn saved_take(directory: &Path) -> AppResult<SavedReview> {
     let snapshot: Snapshot = read_json(&directory.join("snapshot.json"))?;
     if !matches!(stimulus.schema_version, 1 | 2)
         || !(1..=3).contains(&capture.schema_version)
-        || !matches!(stimulus.protocol_version, 2 | 3 | protocol::VERSION)
+        || !(2..=protocol::VERSION).contains(&stimulus.protocol_version)
         || capture.timing_frame_origin != "analysis_start_frame_in_recording_wav"
     {
         return Err("unsupported take schema, protocol or timing origin".into());
@@ -134,7 +134,7 @@ pub fn saved_take(directory: &Path) -> AppResult<SavedReview> {
     let progress = &capture.renderer_progress;
     let expected_frames = if let Some(window) = &stimulus.sequence_window {
         if stimulus.schema_version != 2
-            || !matches!(stimulus.protocol_version, 3 | protocol::VERSION)
+            || !(3..=protocol::VERSION).contains(&stimulus.protocol_version)
             || progress.sequence_outputs.get(window.target_index) != Some(&stimulus.output_id)
             || window
                 .source_end_frame
