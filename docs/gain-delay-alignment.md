@@ -114,7 +114,7 @@ microphone calibration, multipoint EQ and subwoofer integration remain deferred.
 
 The session summary reports how many speakers have targets and how many are
 excluded. Each excluded speaker shows a short reason in the chart and its card
-(the raw reason is in the tooltip and in Lab's exclusion list). Excluded observations do not determine the latest arrival, quietest
+(the technical reason is in the tooltip and in Lab's exclusion list). Excluded observations do not determine the latest arrival, quietest
 level, or shared-reference consistency of the eligible subset. The two-capture,
 SNR, clipping and repeatability thresholds are unchanged. At least two speakers
 must qualify, even when the timing-reference speaker itself has no correction
@@ -131,3 +131,55 @@ builds eligible targets without playback or renderer writes. It updates only
 `alignment-state.json`; the original plan, captures and rejection reasons remain
 available. Applied/uncertain profiles, physical-volume changes, incomplete passes,
 simulated data and diagnostic-only reanalyses cannot be promoted by this action.
+
+## Reason codes
+
+Exclusions and blockers are typed in `calibration-core` (`calibration_core::reason`)
+and produced where they are found: the core's repeatability gates, the service's
+per-take estimate and the subset policy. Each `ExclusionReason` (no signal, missing
+timing references, clipped, low SNR with its band and value, unstable reference,
+repeat spread in ms/dB, no clear arrival, not measured twice, cancelled, capture
+failed, session mismatch, far arrival, other) and each `Blocker` has one technical
+`Display`, shown in Lab, and one short `human()` sentence, shown in the chart and
+cards, with a severity (red: nothing captured; amber: not trusted; blue: set aside).
+The UI never interprets text.
+
+Saved sessions are additive: rows gain `reason_code` and `include_anyway`, repeats
+gain `codes` and the session gains `blocker_codes`. The former text fields are still
+written (as the codes' `Display`), so older builds keep reading new sessions. Sessions
+saved before the codes load unchanged; their text is classified once
+(`ExclusionReason::from_message`, also used for analysis messages that are still
+text), and older text blockers are kept verbatim as `Other`, which still block an
+update. Evidence validation compares membership and estimates, not the wording of
+an exclusion.
+
+## Far arrivals are set aside
+
+A speaker can be perfectly repeatable and still arrive far from the others, typically
+because it plays through another output device or a processing path with its own
+latency (the session of 16 Oct 2026 had two speakers at +177 ms). The former policy
+delayed every qualified speaker to the latest arrival, which would have delayed the
+whole room by 177 ms to match two speakers.
+
+The proposal policy now sets aside, by default, every repeatable speaker whose arrival
+is more than **20 ms** from the median of the repeatable speakers. For an even count
+the median is the middle arrival nearer the timing reference (0 ms), not the mean of
+the two, so a room split into two equal groups keeps the reference's group instead of
+setting everyone aside. Set-aside speakers keep their settings and their estimates,
+are shown in blue with the offset ("Set aside: 177 ms later than the others."), and
+do not influence the latest arrival, quietest level, reference-level consistency or
+minimum-count check of the corrected subset.
+
+The trade-off is explicit. Setting a late device aside keeps the rest of the room
+tight and avoids adding a large common delay, which would shift audio against video
+(lip sync) and use the renderer's limited delay capacity; but the set-aside speaker
+then stays early or late relative to the others until its route latency is fixed
+outside the Companion. Aligning to it makes the whole room coherent at the cost of
+that common delay. The user chooses per speaker with **Align to … anyway** below the
+chart (and **Set … aside again**). The flag is saved in the session
+(`include_anyway`); the proposal is rebuilt from the saved passes without playback,
+under the same rules as **Update correction proposal**, and the renderer's maximum
+delay still applies. A session saved before this policy whose profile already
+corrects a far speaker loads with that speaker included, so it stays valid and
+restorable.
+

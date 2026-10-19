@@ -5,7 +5,7 @@ use crate::{
     measurement::{MeasureProgress, MeasureRequest, TakeOutcome},
 };
 use calibration_core::{
-    self as core,
+    self as core, Blocker, ExclusionReason,
     repeatability::{QualifiedEstimate, RepeatEstimate},
 };
 use measurement_capture::level;
@@ -25,7 +25,61 @@ pub struct Row {
     #[serde(default)]
     pub quality: Vec<crate::quality::Report>,
     pub qualified: Option<QualifiedEstimate>,
+    /// Technical text of a failed qualification, kept for older readers and older
+    /// sessions. Never set for a repeatable speaker, even when it is set aside.
     pub reason: Option<String>,
+    /// Why this speaker receives no target: a failed qualification, or a repeatable
+    /// speaker set aside by the proposal policy. Absent on sessions before reason codes;
+    /// use [`Row::exclusion`], which also covers those.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<ExclusionReason>,
+    /// The user chose to align to this speaker although the policy sets it aside.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub include_anyway: bool,
+}
+impl Row {
+    fn new(output_id: String) -> Self {
+        Self {
+            output_id,
+            take_folders: vec![],
+            repeats: vec![],
+            quality: vec![],
+            qualified: None,
+            reason: None,
+            reason_code: None,
+            include_anyway: false,
+        }
+    }
+    /// Why this speaker receives no target, typed also for sessions saved as text.
+    pub fn exclusion(&self) -> Option<ExclusionReason> {
+        if let Some(code) = &self.reason_code {
+            return Some(code.clone());
+        }
+        if self.qualified.is_some() {
+            return None;
+        }
+        Some(self.reason.as_deref().map_or(
+            ExclusionReason::NotMeasuredTwice,
+            ExclusionReason::from_message,
+        ))
+    }
+    /// Repeatable and part of the corrected subset.
+    pub fn included(&self) -> bool {
+        self.qualified.is_some() && self.reason_code.is_none()
+    }
+    /// Repeatable, but left out of the correction until the user includes it.
+    pub fn set_aside(&self) -> bool {
+        self.qualified.is_some()
+            && self
+                .reason_code
+                .as_ref()
+                .is_some_and(ExclusionReason::is_set_aside)
+    }
+    fn exclude(&mut self, reason: ExclusionReason) {
+        self.qualified = None;
+        self.reason = Some(reason.to_string());
+        self.reason_code = Some(reason);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,7 +101,11 @@ pub struct Alignment {
     pub pass_reports: Option<Vec<PassReport>>,
     #[serde(default)]
     pub verification_pass_reports: Option<Vec<PassReport>>,
+    /// Technical text of the session blockers; use [`Alignment::blocker_list`].
     pub blockers: Vec<String>,
+    /// Typed `blockers`, in the same order. Empty on sessions saved before reason codes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocker_codes: Vec<Blocker>,
     pub session: Option<core::Session>,
     pub profile: Option<core::CalibrationProfile>,
     pub applied_snapshot: Option<Snapshot>,
@@ -74,6 +132,9 @@ fn stamp() -> u128 {
         .as_nanos()
 }
 
+/// Reasons are typed where they are found. Text from the acquisition and analysis
+/// crates is classified once; consequences of an earlier failure (no timing or impulse
+/// after a rejected capture) are not repeated as separate causes.
 fn estimate(take: &TakeOutcome) -> RepeatEstimate {
     let mut result = RepeatEstimate {
         arrival_ms: None,
@@ -81,13 +142,17 @@ fn estimate(take: &TakeOutcome) -> RepeatEstimate {
         minimum_snr_db: None,
         reference_level_db: None,
         reasons: vec![],
+        codes: vec![],
     };
-    if !take.accepted || take.cancelled {
-        result.reasons.push(
-            take.rejection_reason
-                .clone()
-                .unwrap_or("capture did not complete".into()),
-        );
+    if take.cancelled {
+        result.reject(ExclusionReason::Cancelled);
+    } else if !take.accepted {
+        result.reject(take.rejection_reason.as_deref().map_or_else(
+            || ExclusionReason::CaptureFailed {
+                detail: "capture did not complete".into(),
+            },
+            ExclusionReason::from_message,
+        ));
     }
     if let Some(t) = &take.timing {
         let snr = t
@@ -95,29 +160,34 @@ fn estimate(take: &TakeOutcome) -> RepeatEstimate {
             .as_ref()
             .map(|b| &b.signal_to_noise_db)
             .unwrap_or(&t.signal_to_noise_db);
-        if let Err(e) = core::repeatability::qualify_acquisition(
+        if let Err(reason) = core::repeatability::qualify_acquisition(
             snr.iter().copied().fold(f64::INFINITY, f64::min),
             (t.sweep_rms_dbfs[0] - t.sweep_rms_dbfs[2]).abs(),
         ) {
-            result.reasons.push(e.to_string());
+            result.reject(reason);
         }
-    } else {
-        result
-            .reasons
-            .push("missing synchronized timing evidence".into());
+    } else if !result.is_rejected() {
+        result.reject(ExclusionReason::MissingTimingReferences);
     }
     let Some(ir) = &take.impulse else {
-        result.reasons.push(
-            take.impulse_error
-                .clone()
-                .unwrap_or("missing impulse response".into()),
-        );
+        if !result.is_rejected() {
+            result.reject(take.impulse_error.as_deref().map_or_else(
+                || ExclusionReason::NoClearArrival {
+                    detail: "missing impulse response".into(),
+                },
+                ExclusionReason::from_message,
+            ));
+        }
         return result;
     };
     result.arrival_ms = ir.relative_arrival_ms;
-    result.reasons.extend(ir.unresolved_reasons.clone());
-    if result.arrival_ms.is_none() && result.reasons.is_empty() {
-        result.reasons.push("arrival unresolved".into());
+    for reason in &ir.unresolved_reasons {
+        result.reject(ExclusionReason::from_message(reason));
+    }
+    if result.arrival_ms.is_none() && !result.is_rejected() {
+        result.reject(ExclusionReason::NoClearArrival {
+            detail: "arrival unresolved".into(),
+        });
     }
     let bands: Result<Vec<_>, _> = ir
         .segments
@@ -140,12 +210,10 @@ fn estimate(take: &TakeOutcome) -> RepeatEstimate {
             );
             result.reference_level_db = Some((bands[0].level_db + bands[2].level_db) * 0.5);
             if (bands[0].level_db - bands[2].level_db).abs() > 0.5 {
-                result
-                    .reasons
-                    .push("reference level changed within the take".into());
+                result.reject(ExclusionReason::UnstableReference);
             }
         }
-        Err(e) => result.reasons.push(e),
+        Err(e) => result.reject(ExclusionReason::from_message(&e)),
     }
     result
 }
@@ -185,18 +253,9 @@ pub fn capture<B: Backend + ?Sized>(
         endpoint: request.endpoint,
         settings,
         snapshot: request.snapshot.clone(),
-        rows: outputs
-            .iter()
-            .map(|id| Row {
-                output_id: id.clone(),
-                take_folders: vec![],
-                repeats: vec![],
-                quality: vec![],
-                qualified: None,
-                reason: None,
-            })
-            .collect(),
+        rows: outputs.iter().cloned().map(Row::new).collect(),
         blockers: vec![],
+        blocker_codes: vec![],
         pass_reports: Some(vec![]),
         verification_pass_reports: None,
         session: None,
@@ -222,9 +281,7 @@ pub fn capture<B: Backend + ?Sized>(
     }
     for pass in 0..2 {
         if cancel.load(Ordering::Relaxed) {
-            alignment.blockers.push(
-                "Alignment cancelled; incomplete measurements cannot make a proposal.".into(),
-            );
+            alignment.block(Blocker::Cancelled);
             break;
         }
         let mut child = request.clone();
@@ -242,7 +299,7 @@ pub fn capture<B: Backend + ?Sized>(
                     analyzed_speakers: 0,
                     error: Some(error.clone()),
                 });
-                alignment.blockers.push(error);
+                alignment.block(Blocker::Capture { detail: error });
                 break;
             }
         };
@@ -255,17 +312,15 @@ pub fn capture<B: Backend + ?Sized>(
         let pass_error = batch
             .error
             .clone()
-            .or_else(|| batch.cancelled.then(|| "Alignment cancelled.".into()))
-            .or_else(|| {
-                incomplete
-                    .then(|| "The batch did not return every selected speaker in order.".into())
-            });
+            .map(|detail| Blocker::Capture { detail })
+            .or_else(|| batch.cancelled.then_some(Blocker::Cancelled))
+            .or_else(|| incomplete.then_some(Blocker::IncompleteBatch));
         alignment.pass_reports.as_mut().unwrap().push(PassReport {
             analyzed_speakers: batch.takes.len(),
-            error: pass_error.clone(),
+            error: pass_error.as_ref().map(ToString::to_string),
         });
         if let Some(error) = pass_error {
-            alignment.blockers.push(error);
+            alignment.block(error);
         }
         if !incomplete {
             for (row, (_, take)) in alignment.rows.iter_mut().zip(&batch.takes) {
@@ -280,7 +335,7 @@ pub fn capture<B: Backend + ?Sized>(
         }
     }
     if cancel.load(Ordering::Relaxed) {
-        alignment.blockers.push("Alignment cancelled.".into());
+        alignment.block(Blocker::Cancelled);
     }
     build_proposal(&mut alignment);
     write_json(&request.out_dir.join("alignment-plan.json"), &alignment).map_err(err)?;
@@ -289,25 +344,41 @@ pub fn capture<B: Backend + ?Sized>(
 }
 /// Recompute membership from all repeated evidence; never drop rejected rows
 /// from the saved report or let them influence the corrected subset's targets.
+/// Repeatable speakers far from the group are set aside unless the user included them;
+/// they keep their settings and do not move the others' targets.
 fn build_proposal(a: &mut Alignment) {
     a.session = None;
     a.profile = None;
-    let qualified =
-        core::repeatability::qualify_subset(a.rows.iter().map(|r| r.repeats.as_slice()));
-    for (row, result) in a.rows.iter_mut().zip(qualified.rows) {
+    // Blockers derived from the evidence are recomputed; acquisition blockers stay.
+    let kept: Vec<_> = a
+        .blocker_list()
+        .into_iter()
+        .filter(|b| !b.is_derived())
+        .collect();
+    a.blockers.clear();
+    a.blocker_codes.clear();
+    for blocker in kept {
+        a.block(blocker);
+    }
+    let subset = core::repeatability::qualify_subset(
+        a.rows
+            .iter()
+            .map(|r| (r.repeats.as_slice(), r.include_anyway)),
+    );
+    for ((row, result), set_aside) in a.rows.iter_mut().zip(subset.rows).zip(subset.set_aside) {
         match result {
             Ok(q) => {
                 row.qualified = Some(q);
                 row.reason = None;
+                row.reason_code = set_aside;
             }
-            Err(reason) => {
-                row.qualified = None;
-                row.reason = Some(reason);
-            }
+            Err(reason) => row.exclude(reason),
         }
     }
     if a.blockers.is_empty() {
-        a.blockers.extend(qualified.blockers);
+        for blocker in subset.blockers {
+            a.block(blocker);
+        }
     }
     if a.blockers.is_empty() {
         match make_session(a).and_then(|session| {
@@ -319,13 +390,16 @@ fn build_proposal(a: &mut Alignment) {
                 },
             )
             .map(|profile| (session, profile))
-            .map_err(err)
+            .map_err(|e| match e {
+                core::Error::Invalid(detail) => detail,
+                other => other.to_string(),
+            })
         }) {
             Ok((session, profile)) => {
                 a.session = Some(session);
                 a.profile = Some(profile);
             }
-            Err(e) => a.blockers.push(e),
+            Err(detail) => a.block(Blocker::Proposal { detail }),
         }
     }
 }
@@ -333,39 +407,7 @@ fn build_proposal(a: &mut Alignment) {
 /// Explicitly update an original, complete saved acquisition. Diagnostic-only
 /// reanalysis and stale physical setups keep their blockers and cannot be promoted.
 pub fn refresh_proposal(original: &Alignment) -> Result<Alignment, String> {
-    if original.applied_snapshot.is_some()
-        || original.application_uncertain
-        || original.physical_levels_changed
-    {
-        return Err("Restore any active alignment and capture fresh evidence after physical adjustments before updating a proposal.".into());
-    }
-    if original
-        .session
-        .as_ref()
-        .is_some_and(|s| s.baseline.origin != core::ObservationOrigin::Measured)
-        || original
-            .profile
-            .as_ref()
-            .is_some_and(|p| p.origin != core::ObservationOrigin::Measured)
-    {
-        return Err("Simulated observations cannot become a measured correction proposal.".into());
-    }
-    if !original.blockers.is_empty() {
-        return Err(format!(
-            "Proposal blocked: {}",
-            original.blockers.join("; ")
-        ));
-    }
-    if !original.pass_reports.as_ref().is_some_and(|p| {
-        p.len() == 2
-            && p.iter()
-                .all(|pass| pass.error.is_none() && pass.analyzed_speakers == original.rows.len())
-    }) {
-        return Err(
-            "Two complete original acquisition passes are required; capture a new alignment."
-                .into(),
-        );
-    }
+    original.refreshable()?;
     let mut updated = original.clone();
     build_proposal(&mut updated);
     if updated.profile.is_some() {
@@ -373,6 +415,26 @@ pub fn refresh_proposal(original: &Alignment) -> Result<Alignment, String> {
     }
     save(&updated)?;
     Ok(updated)
+}
+
+/// Align to a set-aside speaker anyway, or set it aside again, and update the proposal
+/// from the saved passes. No playback and no renderer change; the choice is saved.
+pub fn include_anyway(
+    original: &Alignment,
+    output_id: &str,
+    include: bool,
+) -> Result<Alignment, String> {
+    let index = original
+        .rows
+        .iter()
+        .position(|r| r.output_id == output_id)
+        .ok_or("This speaker is not part of the alignment.")?;
+    if original.rows[index].qualified.is_none() {
+        return Err("Only speakers that measured reliably can be included.".into());
+    }
+    let mut changed = original.clone();
+    changed.rows[index].include_anyway = include;
+    refresh_proposal(&changed)
 }
 
 /// Revisit retained raw audio without changing original verdicts or any renderer.
@@ -395,12 +457,15 @@ pub fn reanalyze(original: &Alignment) -> Result<Alignment, String> {
     reviewed.verification = None;
     reviewed.verification_note = None;
     reviewed.verification_pass_reports = None;
-    reviewed.blockers = vec!["Offline diagnostic reanalysis. Original reports are preserved; capture a fresh alignment before applying corrections.".into()];
+    reviewed.blockers.clear();
+    reviewed.blocker_codes.clear();
+    reviewed.block(Blocker::Diagnostic);
     for row in &mut reviewed.rows {
         row.repeats.clear();
         row.quality.clear();
         row.qualified = None;
         row.reason = None;
+        row.reason_code = None;
         if row.take_folders.len() > 2 {
             return Err("unexpected repeat count".into());
         }
@@ -452,19 +517,41 @@ pub fn reanalyze(original: &Alignment) -> Result<Alignment, String> {
                 Err(e) => {
                     row.quality
                         .push(crate::quality::assess(None, None, None, Some(&e)));
-                    row.repeats.push(RepeatEstimate {
+                    let mut repeat = RepeatEstimate {
                         arrival_ms: None,
                         level_db: None,
                         minimum_snr_db: None,
                         reference_level_db: None,
-                        reasons: vec![e],
-                    });
+                        reasons: vec![],
+                        codes: vec![],
+                    };
+                    repeat.reject(ExclusionReason::from_message(&e));
+                    row.repeats.push(repeat);
                 }
             }
         }
         match core::repeatability::qualify(&row.repeats) {
             Ok(q) => row.qualified = Some(q),
-            Err(e) => row.reason = Some(e.to_string()),
+            Err(reason) => row.exclude(reason),
+        }
+    }
+    // Show which repeatable speakers the policy would set aside, for diagnosis only.
+    let arrivals: Vec<_> = reviewed
+        .rows
+        .iter()
+        .map(|r| r.qualified.as_ref().map(|q| q.arrival_ms))
+        .collect();
+    let include: Vec<_> = reviewed.rows.iter().map(|r| r.include_anyway).collect();
+    for (row, set_aside) in
+        reviewed
+            .rows
+            .iter_mut()
+            .zip(core::repeatability::set_aside_far_arrivals(
+                &arrivals, &include,
+            ))
+    {
+        if row.qualified.is_some() {
+            row.reason_code = set_aside;
         }
     }
     std::fs::create_dir(&reviewed.directory).map_err(err)?;
@@ -476,7 +563,7 @@ pub fn reanalyze(original: &Alignment) -> Result<Alignment, String> {
 fn make_session(a: &Alignment) -> Result<core::Session, String> {
     let mut speakers = vec![];
     let mut observations = vec![];
-    for row in a.rows.iter().filter(|r| r.qualified.is_some()) {
+    for row in a.rows.iter().filter(|r| r.included()) {
         let q = row.qualified.as_ref().ok_or("unqualified speaker")?;
         let output = a
             .snapshot
@@ -550,8 +637,107 @@ impl Alignment {
             })
             .unwrap_or_default()
     }
+    /// Speakers that measured repeatably, whether included or set aside.
     pub fn qualified_count(&self) -> usize {
         self.rows.iter().filter(|r| r.qualified.is_some()).count()
+    }
+    /// Repeatable speakers that are part of the corrected subset.
+    pub fn included_count(&self) -> usize {
+        self.rows.iter().filter(|r| r.included()).count()
+    }
+    pub fn set_aside_count(&self) -> usize {
+        self.rows.iter().filter(|r| r.set_aside()).count()
+    }
+    /// Record a blocker once, as text for older readers and as a code.
+    pub fn block(&mut self, blocker: Blocker) {
+        let text = blocker.to_string();
+        if !self.blockers.contains(&text) {
+            self.blockers.push(text);
+            self.blocker_codes.push(blocker);
+        }
+    }
+    /// The session blockers, typed also for sessions saved as text (as `Other`).
+    pub fn blocker_list(&self) -> Vec<Blocker> {
+        self.blockers
+            .iter()
+            .enumerate()
+            .map(|(i, text)| match self.blocker_codes.get(i) {
+                Some(code) if code.to_string() == *text => code.clone(),
+                _ => Blocker::Other {
+                    detail: core::reason::without_error_prefix(text).to_owned(),
+                },
+            })
+            .collect()
+    }
+    /// Whether the proposal may be recomputed from the saved passes (an explicit update or
+    /// an "include anyway" choice). The error says why not.
+    pub fn refreshable(&self) -> Result<(), String> {
+        if self.applied_snapshot.is_some()
+            || self.application_uncertain
+            || self.physical_levels_changed
+        {
+            return Err("Restore any active alignment and capture fresh evidence after physical adjustments before updating a proposal.".into());
+        }
+        if self
+            .session
+            .as_ref()
+            .is_some_and(|s| s.baseline.origin != core::ObservationOrigin::Measured)
+            || self
+                .profile
+                .as_ref()
+                .is_some_and(|p| p.origin != core::ObservationOrigin::Measured)
+        {
+            return Err(
+                "Simulated observations cannot become a measured correction proposal.".into(),
+            );
+        }
+        let acquisition: Vec<_> = self
+            .blocker_list()
+            .into_iter()
+            .filter(|b| !b.is_derived())
+            .map(|b| b.to_string())
+            .collect();
+        if !acquisition.is_empty() {
+            return Err(format!("Proposal blocked: {}", acquisition.join("; ")));
+        }
+        if !self.pass_reports.as_ref().is_some_and(|p| {
+            p.len() == 2
+                && p.iter()
+                    .all(|pass| pass.error.is_none() && pass.analyzed_speakers == self.rows.len())
+        }) {
+            return Err(
+                "Two complete original acquisition passes are required; capture a new alignment."
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+    /// Sessions saved before far arrivals were set aside may already correct such a
+    /// speaker. Its proposal stays valid and restorable: a far speaker that the saved
+    /// profile corrects counts as included anyway.
+    fn include_corrected_far_speakers(&mut self) {
+        let Some(profile) = &self.profile else {
+            return;
+        };
+        let arrivals: Vec<_> = self
+            .rows
+            .iter()
+            .map(|r| r.qualified.as_ref().map(|q| q.arrival_ms))
+            .collect();
+        let include: Vec<_> = self.rows.iter().map(|r| r.include_anyway).collect();
+        let set_aside = core::repeatability::set_aside_far_arrivals(&arrivals, &include);
+        for (row, set_aside) in self.rows.iter_mut().zip(set_aside) {
+            if set_aside.is_some()
+                && row.reason_code.is_none()
+                && profile
+                    .target_snapshot
+                    .speakers
+                    .iter()
+                    .any(|s| s.id == row.output_id)
+            {
+                row.include_anyway = true;
+            }
+        }
     }
     fn validate_evidence(&self) -> Result<(), String> {
         let session = self
@@ -570,25 +756,40 @@ impl Alignment {
         {
             return Err("Alignment does not contain eligible microphone observations.".into());
         }
-        let qualified =
-            core::repeatability::qualify_subset(self.rows.iter().map(|r| r.repeats.as_slice()));
+        let qualified = core::repeatability::qualify_subset(
+            self.rows
+                .iter()
+                .map(|r| (r.repeats.as_slice(), r.include_anyway)),
+        );
         if !qualified.blockers.is_empty() {
-            return Err(qualified.blockers.join("; "));
+            return Err(qualified
+                .blockers
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; "));
         }
         let mut ids = std::collections::HashSet::new();
-        for (row, qualification) in self.rows.iter().zip(qualified.rows) {
+        for ((row, qualification), set_aside) in self
+            .rows
+            .iter()
+            .zip(qualified.rows)
+            .zip(qualified.set_aside)
+        {
             if !ids.insert(&row.output_id)
                 || !self.snapshot.outputs.iter().any(|o| o.id == row.output_id)
             {
                 return Err("Alignment contains duplicate or unknown speaker IDs.".into());
             }
+            // Membership and estimates are evidence; an exclusion's wording is not.
             match qualification {
                 Ok(q)
                     if row.qualified.as_ref() == Some(&q)
                         && row.reason.is_none()
+                        && row.reason_code == set_aside
                         && row.take_folders.len() == 2
                         && row.take_folders[0] != row.take_folders[1] => {}
-                Err(reason) if row.qualified.is_none() && row.reason.as_ref() == Some(&reason) => {}
+                Err(_) if row.qualified.is_none() => {}
                 _ => {
                     return Err(
                         "Alignment repeat evidence or subset membership is inconsistent.".into(),
@@ -763,8 +964,7 @@ pub fn verify<B: Backend + ?Sized>(
     if outcome.alignment.corrected_output_ids() != a.corrected_output_ids() || measured.is_none() {
         let mut reasons = outcome.alignment.blockers.clone();
         reasons.extend(outcome.alignment.rows.iter().filter_map(|r| {
-            r.reason
-                .as_ref()
+            r.exclusion()
                 .map(|reason| format!("{}: {reason}", r.output_id))
         }));
         a.verification_note = Some(format!(
@@ -827,6 +1027,7 @@ pub fn load(directory: &Path) -> Result<Alignment, String> {
     if a.schema_version != 1 || !a.endpoint.ip().is_loopback() || a.rows.len() > 32 {
         return Err("unsupported alignment file".into());
     }
+    a.include_corrected_far_speakers();
     if a.profile.is_some() {
         a.targets(false)?;
     }

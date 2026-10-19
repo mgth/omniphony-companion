@@ -308,6 +308,7 @@ pub fn alignment(
                         minimum_snr_db: Some(if weak { 8.0 } else { 35.0 }),
                         reference_level_db: Some(0.0),
                         reasons: vec![],
+                        codes: vec![],
                     })
                     .collect(),
                 quality: vec![Report {
@@ -326,7 +327,13 @@ pub fn alignment(
                     arrival_repeat_spread_ms: 0.02,
                     level_repeat_spread_db: 0.10,
                 }),
-                reason: weak.then(|| "Weak target signal · diagnostic estimate only".into()),
+                // Saved as text only, like sessions before reason codes.
+                reason: weak.then(|| {
+                    "integrated level-band signal/noise is 8.0 dB (minimum 20 dB for correction)"
+                        .into()
+                }),
+                reason_code: None,
+                include_anyway: false,
             }
         })
         .collect();
@@ -350,6 +357,7 @@ pub fn alignment(
         } else {
             vec!["A speaker has not qualified for correction".into()]
         },
+        blocker_codes: vec![],
         session: None,
         profile: proposal.then_some(CalibrationProfile {
             origin: ObservationOrigin::Simulated,
@@ -454,6 +462,7 @@ pub fn room_alignment(controller: &Controller) -> companion_service::alignment::
                         minimum_snr_db: Some(if reason.is_some() { 9.0 } else { 34.0 }),
                         reference_level_db: Some(0.0),
                         reasons: reason.map(|r| vec![r.to_owned()]).unwrap_or_default(),
+                        codes: vec![],
                     })
                     .collect(),
                 quality: vec![Report {
@@ -473,6 +482,8 @@ pub fn room_alignment(controller: &Controller) -> companion_service::alignment::
                     level_repeat_spread_db: 0.006,
                 }),
                 reason: reason.map(str::to_owned),
+                reason_code: None,
+                include_anyway: false,
             }
         })
         .collect();
@@ -492,6 +503,7 @@ pub fn room_alignment(controller: &Controller) -> companion_service::alignment::
         ]),
         verification_pass_reports: None,
         blockers: vec![],
+        blocker_codes: vec![],
         session: None,
         profile: Some(CalibrationProfile {
             origin: ObservationOrigin::Simulated,
@@ -503,6 +515,95 @@ pub fn room_alignment(controller: &Controller) -> companion_service::alignment::
             base_snapshot: base,
             target_snapshot: target,
         }),
+        applied_snapshot: None,
+        restored_snapshot: None,
+        verification: None,
+        verification_note: None,
+        application_uncertain: false,
+        physical_levels_changed: false,
+    }
+}
+
+/// Three aligned speakers, one silent and one repeatable but 60 ms late (another output
+/// device), set aside with reason codes as a new session saves them. No proposal yet,
+/// so "Align to it anyway" can rebuild one from these passes in `directory`.
+pub fn late_device_alignment(
+    controller: &Controller,
+    directory: &std::path::Path,
+) -> companion_service::alignment::Alignment {
+    use calibration_core::{ExclusionReason, repeatability::RepeatEstimate};
+    use companion_service::alignment::{Alignment, PassReport, Row};
+    let snapshot = controller.state.snapshot.clone().unwrap();
+    let rows = snapshot
+        .outputs
+        .iter()
+        .take(5)
+        .enumerate()
+        .map(|(i, o)| {
+            let arrival = [0.0, 0.32, -1.85, 0.0, 60.0][i];
+            let level = [-7.6, -4.2, -3.0, 0.0, -5.8][i];
+            let silent = i == 3;
+            let repeats = [0.0, 0.006]
+                .iter()
+                .map(|offset| {
+                    let mut repeat = RepeatEstimate {
+                        arrival_ms: (!silent).then_some(arrival + offset),
+                        level_db: (!silent).then_some(level + offset),
+                        minimum_snr_db: (!silent).then_some(34.0),
+                        reference_level_db: (!silent).then_some(0.0),
+                        reasons: vec![],
+                        codes: vec![],
+                    };
+                    if silent {
+                        repeat.reject(ExclusionReason::MissingTimingReferences);
+                    }
+                    repeat
+                })
+                .collect::<Vec<_>>();
+            let qualified = calibration_core::repeatability::qualify(&repeats).ok();
+            let mut row = Row {
+                output_id: o.id.clone(),
+                take_folders: vec![
+                    format!("synthetic-late-pass-1-{i}").into(),
+                    format!("synthetic-late-pass-2-{i}").into(),
+                ],
+                repeats,
+                quality: vec![],
+                qualified: qualified.clone(),
+                reason: None,
+                reason_code: None,
+                include_anyway: false,
+            };
+            if silent {
+                row.reason_code = Some(ExclusionReason::MissingTimingReferences);
+                row.reason = row.reason_code.as_ref().map(ToString::to_string);
+            } else if i == 4 {
+                row.reason_code = Some(ExclusionReason::FarArrival {
+                    ms: qualified.unwrap().arrival_ms,
+                });
+            }
+            row
+        })
+        .collect();
+    Alignment {
+        schema_version: 1,
+        directory: directory.to_owned(),
+        endpoint: "127.0.0.1:9000".parse().unwrap(),
+        settings: controller.settings.clone(),
+        snapshot,
+        rows,
+        pass_reports: Some(vec![
+            PassReport {
+                analyzed_speakers: 5,
+                error: None
+            };
+            2
+        ]),
+        verification_pass_reports: None,
+        blockers: vec![],
+        blocker_codes: vec![],
+        session: None,
+        profile: None,
         applied_snapshot: None,
         restored_snapshot: None,
         verification: None,

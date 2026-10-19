@@ -786,6 +786,7 @@ fn alignment_session_stays_above_individual_results_and_unqualified_actions_stay
             }]),
             verification_pass_reports: None,
             blockers: vec!["Two independent captures are required".into()],
+            blocker_codes: vec![],
             session: None,
             profile: None,
             applied_snapshot: None,
@@ -819,12 +820,7 @@ fn alignment_session_stays_above_individual_results_and_unqualified_actions_stay
             .unwrap()
             .1;
         assert!(alignment.bottom() < lower.top());
-        find_speaker_text(
-            &mut app,
-            &ctx,
-            size,
-            "Correction proposal blocked by session issues",
-        );
+        find_speaker_text(&mut app, &ctx, size, "Correction proposal blocked:");
         find_speaker_text(&mut app, &ctx, size, "Nothing to apply.");
         assert!(
             !labels(&frame(&mut app, &ctx, vec![], size))
@@ -949,7 +945,7 @@ fn alignment_chart_and_cards_show_values_while_lab_keeps_raw_evidence_and_result
             } else {
                 for value in [
                     "Excluded from correction",
-                    "Weak target signal · diagnostic estimate only",
+                    "integrated level-band signal/noise is 8.0 dB",
                     "Long delay:",
                 ] {
                     find_speaker_text(&mut app, &ctx, size, value);
@@ -1358,10 +1354,13 @@ fn loaded_alignment_pass_opens_its_latest_analysis_and_labels_the_original_verdi
             quality: vec![],
             qualified: None,
             reason: None,
+            reason_code: None,
+            include_anyway: false,
         }],
         pass_reports: None,
         verification_pass_reports: None,
         blockers: vec!["Diagnostic review only".into()],
+        blocker_codes: vec![],
         session: None,
         profile: None,
         applied_snapshot: None,
@@ -1838,6 +1837,8 @@ fn partial_alignment_names_exclusions_and_displays_only_eligible_targets() {
             reason: Some(
                 "invalid calibration data: invalid calibration data: clipped recording".into(),
             ),
+            reason_code: None,
+            include_anyway: false,
         });
         controller.state.alignment = Some(alignment);
         let mut app = CompanionApp::preview(&ctx, controller);
@@ -1882,6 +1883,57 @@ fn partial_alignment_names_exclusions_and_displays_only_eligible_targets() {
         find_speaker_text(&mut app, &ctx, size, "Turn on Lab to update the proposal");
         app.lab = true;
         find_speaker_text(&mut app, &ctx, size, "Update correction proposal");
+        assert_eq!(starts.load(Ordering::Relaxed), 0);
+    }
+}
+
+#[test]
+fn a_late_speaker_is_set_aside_with_a_reason_and_can_be_included_from_the_chart() {
+    for size in [Vec2::new(850.0, 640.0), Vec2::new(1160.0, 800.0)] {
+        let ctx = egui::Context::default();
+        let dir = tempfile::tempdir().unwrap();
+        let (mut controller, starts) = support::ready();
+        controller.state.alignment = Some(support::late_device_alignment(&controller, dir.path()));
+        let mut app = CompanionApp::preview(&ctx, controller);
+        for _ in 0..3 {
+            frame(&mut app, &ctx, vec![], size);
+        }
+        for value in [
+            "No sound picked up. Wired and unmuted?",
+            "Set aside: 60 ms later than the others.",
+            "Set aside: Surround right arrives 60 ms later than the others.",
+            "set aside · unchanged",
+            "(1 set aside)",
+        ] {
+            find_speaker_text(&mut app, &ctx, size, value);
+        }
+        app.lab = true;
+        find_speaker_text(&mut app, &ctx, size, "Set aside (1) · unchanged");
+        find_speaker_text(&mut app, &ctx, size, "Repeatable · set aside");
+        app.lab = false;
+        let link = find_speaker_text(&mut app, &ctx, size, "Align to Surround right anyway");
+        click(&mut app, &ctx, link.center(), size);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.controller.busy() {
+            frame(&mut app, &ctx, vec![], size);
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        frame(&mut app, &ctx, vec![], size);
+        assert_eq!(app.controller.state.error, None);
+        let alignment = app.controller.state.alignment.as_ref().unwrap();
+        assert!(alignment.rows[4].include_anyway && alignment.rows[4].included());
+        assert_eq!(
+            alignment.corrected_output_ids(),
+            ["Front left", "Front right", "Center", "Surround right"]
+        );
+        find_speaker_text(
+            &mut app,
+            &ctx,
+            size,
+            "Correction proposal ready for 4 / 5 speakers · 1 excluded",
+        );
+        find_speaker_text(&mut app, &ctx, size, "Set Surround right aside again");
         assert_eq!(starts.load(Ordering::Relaxed), 0);
     }
 }

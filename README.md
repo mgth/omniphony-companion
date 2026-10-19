@@ -69,9 +69,16 @@ The Rust/egui desktop window lets you:
   Apply adds) and a Level lane (500–2000 Hz level relative to the quietest reliable
   speaker, with the corrected level overlaid and the gain Apply sets). Speakers that
   could not be measured reliably get a red or amber hollow marker and a short reason,
-  such as "No sound picked up. Wired and unmuted?"; the raw reason stays in the
-  tooltip. Arrivals more than 20 ms from the reference are drawn in a separate bracket
+  such as "No sound picked up. Wired and unmuted?"; the technical reason stays in the
+  tooltip. Reasons are typed codes from the service, never guessed from text.
+  Arrivals more than 20 ms from the reference are drawn in a separate bracket
   with their offset.
+- Repeatable speakers more than 20 ms from the others' median arrival (for example a
+  second output device at +177 ms) are **set aside** by default: they keep their
+  settings, are drawn in blue ("Set aside: 177 ms later than the others.") and the
+  others are aligned without them. **Align to … anyway** below the chart includes one
+  (every other speaker is then delayed to match it), **Set … aside again** undoes it;
+  the choice is saved in the session. See `docs/gain-delay-alignment.md`.
 - Below the chart, compact speaker cards show one quality dot (the weakest grade),
   the measured ms/dB and the planned delay/gain, or the one-line reason when a
   speaker is excluded. Cards keep a fixed size and place; capture progress stays
@@ -169,6 +176,7 @@ cargo run --locked -p companion-ui --example preview -- --batch-progress
 cargo run --locked -p companion-ui --example preview -- --alignment
 cargo run --locked -p companion-ui --example preview -- --alignment --lab
 cargo run --locked -p companion-ui --example preview -- --blocked-alignment
+cargo run --locked -p companion-ui --example preview -- --late-device
 cargo run --locked -p companion-ui --example preview -- --frequency-response
 cargo run --locked -p companion-ui --example preview -- --energy-arrival
 cargo run --locked -p companion-ui --example preview -- --group-delay
@@ -179,7 +187,8 @@ cargo run --locked -p companion-ui --example preview -- --tone-burst
 This fixture window is labelled **UI PREVIEW · NO AUDIO**. Its speakers and
 microphone are synthetic; clicking Measure does not open hardware or create
 recordings. `--alignment` shows the chart with an invented five-speaker alignment
-(three repeatable speakers, one silent, one noisy at a long delay); `--lab` starts
+(three repeatable speakers, one silent, one noisy at a long delay); `--late-device`
+shows a repeatable speaker 60 ms late, set aside, with its include link; `--lab` starts
 with Lab on.
 
 ![Alignment chart, speaker cards and action bar with synthetic preview data](docs/images/companion-alignment.png)

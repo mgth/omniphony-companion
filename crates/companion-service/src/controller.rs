@@ -977,6 +977,24 @@ impl Controller {
         });
     }
 
+    /// Align to a set-aside speaker anyway (or set it aside again) from the saved passes.
+    pub fn include_anyway(&mut self, output_id: &str, include: bool) {
+        if self.busy() {
+            return;
+        }
+        let Some(alignment) = self.state.alignment.clone() else {
+            return;
+        };
+        self.state.job = Some(Job::UpdateProposal);
+        self.state.error = None;
+        let (sender, output_id) = (self.sender.clone(), output_id.to_owned());
+        std::thread::spawn(move || {
+            let result =
+                catch_job(|| crate::alignment::include_anyway(&alignment, &output_id, include));
+            let _ = sender.send(Event::ProposalUpdated(Box::new(result)));
+        });
+    }
+
     pub fn reanalyze_alignment(&mut self) {
         if self.busy() {
             return;

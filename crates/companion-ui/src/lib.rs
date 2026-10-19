@@ -853,7 +853,8 @@ impl CompanionApp {
             self.stage_height = card()
                 .show(ui, |ui| {
                     ui.set_min_width(ui.available_width());
-                    stage = alignment_view::stage(ui, &summary, self.selected_speaker.as_deref());
+                    stage =
+                        alignment_view::stage(ui, &summary, self.selected_speaker.as_deref(), busy);
                 })
                 .response
                 .rect
@@ -997,6 +998,9 @@ impl CompanionApp {
             self.show_manual = true;
             self.open_manual = true;
             self.select_speaker(&id);
+        }
+        if let Some((id, include)) = stage.include {
+            self.controller.include_anyway(&id, include);
         }
         if let Some(action) = alignment_action {
             if action == "reanalyze" {
