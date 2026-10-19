@@ -107,6 +107,7 @@ impl Backend for UiBench {
                 .flatten();
             update(manual_level::Reading {
                 phase,
+                output_gain_applied: Some(request.with_output_gain),
                 level,
                 remaining_seconds: manual_level::RUN_SECONDS - elapsed as u32,
                 captured_at: Instant::now(),

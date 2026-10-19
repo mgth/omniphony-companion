@@ -71,6 +71,7 @@ impl Backend for Bench {
     ) -> Result<(), String> {
         update(companion_service::manual_level::Reading {
             phase: companion_service::manual_level::Phase::Listening,
+            output_gain_applied: Some(false),
             level: Some(calibration_core::manual_level::estimate(0.0101, 0.0001, -2.0).unwrap()),
             remaining_seconds: 55,
             captured_at: Instant::now(),
@@ -521,7 +522,7 @@ fn offline_review_does_not_require_a_connection_or_trigger_capture() {
 fn manual_levels_are_cancellable_keep_reference_identity_and_never_capture_takes() {
     let b = Arc::new(Bench::new());
     let mut c = ready(b.clone());
-    c.start_manual_levels("Left", -30.0);
+    c.start_manual_levels("Left", -30.0, false);
     assert!(c.cancellable());
     let deadline = Instant::now() + Duration::from_secs(1);
     while c.state.manual_run.as_ref().unwrap().reading.is_none() {
@@ -561,7 +562,7 @@ fn manual_levels_are_cancellable_keep_reference_identity_and_never_capture_takes
     assert!(c.state.takes.is_empty());
     assert!(c.state.analyses.is_empty());
     b.finished.store(false, Ordering::Relaxed);
-    c.start_manual_levels("Right", -30.0);
+    c.start_manual_levels("Right", -30.0, false);
     assert!(c.busy());
     drop(c);
     let deadline = Instant::now() + Duration::from_secs(1);
@@ -575,7 +576,7 @@ fn manual_levels_are_cancellable_keep_reference_identity_and_never_capture_takes
 #[test]
 fn manual_levels_reject_monitor_bass_only_muted_missing_or_excessive_drive() {
     let mut c = ready(Arc::new(Bench::new()));
-    c.start_manual_levels("Sub", -30.0);
+    c.start_manual_levels("Sub", -30.0, false);
     assert!(!c.busy());
     c.state.snapshot.as_mut().unwrap().outputs[2].muted = false;
     assert!(c.manual_context(-30.0).unwrap().output("Sub").is_err());
@@ -583,8 +584,13 @@ fn manual_levels_reject_monitor_bass_only_muted_missing_or_excessive_drive() {
     assert!(c.manual_context(-30.0).is_err());
     c.state.inputs[0].is_monitor = false;
     assert!(c.manual_context(f32::NAN).is_err());
+    // +20 dB of output gain exceeds the ceiling only for noise played through it.
     c.state.snapshot.as_mut().unwrap().outputs[0].gain_db = 20.0;
-    assert!(c.manual_context(-12.0).is_err());
+    let context = c.manual_context(-12.0).unwrap();
+    assert!(context.playable("Left", true).is_err());
+    assert!(context.playable("Left", false).is_ok());
+    c.start_manual_levels("Left", -12.0, true);
+    assert!(!c.busy());
     c.disconnect();
     assert!(c.manual_context(-30.0).is_err());
 }

@@ -33,8 +33,9 @@ The Rust/egui desktop window lets you:
 - Match active speakers' physical volume: each speaker card's **▶ Noise** button
   plays finite pink noise on it, and the **Speaker levels** band below the cards
   shows a live microphone meter and the signed difference from the reference
-  speaker, with the test level and reference controls under it. Digital gains
-  remain unchanged. The band also opens from the **Match knobs** hint (shown when
+  speaker, with the test level and reference controls under it. The noise skips
+  each speaker's gain in Omniphony by default; a switch plays it through that
+  correction to check the corrected result. Digital gains remain unchanged. The band also opens from the **Match knobs** hint (shown when
   the quietest reliable speaker trails the others by more than 3 dB).
   See `docs/manual-speaker-levels.md`.
 - Start a measurement for one speaker, with progress inside its card and no layout shift.

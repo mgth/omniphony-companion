@@ -445,6 +445,7 @@ fn noise_progress(state: SignalState, frames: u64) -> NoiseProgress {
     let signal = LevelNoise {
         duration_seconds: 60,
         peak_dbfs: -30.0,
+        bypass_output_gain: false,
     };
     NoiseProgress {
         signal_id: 1,
@@ -593,7 +594,7 @@ fn discovery_reads_output_positions_and_refuses_impossible_ones() {
 fn an_older_renderer_is_discovered_again_in_its_version_without_positions() {
     let (endpoint, handle) = server(|mut stream| {
         let r = receive(&mut stream);
-        assert_eq!(r.version, 5);
+        assert_eq!(r.version, VERSION);
         assert!(matches!(r.command, Command::Discover {}));
         send_version(
             &mut stream,
@@ -624,12 +625,45 @@ fn an_older_renderer_is_discovered_again_in_its_version_without_positions() {
         send_version(&mut stream, 4, r.request_id, Reply::Ended {});
     });
     let mut c = Client::connect(endpoint, Duration::from_secs(1)).unwrap();
-    assert_eq!(c.protocol_version(), 5);
+    assert_eq!(c.protocol_version(), VERSION);
     let found = c.discover().unwrap();
     assert_eq!(c.protocol_version(), 4);
     assert!(found.outputs.iter().all(|o| o.azimuth_deg.is_none()));
     c.begin(&found).unwrap();
     c.end().unwrap();
+    handle.join().unwrap();
+}
+
+#[test]
+fn a_version_5_renderer_keeps_positions_but_cannot_skip_the_output_gain() {
+    let (endpoint, handle) = server(|mut stream| {
+        let r = receive(&mut stream);
+        assert_eq!(r.version, VERSION);
+        send_version(
+            &mut stream,
+            5,
+            r.request_id,
+            Reply::Error {
+                code: "unsupported_version".into(),
+                message: "unsupported measurement protocol version".into(),
+            },
+        );
+        let r = receive(&mut stream);
+        assert_eq!(r.version, 5);
+        send_version(
+            &mut stream,
+            5,
+            r.request_id,
+            Reply::Snapshot {
+                snapshot: snapshot(),
+            },
+        );
+    });
+    let mut c = Client::connect(endpoint, Duration::from_secs(1)).unwrap();
+    c.discover().unwrap();
+    assert_eq!(c.protocol_version(), 5);
+    // The manual level worker then plays the noise through the output gain.
+    assert!(c.protocol_version() < NOISE_GAINS_VERSION);
     handle.join().unwrap();
 }
 
@@ -649,7 +683,7 @@ fn a_version_refusal_outside_the_supported_range_poisons_the_connection() {
     });
     let mut c = Client::connect(endpoint, Duration::from_secs(1)).unwrap();
     assert!(matches!(c.discover(), Err(Error::Protocol(_))));
-    assert_eq!(c.protocol_version(), 5);
+    assert_eq!(c.protocol_version(), VERSION);
     assert!(c.discover().unwrap_err().to_string().contains("closed"));
     handle.join().unwrap();
 }

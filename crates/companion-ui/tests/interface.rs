@@ -1774,9 +1774,11 @@ fn manual_level_panel_saves_a_fresh_reference_shows_direction_and_stops() {
         request: Request {
             context: context.clone(),
             output_id: "Front left".into(),
+            with_output_gain: false,
         },
         reading: Some(Reading {
             phase: Phase::Listening,
+            output_gain_applied: Some(false),
             level: Some(reference_level),
             remaining_seconds: 55,
             captured_at: Instant::now(),
@@ -1810,6 +1812,35 @@ fn manual_level_panel_saves_a_fresh_reference_shows_direction_and_stops() {
             .any(|(s, _)| s == "Raise this speaker’s physical volume")
     );
     assert!(text.iter().any(|(s, _)| s == "Noise · -3.0 dB"));
+    assert!(!text.iter().any(|(s, _)| s.contains("This Omniphony build")));
+    // Check mode compares the speakers as corrected: Front right's -2.0 dB gain
+    // against Front left's -1.5 dB adds -0.5 dB.
+    let run = app.controller.state.manual_run.as_mut().unwrap();
+    run.request.with_output_gain = true;
+    run.reading.as_mut().unwrap().output_gain_applied = Some(true);
+    run.reading.as_mut().unwrap().captured_at = Instant::now();
+    let text = labels(&frame(&mut app, &ctx, vec![], size));
+    assert!(
+        text.iter()
+            .any(|(s, _)| s.contains("-3.5 dB relative to Front left, after correction"))
+    );
+    assert!(
+        text.iter()
+            .any(|(s, _)| s == "Still quieter after correction")
+    );
+    // An older renderer that cannot skip the gain is named, outside check mode.
+    let run = app.controller.state.manual_run.as_mut().unwrap();
+    run.request.with_output_gain = false;
+    run.reading.as_mut().unwrap().captured_at = Instant::now();
+    let text = labels(&frame(&mut app, &ctx, vec![], size));
+    assert!(
+        text.iter()
+            .any(|(s, _)| s.contains("This Omniphony build plays the noise through"))
+    );
+    assert!(
+        text.iter()
+            .any(|(s, _)| s.contains("-3.0 dB relative to Front left"))
+    );
     let stop = text.into_iter().find(|(s, _)| s == "■ Stop").unwrap().1;
     click(&mut app, &ctx, stop.center(), size);
     assert!(app.controller.state.stopping);
@@ -1876,16 +1907,63 @@ fn speaker_cards_play_noise_switch_speakers_and_the_band_below_reads_the_level()
     click(&mut app, &ctx, save.center(), size);
     assert!(app.controller.manual_reference(-30.0).is_some());
 
-    // Noise on another card stops this one, then plays there.
+    assert!(
+        !app.controller
+            .state
+            .manual_run
+            .as_ref()
+            .unwrap()
+            .request
+            .with_output_gain
+    );
+
+    // Noise on another card stops this one, then plays there; the check switch
+    // plays it through Omniphony's gain.
     let output = frame(&mut app, &ctx, vec![], size);
+    let check = labels(&output)
+        .into_iter()
+        .find(|(s, _)| s == "Check with Omniphony’s level correction")
+        .unwrap()
+        .1;
     let center = noise_button(&output, "Center", "▶ Noise").unwrap();
     click(&mut app, &ctx, center.center(), size);
     frames_until(&mut app, &ctx, size, "the switch to Center", |app| {
         playing(app, "Center")
     });
+    // Disabled while noise plays.
+    click(&mut app, &ctx, check.center(), size);
+    assert!(
+        !app.controller
+            .state
+            .manual_run
+            .as_ref()
+            .unwrap()
+            .request
+            .with_output_gain
+    );
     let output = frame(&mut app, &ctx, vec![], size);
     assert!(noise_button(&output, "Front left", "▶ Noise").is_some());
     let stop = noise_button(&output, "Center", "■ Stop").unwrap();
+    click(&mut app, &ctx, stop.center(), size);
+    finish_worker(&mut app, &ctx, size);
+
+    // Once stopped, the check switch makes the next noise play through the gain.
+    let check = find_speaker_text(
+        &mut app,
+        &ctx,
+        size,
+        "Check with Omniphony’s level correction",
+    );
+    click(&mut app, &ctx, check.center(), size);
+    scroll_speakers(&mut app, &ctx, size, 10000.0);
+    let output = frame(&mut app, &ctx, vec![], size);
+    let left = noise_button(&output, "Front left", "▶ Noise").unwrap();
+    click(&mut app, &ctx, left.center(), size);
+    assert!(playing(&app, "Front left"));
+    let run = app.controller.state.manual_run.as_ref().unwrap();
+    assert!(run.request.with_output_gain);
+    let output = frame(&mut app, &ctx, vec![], size);
+    let stop = noise_button(&output, "Front left", "■ Stop").unwrap();
     click(&mut app, &ctx, stop.center(), size);
     finish_worker(&mut app, &ctx, size);
 
@@ -1894,7 +1972,7 @@ fn speaker_cards_play_noise_switch_speakers_and_the_band_below_reads_the_level()
     let text = labels(&output);
     assert!(
         text.iter()
-            .any(|(s, _)| s.contains("Center · noise stopped"))
+            .any(|(s, _)| s.contains("Front left · noise stopped"))
     );
     let hide = text.into_iter().find(|(s, _)| s == "Hide").unwrap().1;
     click(&mut app, &ctx, hide.center(), size);

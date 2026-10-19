@@ -16,6 +16,7 @@ impl Meter {
         LevelNoise {
             duration_seconds: 5,
             peak_dbfs: -30.0,
+            bypass_output_gain: false,
         }
         .validate(rate)?;
         let rate_f = f64::from(rate);

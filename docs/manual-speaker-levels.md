@@ -40,8 +40,24 @@ reference levels and active runs are intentionally not restored after restart.
 The renderer emits one repeatable second of periodic pink noise, looped without
 intervening gaps, with energy only in 500–2000 Hz. The microphone worker applies
 fourth-order Butterworth high/low passes and calculates rolling one-second
-power. It subtracts the quiet background power and removes the known current
-master/output digital gains for the comparison. Those settings remain unchanged.
+power. It subtracts the quiet background power and removes the digital gains the
+noise went through (the master gain, plus the output's gain when it was applied),
+so the comparison reflects the physical volume controls. Those settings remain
+unchanged.
+
+## With or without Omniphony's level correction
+
+By default the noise skips each speaker's own gain in Omniphony (measurement
+protocol 6): every speaker plays at the same level, as if its correction were
+0 dB, and you match the physical volume controls alone. The master gain still
+applies. **Check with Omniphony's level correction**, under the meter, plays the
+noise through that gain instead, and the difference then adds back each side's
+gain: 0 dB means volume controls and correction together match the reference,
+which checks the end result. The switch is off at every start and can only change
+while no noise plays; a saved reference stays valid in both modes.
+
+An Omniphony build older than protocol 6 always plays the noise through the
+output's gain. The meter still removes it, and the band says so in a warning.
 The displayed microphone band RMS is dBFS; the signed difference is a relative
 comparison in dB. Neither is calibrated acoustic SPL.
 
