@@ -343,7 +343,7 @@ explicit `stop` and `end` operations. A host that does not render expires the
 signal instead of reporting completion. Render progress is not a DAC timestamp
 or an acoustic timing reference.
 
-See the [wire protocol](https://github.com/mgth/Omniphony/blob/1d1a3543e951172a6f11472344ca3cb7bd76979d/docs/measurement-protocol.md)
+See the [wire protocol](https://github.com/mgth/Omniphony/blob/41a4afc485da23c255d59057eb526a7122a71fb6/docs/measurement-protocol.md)
 for limits, identifiers and the hardware-free `measurement_fixture` bench.
 
 ## Single-microphone acquisition
