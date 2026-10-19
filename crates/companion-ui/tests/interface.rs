@@ -2354,7 +2354,7 @@ fn a_card_measures_its_speaker_again_into_the_alignment_or_takes_one_diagnostic_
         click(&mut app, &ctx, take.center(), size);
         finish_worker(&mut app, &ctx, size);
         assert_eq!(starts.load(Ordering::Relaxed), 1);
-        // An applied session is not measured into: Measure is the plain take again.
+        // An applied session is not measured into: the choice stays, greyed, and says why.
         let live = app.controller.state.snapshot.clone().unwrap();
         app.controller
             .state
@@ -2362,13 +2362,34 @@ fn a_card_measures_its_speaker_again_into_the_alignment_or_takes_one_diagnostic_
             .as_mut()
             .unwrap()
             .applied_snapshot = Some(live);
+        assert!(
+            app.controller
+                .can_remeasure("Front left")
+                .unwrap_err()
+                .starts_with("Undo the applied alignment first")
+        );
         let measure = find_speaker_text(&mut app, &ctx, size, "Measure");
         click(&mut app, &ctx, measure.center(), size);
+        let again = labels(&frame(&mut app, &ctx, vec![], size))
+            .into_iter()
+            .find(|(s, _)| s == "Measure again into the session")
+            .expect("greyed session choice")
+            .1;
+        click(&mut app, &ctx, again.center(), size);
         assert!(
-            !labels(&frame(&mut app, &ctx, vec![], size))
-                .iter()
-                .any(|(s, _)| s == "Measure again into the session")
+            app.controller.state.job.is_none(),
+            "{:?}",
+            app.controller.state.job
         );
+        // A click on the greyed choice only closes the menu.
+        let measure = find_speaker_text(&mut app, &ctx, size, "Measure");
+        click(&mut app, &ctx, measure.center(), size);
+        let take = labels(&frame(&mut app, &ctx, vec![], size))
+            .into_iter()
+            .find(|(s, _)| s == "One diagnostic take")
+            .expect("diagnostic choice")
+            .1;
+        click(&mut app, &ctx, take.center(), size);
         finish_worker(&mut app, &ctx, size);
         assert_eq!(starts.load(Ordering::Relaxed), 2);
     }

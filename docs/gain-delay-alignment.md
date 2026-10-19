@@ -96,7 +96,8 @@ repeats in `alignment-state.json`; the other rows, the pass reports and the plan
 unchanged, the proposal is rebuilt and validated as **Update correction proposal**
 does, and the new takes live in `pass-1-again-*` / `pass-2-again-*` directories of the
 session. A clipped take is measured again at a lower gain as in a full alignment. The
-action is refused for applied or uncertain sessions, changed settings or a renderer
+action is refused, and its card choice greyed with the reason, for applied or
+uncertain sessions (undo first), changed settings, another renderer or a renderer
 whose settings differ; a stopped or failed re-measure keeps the previous takes.
 
 **Reanalyze saved passes** recomputes the two passes from retained WAV files and
