@@ -29,6 +29,11 @@ pub struct Client {
     progress: Option<Progress>,
     closed: bool,
     noise_progress: Option<protocol::NoiseProgress>,
+    /// Protocol version of this connection: [`protocol::VERSION`], or an older
+    /// supported one an older renderer asked for during discovery.
+    version: u32,
+    /// The older version a renderer named when it refused this one.
+    offered_version: Option<u32>,
 }
 
 impl Client {
@@ -49,7 +54,14 @@ impl Client {
             progress: None,
             closed: false,
             noise_progress: None,
+            version: protocol::VERSION,
+            offered_version: None,
         })
+    }
+
+    /// The protocol version this connection speaks. Output positions need 5.
+    pub fn protocol_version(&self) -> u32 {
+        self.version
     }
 
     fn fail(&mut self, message: &str) -> Error {
@@ -71,7 +83,7 @@ impl Client {
             .ok_or_else(|| self.fail("request IDs exhausted"))?;
         let result = (|| {
             let json = serde_json::to_string(&protocol::Request {
-                version: protocol::VERSION,
+                version: self.version,
                 request_id,
                 command,
             })
@@ -109,7 +121,21 @@ impl Client {
             };
             let response: protocol::Response =
                 serde_json::from_str(json).map_err(|e| Error::Protocol(e.to_string()))?;
-            if response.version != protocol::VERSION || response.request_id != request_id {
+            // An older renderer refuses this version in its own: a consistent
+            // reply that discovery may retry in that version.
+            if response.request_id == request_id
+                && response.version < self.version
+                && protocol::supported(response.version)
+                && let protocol::Reply::Error { code, message } = &response.reply
+                && code == "unsupported_version"
+            {
+                self.offered_version = Some(response.version);
+                return Err(Error::Server {
+                    code: code.clone(),
+                    message: message.clone(),
+                });
+            }
+            if response.version != self.version || response.request_id != request_id {
                 return Err(Error::Protocol(
                     "reply version or request ID does not match".into(),
                 ));
@@ -129,8 +155,19 @@ impl Client {
         result
     }
 
+    /// Discover in the current protocol version, or once in the older version
+    /// an older renderer asks for, whose snapshots carry no output positions.
     pub fn discover(&mut self) -> Result<Snapshot> {
-        match self.exchange(protocol::Command::Discover {})? {
+        let mut reply = self.exchange(protocol::Command::Discover {});
+        if let Err(Error::Server { code, .. }) = &reply
+            && code == "unsupported_version"
+            && self.session.is_none()
+            && let Some(version) = self.offered_version.take()
+        {
+            self.version = version;
+            reply = self.exchange(protocol::Command::Discover {});
+        }
+        match reply? {
             protocol::Reply::Snapshot { snapshot } => {
                 if let Err(e) = validate_snapshot(&snapshot) {
                     return Err(self.fail(&e));
@@ -481,6 +518,9 @@ impl Read for DeadlineReader<'_> {
     }
 }
 
+/// Farther than any room: a declared distance beyond it is not a speaker position.
+const MAX_DISTANCE_M: f32 = 1_000.0;
+
 fn validate_snapshot(snapshot: &Snapshot) -> std::result::Result<(), String> {
     let mut names = std::collections::HashSet::new();
     if snapshot.instance_id.is_empty()
@@ -508,6 +548,15 @@ fn validate_snapshot(snapshot: &Snapshot) -> std::result::Result<(), String> {
             || output
                 .freq_high_hz
                 .is_some_and(|v| !v.is_finite() || v <= 0.0)
+            || output
+                .azimuth_deg
+                .is_some_and(|v| !(-180.0..=180.0).contains(&v))
+            || output
+                .elevation_deg
+                .is_some_and(|v| !(-90.0..=90.0).contains(&v))
+            || output
+                .distance_m
+                .is_some_and(|v| !(0.0..=MAX_DISTANCE_M).contains(&v))
         {
             return Err("invalid output in renderer snapshot".into());
         }

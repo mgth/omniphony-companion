@@ -14,12 +14,12 @@ path = "src/main.rs"
 [dependencies]
 calibration-core.workspace = true
 companion-service = { path = "../companion-service" }
+omniphony-adapter.workspace = true
 eframe = { version = "0.32.3", default-features = false, features = ["default_fonts", "glow", "x11", "wayland", "persistence"] }
 
 [dev-dependencies]
 serde_json.workspace = true
 measurement-capture = { path = "../measurement-capture" }
-omniphony-adapter.workspace = true
 tempfile = "3.23"
 
 [lints]

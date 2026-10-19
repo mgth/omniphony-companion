@@ -55,6 +55,9 @@ fn snapshot() -> Snapshot {
                 muted: i == 2,
                 freq_low_hz: None,
                 freq_high_hz: (i == 2).then_some(120.0),
+                azimuth_deg: None,
+                elevation_deg: None,
+                distance_m: None,
             })
             .collect(),
     }

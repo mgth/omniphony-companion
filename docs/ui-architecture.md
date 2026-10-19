@@ -160,6 +160,37 @@ Verification uses the original settings and fresh repeated captures, clears old
 verification success, and retains unresolved results. Configuration persistence
 remains an explicit Studio action.
 
+## Room map
+
+The room map is a painter-only view in `companion-ui/src/room_map.rs`. It reads the
+optional `azimuth_deg`, `elevation_deg` and `distance_m` of each discovered output
+(measurement protocol 5): Omniphony's declared layout geometry, room-warped and at
+the layout's scale, never measured evidence. The adapter validates their ranges with
+the rest of the snapshot and falls back to protocol 4 when an older renderer refuses
+5; outputs without an azimuth go to a "Not placed" strip, and no map is drawn when no
+output is placed. A missing distance puts the chip on a dashed ring at the median known
+distance (three quarters of the radius when none is known).
+
+Chip placement is a pure function of positions, names and the map size: the listener
+sits in the centre, front up, the radius follows the 3D distance (kept clear of the
+listener) and a deterministic minimal-translation pass separates overlapping chips,
+such as a height speaker sharing its bed speaker's azimuth. Chips reuse the card's
+quality dot, selection colours and click-to-select. Capture state only changes how a
+chip is painted: the speaker playing pulses (the existing busy repaint cadence drives
+it). Set-aside and excluded speakers are dimmed. Set aside means unchecked, muted,
+outside the sweep band, or set aside by the alignment policy (a far arrival not
+included anyway); global setup problems such as a missing microphone do not dim
+speakers.
+
+The map card takes a right-hand column beside the speaker cards; the chart joins the
+left column only when it keeps at least 700 points, so its far-arrival bracket stays
+readable, and otherwise spans the full width above. Its side follows the card grid
+beside it (150–220 points), so it does not push the panels below the cards. A window
+too narrow for two card columns beside the map shows it below the cards instead.
+None of these choices depend on capture state, so starting a capture never moves the
+chart, the map or the cards; interface tests check this, and that the cards keep
+their place with and without positions.
+
 Workspace restoration also belongs to the service: a background controller job
 loads retained display reports and the last alignment, then enumerates inputs and
 refreshes the renderer. The UI restores its selected result and graph preferences;

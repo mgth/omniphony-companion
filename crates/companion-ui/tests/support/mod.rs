@@ -57,6 +57,11 @@ impl Backend for UiBench {
                 muted: index == 5,
                 freq_low_hz: Some(if index == 5 { 20.0 } else { 80.0 }),
                 freq_high_hz: Some(if index == 5 { 120.0 } else { 20000.0 }),
+                // A synthetic room: surrounds mounted above the ear, a floor
+                // subwoofer whose distance the layout does not state.
+                azimuth_deg: Some([-30.0, 30.0, 0.0, -110.0, 110.0, 25.0][index]),
+                elevation_deg: Some([0.0, 0.0, 0.0, 15.0, 15.0, -20.0][index]),
+                distance_m: [Some(2.6), Some(2.6), Some(2.4), Some(1.9), Some(2.1), None][index],
             })
             .collect(),
         })
