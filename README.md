@@ -293,8 +293,12 @@ never read or write personal settings. See [the application boundaries](docs/ui-
 The session folder retains `alignment-plan.json`, `alignment-state.json`, both raw
 capture passes and verification captures. Use **Load alignment session** in the
 Lab saved-take section to reopen it. Loading never emits audio or writes renderer
-settings. Restarting/reconfiguring the renderer invalidates an old application
-revision. An uncertain application must be inspected before further changes.
+settings. A session is tied to the speakers and their settings, not to the port:
+after a new port or a restart, a renderer with the original settings shows the
+session as not applied, and one with the corrected settings as applied, ready to
+undo. A renderer whose settings differ from both cannot apply or undo it, and a new
+alignment can start. An uncertain application must be inspected before further
+changes.
 
 No subwoofer alignment, EQ or independent-driver correction is enabled. A repeatable
 reflection can still resemble a direct arrival; the user must keep an unobstructed

@@ -979,13 +979,7 @@ impl CompanionApp {
             .as_ref()
             .or(self.controller.state.saved_snapshot.as_ref())
             .map(|s| s.outputs.clone());
-        let revision = self
-            .controller
-            .state
-            .snapshot
-            .as_ref()
-            .map(|s| s.revision.clone());
-        let revision = revision.as_deref();
+        let live_state = self.controller.alignment_live_state();
         let busy = self.controller.busy();
         let mut stage = alignment_view::StageResponse::default();
         let mut cards: Vec<Option<alignment_view::Card>> = Vec::new();
@@ -1165,7 +1159,7 @@ impl CompanionApp {
                 alignment_action = alignment_view::action_bar(
                     ui,
                     alignment,
-                    alignment_view::live(alignment, revision),
+                    alignment_view::live(alignment, live_state),
                     busy,
                     matches!(self.controller.state.job, Some(Job::UpdateProposal)),
                 );
@@ -1173,8 +1167,8 @@ impl CompanionApp {
             if self.lab {
                 ui.add_space(10.0);
                 let summary = alignment_view::Summary::new(alignment);
-                let revision_changed =
-                    revision.is_some() && !alignment_view::live(alignment, revision);
+                let revision_changed = self.controller.state.snapshot.is_some()
+                    && !alignment_view::live(alignment, live_state);
                 let older = |row: &companion_service::alignment::Row| {
                     alignment.settings != self.controller.settings
                         || revision_changed
