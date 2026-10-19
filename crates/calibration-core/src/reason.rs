@@ -13,6 +13,10 @@ pub const ARRIVAL_REPEAT_LIMIT_MS: f64 = 0.15;
 pub const LEVEL_REPEAT_LIMIT_DB: f64 = 0.5;
 /// Repeatable arrivals further than this from the group are set aside by default.
 pub const FAR_ARRIVAL_MS: f64 = 20.0;
+/// Clipping overdrive estimates saturate here (`measurement_capture::clipping`).
+pub const MAX_OVERDRIVE_DB: f64 = 20.0;
+/// Headroom added to a clipping overdrive in the suggested gain reduction.
+pub const CLIPPING_MARGIN_DB: f64 = 3.0;
 
 /// Which signal/noise floor was not met.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,7 +55,13 @@ pub enum ExclusionReason {
     NoSignal,
     /// The reference/target/reference sweep sequence was not found in the recording.
     MissingTimingReferences,
-    Clipped,
+    Clipped {
+        /// How far the capture overshot full scale, in dB, saturating at
+        /// [`MAX_OVERDRIVE_DB`]. Absent when unknown: older text, or no measurable
+        /// plateau along the sweep.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        overdrive_db: Option<f64>,
+    },
     LowSnr {
         band: SnrBand,
         /// Absent when classified from older text that did not state the value.
@@ -105,7 +115,10 @@ impl ExclusionReason {
         {
             Self::MissingTimingReferences
         } else if has("clip") {
-            Self::Clipped
+            Self::Clipped {
+                overdrive_db: number_before(&lower, " db over full scale")
+                    .map(|db| db.clamp(0.0, MAX_OVERDRIVE_DB)),
+            }
         } else if has("signal/noise") || has("weak target") {
             Self::LowSnr {
                 band: if has("excited-band") {
@@ -157,7 +170,9 @@ impl ExclusionReason {
 
     pub fn severity(&self) -> Severity {
         match self {
-            Self::NoSignal | Self::MissingTimingReferences | Self::Clipped => Severity::Severe,
+            Self::NoSignal | Self::MissingTimingReferences | Self::Clipped { .. } => {
+                Severity::Severe
+            }
             Self::FarArrival { .. } => Severity::SetAside,
             _ => Severity::Warning,
         }
@@ -171,7 +186,25 @@ impl ExclusionReason {
         match self {
             Self::NoSignal => "Microphone silent. Check the input and its power.".into(),
             Self::MissingTimingReferences => "No sound picked up. Wired and unmuted?".into(),
-            Self::Clipped => "Clipped. Lower the mic gain or test level.".into(),
+            Self::Clipped { overdrive_db: None } => {
+                "Clipped. Lower the mic gain or test level.".into()
+            }
+            Self::Clipped {
+                overdrive_db: Some(db),
+            } => format!(
+                "Clipped by {}. Lower the mic gain or test level by {}{:.0} dB.",
+                if *db >= MAX_OVERDRIVE_DB {
+                    format!("more than {MAX_OVERDRIVE_DB:.0} dB")
+                } else {
+                    format!("about {:.0} dB", db.max(1.0))
+                },
+                if *db >= MAX_OVERDRIVE_DB {
+                    "at least "
+                } else {
+                    ""
+                },
+                (db + CLIPPING_MARGIN_DB).ceil()
+            ),
             Self::LowSnr { .. } => "Too noisy to trust.".into(),
             Self::UnstableReference => {
                 "Reference speaker level drifted. Keep the mic gain fixed.".into()
@@ -207,7 +240,16 @@ impl fmt::Display for ExclusionReason {
             Self::MissingTimingReferences => {
                 write!(f, "three reliable timing references were not found")
             }
-            Self::Clipped => write!(f, "clipped recording"),
+            Self::Clipped { overdrive_db: None } => write!(f, "clipped recording"),
+            Self::Clipped {
+                overdrive_db: Some(db),
+            } if *db >= MAX_OVERDRIVE_DB => write!(
+                f,
+                "clipped recording, more than {MAX_OVERDRIVE_DB:.0} dB over full scale"
+            ),
+            Self::Clipped {
+                overdrive_db: Some(db),
+            } => write!(f, "clipped recording, {db:.1} dB over full scale"),
             Self::LowSnr {
                 band: SnrBand::Acquisition,
                 db,
@@ -284,6 +326,15 @@ fn number_after(text: &str, prefix: &str) -> Option<f64> {
         .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-' || c == '+'))
         .unwrap_or(rest.len());
     rest[..end].parse().ok().filter(|v: &f64| v.is_finite())
+}
+
+/// The number written just before `suffix`, as in "about 4 dB over full scale".
+fn number_before(text: &str, suffix: &str) -> Option<f64> {
+    let head = &text[..text.find(suffix)?];
+    let start = head
+        .rfind(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .map_or(0, |i| i + 1);
+    head[start..].parse().ok().filter(|v: &f64| v.is_finite())
 }
 
 /// Why no proposal can be made for the session as a whole.
@@ -401,7 +452,19 @@ mod tests {
             ),
             (
                 "invalid calibration data: invalid calibration data: clipped recording",
-                R::Clipped,
+                R::Clipped { overdrive_db: None },
+            ),
+            (
+                "Clipping in the target speaker interval, about 4 dB over full scale: lower the input gain or test level by at least 7 dB and repeat.",
+                R::Clipped {
+                    overdrive_db: Some(4.0),
+                },
+            ),
+            (
+                "A reference interval clipped, more than 20 dB over full scale: lower the reference or input level by at least 23 dB and repeat.",
+                R::Clipped {
+                    overdrive_db: Some(MAX_OVERDRIVE_DB),
+                },
             ),
             (
                 "excited-band acquisition signal/noise below 15 dB; diagnostic result only",
@@ -469,7 +532,13 @@ mod tests {
         for code in [
             R::NoSignal,
             R::MissingTimingReferences,
-            R::Clipped,
+            R::Clipped { overdrive_db: None },
+            R::Clipped {
+                overdrive_db: Some(4.2),
+            },
+            R::Clipped {
+                overdrive_db: Some(MAX_OVERDRIVE_DB),
+            },
             R::LowSnr {
                 band: SnrBand::Acquisition,
                 db: Some(12.3),
@@ -498,7 +567,25 @@ mod tests {
         assert_eq!(far.severity(), Severity::SetAside);
         assert_eq!(far.human(), "Set aside: 177 ms later than the others.");
         assert!(far.to_string().contains("+176.9 ms"));
-        assert_eq!(R::Clipped.severity(), Severity::Severe);
+        let clipped = R::Clipped {
+            overdrive_db: Some(4.2),
+        };
+        assert_eq!(clipped.severity(), Severity::Severe);
+        assert_eq!(
+            clipped.human(),
+            "Clipped by about 4 dB. Lower the mic gain or test level by 8 dB."
+        );
+        assert_eq!(
+            R::Clipped {
+                overdrive_db: Some(MAX_OVERDRIVE_DB)
+            }
+            .human(),
+            "Clipped by more than 20 dB. Lower the mic gain or test level by at least 23 dB."
+        );
+        assert_eq!(
+            R::Clipped { overdrive_db: None }.human(),
+            "Clipped. Lower the mic gain or test level."
+        );
     }
 
     #[test]
@@ -512,8 +599,18 @@ mod tests {
             ExclusionReason::NoClearArrival {
                 detail: "arrival unresolved".into(),
             },
+            ExclusionReason::Clipped { overdrive_db: None },
+            ExclusionReason::Clipped {
+                overdrive_db: Some(4.2),
+            },
         ];
         let json = serde_json::to_string(&codes).unwrap();
+        // Unknown overdrive keeps the tag written before the value existed.
+        assert!(json.contains(r#"{"code":"clipped"},"#), "{json}");
+        assert!(
+            json.contains(r#"{"code":"clipped","overdrive_db":4.2}"#),
+            "{json}"
+        );
         assert!(
             json.contains(r#"{"code":"far_arrival","ms":176.9}"#),
             "{json}"

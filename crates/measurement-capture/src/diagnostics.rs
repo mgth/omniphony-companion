@@ -1,5 +1,6 @@
 //! Offline acquisition evidence. These approximate windows cannot establish
 //! arrival time, speaker identity, a hardware fault or a calibration gain.
+use crate::clipping::{self, CLIP_LEVEL};
 use crate::timing::{Peak, correlation_scores, peak_candidates, resample};
 use omniphony_osc_contract::measurement::{SETTLE_MS, Sweep};
 use serde::{Deserialize, Serialize};
@@ -38,6 +39,13 @@ pub struct SegmentDiagnostics {
     /// Includes 100 ms on either side of the body for delayed arrivals.
     pub peak_dbfs: f64,
     pub clipped_samples: usize,
+    /// How far the sweep overshoots full scale, in dB; saturates at
+    /// [`clipping::MAX_OVERDRIVE_DB`]. None without clipping along the sweep.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overdrive_db: Option<f64>,
+    /// The same, inside the 500–2000 Hz level band only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub band_overdrive_db: Option<f64>,
     pub normalized_correlation: f64,
     pub status: SegmentStatus,
 }
@@ -53,6 +61,17 @@ pub struct AcquisitionDiagnostics {
     pub segments: Option<[SegmentDiagnostics; 3]>,
     pub messages: Vec<String>,
     pub valid_for_correction: bool,
+}
+
+impl AcquisitionDiagnostics {
+    /// Largest clipping overdrive of the three intervals, in dB above full scale.
+    pub fn overdrive_db(&self) -> Option<f64> {
+        self.segments
+            .as_ref()?
+            .iter()
+            .filter_map(|s| s.overdrive_db)
+            .reduce(f64::max)
+    }
 }
 
 /// Clipped captures are deliberately inspectable, but never made usable here.
@@ -78,7 +97,7 @@ pub fn analyze(
         method: "reference-pair-acquisition-v3".into(),
         noise_rms_dbfs: db(noise),
         band_noise: None,
-        total_clipped_samples: samples.iter().filter(|x| x.abs() >= 0.999).count(),
+        total_clipped_samples: samples.iter().filter(|x| x.abs() >= CLIP_LEVEL).count(),
         reference_start_frames: None,
         segments: None,
         messages: Vec::new(),
@@ -127,7 +146,10 @@ pub fn analyze(
                 SegmentStatus::NoSweepDetected => report.messages.push("The reference sweeps were found, but no target sweep was detected above background. Check the selected speaker's output route, mute, amplifier and connection. Increasing the overall volume is not the first step.".into()),
                 SegmentStatus::LowSignalToNoise => report.messages.push("The target sweep has limited excited-band signal / noise. Results remain available with reduced confidence.".into()),
                 SegmentStatus::UncorrelatedSignal => report.messages.push("Sound is present during the target interval, but it does not reliably match the sweep. Check routing, interference and capture continuity.".into()),
-                SegmentStatus::Clipped => report.messages.push("Clipping occurs in the target speaker interval. Repeat this speaker at a lower level.".into()),
+                SegmentStatus::Clipped => report.messages.push(match target.overdrive_db {
+                    Some(db) => format!("Clipping in the target speaker interval, {}: lower the input gain or test level by at least {:.0} dB and repeat.", clipping::describe(db), clipping::reduction_db(db)),
+                    None => "Clipping occurs in the target speaker interval. Repeat this speaker at a lower level.".into(),
+                }),
                 SegmentStatus::Detected => (),
             }
             if (segments[0].rms_dbfs - segments[2].rms_dbfs).abs() > 1.0 {
@@ -136,10 +158,19 @@ pub fn analyze(
             if segments[0].status == SegmentStatus::Clipped
                 || segments[2].status == SegmentStatus::Clipped
             {
-                report.messages.push(
-                    "A reference interval clipped; lower the reference or input level and repeat."
+                let overdrive = [&segments[0], &segments[2]]
+                    .into_iter()
+                    .filter_map(|s| s.overdrive_db)
+                    .reduce(f64::max);
+                report.messages.push(match overdrive {
+                    Some(db) => format!(
+                        "A reference interval clipped, {}: lower the reference or input level by at least {:.0} dB and repeat.",
+                        clipping::describe(db),
+                        clipping::reduction_db(db)
+                    ),
+                    None => "A reference interval clipped; lower the reference or input level and repeat."
                         .into(),
-                );
+                });
             }
             if report
                 .band_noise
@@ -224,7 +255,8 @@ fn locate_segments(
         } else {
             start
         };
-        let body_start_frame = (start + rate * SETTLE_MS as f64 / 1000.0).round() as usize;
+        let sweep_start = start + rate * SETTLE_MS as f64 / 1000.0;
+        let body_start_frame = sweep_start.round() as usize;
         let body_end_frame =
             body_start_frame + (rate * sweep.duration_ms as f64 / 1000.0).round() as usize;
         let margin = (rate * 0.1).ceil() as usize;
@@ -235,7 +267,12 @@ fn locate_segments(
         }
         let rms = rms(&samples[body_start_frame..body_end_frame]);
         let window = &samples[lo..hi];
-        let clipped_samples = window.iter().filter(|x| x.abs() >= 0.999).count();
+        let clipped_samples = window.iter().filter(|x| x.abs() >= CLIP_LEVEL).count();
+        let overdrive = if clipped_samples > 0 {
+            clipping::estimate(samples, sweep_start, rate, sweep)
+        } else {
+            None
+        };
         let snr = db(rms) - db(noise);
         let status = if clipped_samples > 0 {
             SegmentStatus::Clipped
@@ -256,6 +293,8 @@ fn locate_segments(
             signal_to_noise_db: snr,
             peak_dbfs: db(window.iter().map(|x| x.abs() as f64).fold(0.0, f64::max)),
             clipped_samples,
+            overdrive_db: overdrive.map(|o| o.max_db),
+            band_overdrive_db: overdrive.and_then(|o| o.band_db),
             normalized_correlation: correlation,
             status,
         });
@@ -378,10 +417,116 @@ mod tests {
         let samples = fixture([1.0, 30.0, 1.0], 48000, 0.0);
         assert!(crate::timing::analyze(&samples, 48000, 48000, sweep()).is_err());
         let report = analyze(&samples, 48000, 48000, sweep()).unwrap();
-        let segments = report.segments.unwrap();
+        let segments = report.segments.as_ref().unwrap();
         assert_eq!(segments[1].status, SegmentStatus::Clipped);
         assert_eq!(segments[1].clipped_samples, report.total_clipped_samples);
         assert_eq!(segments[0].clipped_samples + segments[2].clipped_samples, 0);
+        // 30 times a -24 dBFS sweep peaks 5.5 dB over full scale.
+        assert!((segments[1].overdrive_db.unwrap() - 5.54).abs() < 0.5);
+        assert_eq!(segments[0].overdrive_db, None);
+        assert_eq!(report.overdrive_db(), segments[1].overdrive_db);
+        assert!(report.messages.iter().any(|m| m.contains(
+            "about 6 dB over full scale: lower the input gain or test level by at least 9 dB"
+        )));
+    }
+    /// The fixture with its target slot holding the sweep as captured at `rate` through
+    /// `echoes` (delay in ms, gain), scaled so that its unclipped peak is `over_db` above
+    /// full scale, then clipped. Also returns that capture's unclipped peak within the
+    /// 500–2000 Hz level band. The target is synthesized at the capture rate, as an
+    /// ADC would see it, rather than linearly resampled.
+    fn clipped_target(over_db: f64, rate: u32, ppm: f64, echoes: &[(f64, f32)]) -> (Vec<f32>, f64) {
+        let direct = sweep().samples(rate).unwrap();
+        let mut room = direct.clone();
+        for &(ms, gain) in echoes {
+            let delay = (ms * rate as f64 / 1000.0).round() as usize;
+            room.resize(room.len().max(direct.len() + delay), 0.0);
+            for (i, x) in direct.iter().enumerate() {
+                room[i + delay] += x * gain;
+            }
+        }
+        let peak_db = |range: std::ops::Range<usize>| {
+            20.0 * room[range]
+                .iter()
+                .fold(0.0_f32, |m, x| m.max(x.abs()))
+                .log10() as f64
+        };
+        let at = |hz: f64| {
+            let padding = rate as f64 * SETTLE_MS as f64 / 1000.0;
+            (padding + rate as f64 * (hz / 200.0).ln() / 30_f64.ln()) as usize
+        };
+        let room_db = peak_db(0..room.len());
+        let band_db = over_db - room_db + peak_db(at(500.0)..at(2000.0));
+        let gain = 10_f32.powf(((over_db - room_db) / 20.0) as f32);
+        let ratio = rate as f64 / 48000.0 * (1.0 + ppm / 1e6);
+        let start = (rate as f64 * 0.5 + sweep().samples(48000).unwrap().len() as f64 * ratio)
+            .round() as usize;
+        let mut samples = fixture([1.0, 0.0, 1.0], rate, ppm);
+        for (dst, x) in samples[start..].iter_mut().zip(&room) {
+            *dst = (*dst + x * gain).clamp(-1.0, 1.0);
+        }
+        (samples, band_db)
+    }
+    fn target_overdrive(samples: &[f32], rate: u32) -> (f64, f64) {
+        let report = analyze(samples, rate, 48000, sweep()).unwrap();
+        let target = &report.segments.unwrap()[1];
+        assert_eq!(target.status, SegmentStatus::Clipped);
+        (
+            target.overdrive_db.unwrap(),
+            target.band_overdrive_db.unwrap(),
+        )
+    }
+    #[test]
+    fn clipping_overdrive_matches_known_gains_across_rates() {
+        for (rate, ppm) in [(48000, 0.0), (44100, 300.0)] {
+            for over_db in [1.0, 3.0, 6.0, 12.0, 19.0] {
+                let (samples, band_db) = clipped_target(over_db, rate, ppm, &[]);
+                let (max, band) = target_overdrive(&samples, rate);
+                assert!(
+                    (max - over_db).abs() < 0.5,
+                    "{rate} Hz, {over_db} dB: {max}"
+                );
+                assert!(
+                    (band - band_db).abs() < 0.5,
+                    "{rate} Hz, {band_db} dB: {band}"
+                );
+            }
+        }
+        // The estimate saturates at 20 dB, and the reference intervals report theirs.
+        let peak = 10_f64.powf(sweep().peak_dbfs as f64 / 20.0);
+        let gain = (10_f64.powf(26.0 / 20.0) / peak) as f32;
+        let samples = fixture([gain, 1.0, gain], 48000, 0.0);
+        let report = analyze(&samples, 48000, 48000, sweep()).unwrap();
+        let segments = report.segments.as_ref().unwrap();
+        assert_eq!(segments[0].overdrive_db, Some(clipping::MAX_OVERDRIVE_DB));
+        assert_eq!(segments[1].overdrive_db, None);
+        assert!(report.messages.iter().any(|m| m.contains(
+            "A reference interval clipped, more than 20 dB over full scale: lower the reference or input level by at least 23 dB"
+        )));
+    }
+    #[test]
+    fn room_echoes_bias_the_overdrive_by_less_than_1_db() {
+        // Reflections at -10 dB beat with the direct sound and raise the peak at the
+        // microphone above it; the reference is that unclipped peak.
+        let echo = 10_f32.powf(-0.5);
+        for echoes in [
+            [(3.1, echo), (7.3, echo), (12.9, echo)],
+            [(2.3, echo), (5.9, echo), (17.0, echo)],
+        ] {
+            for (rate, ppm) in [(48000, 0.0), (44100, 300.0)] {
+                for over_db in [1.0, 3.0, 6.0, 12.0] {
+                    let (samples, band_db) = clipped_target(over_db, rate, ppm, &echoes);
+                    let (max, band) = target_overdrive(&samples, rate);
+                    assert!(
+                        (max - over_db).abs() < 1.0,
+                        "{rate} Hz, {over_db} dB: {max}"
+                    );
+                    assert!(
+                        (band - band_db).abs() < 1.0,
+                        "{rate} Hz, {band_db} dB: {band}"
+                    );
+                }
+            }
+        }
     }
     #[test]
     fn quiet_sweep_and_unrelated_loud_sound_are_not_called_missing() {

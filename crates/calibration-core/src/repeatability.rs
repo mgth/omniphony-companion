@@ -203,7 +203,7 @@ mod tests {
                     "low_snr"
                 }
                 5 => {
-                    b.reject(ExclusionReason::Clipped);
+                    b.reject(ExclusionReason::Clipped { overdrive_db: None });
                     "clipped"
                 }
                 // A session saved before reason codes carries text only.
@@ -349,7 +349,7 @@ mod subset_tests {
         let mut weak = pair(0.0, -80.0);
         weak[1].minimum_snr_db = Some(18.5);
         let mut clipped = pair(0.0, 0.0);
-        clipped[0].reject(ExclusionReason::Clipped);
+        clipped[0].reject(ExclusionReason::Clipped { overdrive_db: None });
         let selection = subset(&[
             (&good, false),
             (&weak, false),
@@ -367,7 +367,7 @@ mod subset_tests {
         );
         assert_eq!(
             selection.rows[3].as_ref().unwrap_err(),
-            &ExclusionReason::Clipped
+            &ExclusionReason::Clipped { overdrive_db: None }
         );
         assert_eq!(
             subset(&[(&good, false), (&weak, false)]).blockers,

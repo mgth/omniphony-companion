@@ -252,6 +252,15 @@ fn rejected_missing_and_clipped_target_takes_are_diagnosed_without_promotion() {
         assert!(!review.original_accepted_for_analysis && !review.valid_for_correction);
         if clipped {
             assert!(review.timing.is_some() && review.impulse.is_some());
+            let target = &review.diagnostics.segments.as_ref().unwrap()[1];
+            assert!(target.overdrive_db.is_some_and(|db| db > 0.0));
+            assert!(
+                review
+                    .diagnostics
+                    .messages
+                    .iter()
+                    .any(|m| m.contains("dB over full scale"))
+            );
             assert_eq!(
                 review.quality.as_ref().unwrap().acquisition.grade,
                 companion_service::quality::Grade::Poor
@@ -451,7 +460,7 @@ fn whole_alignment_reanalysis_retains_originals_and_cannot_apply_a_profile() {
     );
     assert_eq!(
         clipped_alignment.rows[0].exclusion(),
-        Some(calibration_core::ExclusionReason::Clipped)
+        Some(calibration_core::ExclusionReason::Clipped { overdrive_db: None })
     );
     // Restore the synthetic fixture for the independent identity check below.
     fs::remove_dir_all(&folders[0]).unwrap();

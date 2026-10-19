@@ -1858,6 +1858,21 @@ fn partial_alignment_names_exclusions_and_displays_only_eligible_targets() {
             size,
             "Clipped. Lower the mic gain or test level.",
         );
+        // With a known overdrive the card says how much to lower the gain.
+        fn center(app: &mut CompanionApp) -> &mut Option<calibration_core::ExclusionReason> {
+            let rows = &mut app.controller.state.alignment.as_mut().unwrap().rows;
+            &mut rows.last_mut().unwrap().reason_code
+        }
+        *center(&mut app) = Some(calibration_core::ExclusionReason::Clipped {
+            overdrive_db: Some(9.3),
+        });
+        find_speaker_text(
+            &mut app,
+            &ctx,
+            size,
+            "Clipped by about 9 dB. Lower the mic gain or test level by 13 dB.",
+        );
+        *center(&mut app) = None;
         find_speaker_text(&mut app, &ctx, size, "delay +1.00 ms · gain -1.0 dB");
         let text = labels(&frame(&mut app, &ctx, vec![], size));
         assert!(!text.iter().any(|(s, _)| s.contains("clipped recording")));

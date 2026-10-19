@@ -423,6 +423,10 @@ Stream errors, queue overflow, detected timing gaps, clipping and missing or
 ambiguous sweep sequences remain capture faults. Completed low-SNR or unstable
 reference-level captures now retain results with quality warnings. Even clipped
 takes may have diagnostic response curves, without qualifying a correction.
+A clipped take also reports how far the sweep overshot full scale, from a fit of
+the known sweep frequency to the unclipped samples before each plateau, and the
+hint suggests lowering the gain by that much plus 3 dB; analog preamplifier
+saturation below full scale is not detected.
 Excited-band SNR grades are Good (at least 20 dB), Limited (15–20 dB), or Poor
 (below 15 dB); missing evidence is Unavailable. Timing still needs a synchronized
 sequence within 2000 ppm linear drift. These are prototype indicators, not

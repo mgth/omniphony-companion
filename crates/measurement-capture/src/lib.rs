@@ -1,6 +1,13 @@
 //! Device I/O lives here, outside the calibration policy core.
 //! Callbacks only convert samples, push into a bounded queue and update flags.
+//!
+//! A clipped capture is never usable for correction, but [`clipping`] estimates how far
+//! it overshoots full scale by fitting the known sweep frequency to the unclipped
+//! samples before each plateau, so the hint can say how much to lower the gain. Only
+//! digital full-scale clipping is visible: analog preamplifier saturation below full
+//! scale is not detected and gets no number.
 pub mod calibration;
+pub mod clipping;
 pub mod diagnostics;
 pub mod impulse;
 pub mod input;
@@ -389,7 +396,7 @@ pub fn levels(samples: &[f32]) -> (Option<f64>, Option<f64>, usize) {
         }
         peak = peak.max(sample.abs() as f64);
         energy += (sample as f64).powi(2);
-        if sample.abs() >= 0.999 {
+        if sample.abs() >= clipping::CLIP_LEVEL {
             clipped += 1;
         }
     }
