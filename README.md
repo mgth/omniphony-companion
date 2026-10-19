@@ -32,10 +32,14 @@ The Rust/egui desktop window lets you:
 - Choose a fixed timing-reference speaker and a listening position.
 - Match active speakers using **Manual speaker levels**: finite pink noise, a live
   microphone meter and signed difference from a chosen reference. Adjust physical
-  volume controls; digital gains remain unchanged. See `docs/manual-speaker-levels.md`.
-- Start a measurement for one speaker, with progress inside its row and no layout shift.
-- Check the wired speakers and use **Measure selected speakers** for one continuous
-  capture with shared reference sweeps. **Stop** cancels the complete run.
+  volume controls; digital gains remain unchanged. The tool opens from the **Match
+  knobs** hint (shown when the quietest reliable speaker trails the others by more
+  than 3 dB), stays visible while a run exists, and is always listed in Lab.
+  See `docs/manual-speaker-levels.md`.
+- Start a measurement for one speaker, with progress inside its card and no layout shift.
+- Check the wired speakers and use **Align levels and delays**, the main action, for
+  two passes leading to a proposal. In Lab, **Measure selected speakers** runs one
+  continuous diagnostic capture with shared reference sweeps. **Stop** cancels the complete run.
 - Restore input/channel/rate, renderer address, reference, microphone/position,
   sweep settings, recording/calibration paths and speaker checkboxes on startup.
 - Resume the previous workspace: recent measurements, saved review, alignment,
@@ -49,19 +53,43 @@ The Rust/egui desktop window lets you:
   delay in the result graphs. Reanalyze an old accepted take to add these views.
 - Inspect signed impulse waveforms and predicted six-cycle tone bursts at
   selectable frequencies, including source overlays and relative phase.
-- Browse results in a resizable, scrollable panel below the speaker list.
-- Click a speaker row to open the latest saved analysis for that exact speaker/take.
-  The selected row is highlighted; inclusion checkboxes and Measure/Stop act independently.
+- Inspect the selected speaker in a resizable, scrollable panel below the speaker
+  area: impulse, frequency response, arrival/frequency, group delay, signed waveform
+  and virtual burst views.
+- Click a speaker card (or its row in the alignment chart) to open the latest saved
+  analysis for that exact speaker/take. The selected card is highlighted; inclusion
+  checkboxes and Measure/Stop act independently.
   This includes analyses created by **Reanalyze saved passes**. One speaker/result is
   selected at a time. **Original capture details** retains the historical verdict;
   it is separate from the current analysis status. Alignment summarizes both passes,
   while each measurement result identifies its individual pass.
-- Read the two-pass arrival, level, repeat spread, quality and proposed gain/delay
-  directly in each speaker row. The lower panel contains only individual results;
-  session-wide reanalysis/apply/verify/restore controls sit above the speaker rows.
+- Read an alignment at a glance in the **alignment chart**: a Timing lane (arrival in
+  ms relative to the reference speaker, a dot per repeatable speaker with a bar for the
+  spread between runs, a hollow target circle and an arrow labelled with the delay
+  Apply adds) and a Level lane (500–2000 Hz level relative to the quietest reliable
+  speaker, with the corrected level overlaid and the gain Apply sets). Speakers that
+  could not be measured reliably get a red or amber hollow marker and a short reason,
+  such as "No sound picked up. Wired and unmuted?"; the raw reason stays in the
+  tooltip. Arrivals more than 20 ms from the reference are drawn in a separate bracket
+  with their offset.
+- Below the chart, compact speaker cards show one quality dot (the weakest grade),
+  the measured ms/dB and the planned delay/gain, or the one-line reason when a
+  speaker is excluded. Cards keep a fixed size and place; capture progress stays
+  inside the active card.
+- Use one action bar: **Apply to Omniphony**, an **Original / Corrected** switch for
+  listening (restore or apply, available only with a proposal and an unchanged
+  renderer revision), **Confirm by re-measuring** and **Undo**. One status line says
+  whether anything is applied, that it is live only, and that Studio's Save keeps it.
+- Turn on **Lab** in the header to see everything else: per-speaker raw arrival,
+  level, repeat spread, quality and before → target settings; raw exclusion reasons;
+  session pass details; **Reanalyze saved passes** and **Update correction proposal**;
+  separate Acquisition/Timing/Level quality badges; segment signal/noise tables;
+  band candidates and threshold checks; saved-take review; recent takes and the
+  full caveats. The switch is saved with the other display preferences.
 - Read quality at a glance: green check (Good), amber warning triangle (Limited),
   red cross (Poor), grey dash (Unavailable/Not rated). Labels and tooltips explain
-  each grade; the symbols use vector drawing rather than emoji fonts.
+  each grade; the symbols use vector drawing rather than emoji fonts. Without Lab,
+  a result shows one badge with its weakest grade.
 - Measure alignment in two passes, inspect gain/delay proposals, explicitly apply,
   verify with two further passes, and restore the original settings.
 - Reopen a saved alignment folder without automatically measuring or applying it.
@@ -94,9 +122,9 @@ service as the CLI. A fresh renderer snapshot is checked before opening the inpu
 Ordinary Measure actions apply no corrections. Alignment has separate explicit
 Apply/Restore actions; neither writes the persistent renderer configuration.
 
-Choose **Measure selected speakers** for one diagnostic pass, or **Align levels
-and delays** for two independent passes leading to a proposal. You do not need
-to run both actions. The speaker list summarizes manually excluded and currently
+**Align levels and delays** runs two independent passes leading to a proposal.
+**Measure selected speakers** (Lab) runs one diagnostic pass instead; you do not
+need to run both. The speaker area summarizes unchecked and currently
 unavailable outputs. Alignment results retain each pass's completion/failure and
 show when the next pass never started; older sessions without this history are
 labeled explicitly.
@@ -126,7 +154,7 @@ Discovery and measurement run in background service workers. Minimizing the
 window does not pause keepalives or capture. Closing it during measurement requests
 cancellation and waits for cleanup so the rejected partial take can be saved.
 Results are kept in the window for the current run; raw WAVs and JSON reports
-remain in the recording folders. Use **Review a saved take · no playback**,
+remain in the recording folders. In Lab, use **Review a saved take · no playback**,
 paste a take folder, and press **Analyze saved take** to reopen a recording.
 A current result also has a **Reanalyze this take** action. This reads the take
 and generates a fresh report; it does not restore acquisition settings.
@@ -138,6 +166,9 @@ cargo run --locked -p companion-ui --example preview
 cargo run --locked -p companion-ui --example preview -- --arrival-review
 cargo run --locked -p companion-ui --example preview -- --missing-target-review
 cargo run --locked -p companion-ui --example preview -- --batch-progress
+cargo run --locked -p companion-ui --example preview -- --alignment
+cargo run --locked -p companion-ui --example preview -- --alignment --lab
+cargo run --locked -p companion-ui --example preview -- --blocked-alignment
 cargo run --locked -p companion-ui --example preview -- --frequency-response
 cargo run --locked -p companion-ui --example preview -- --energy-arrival
 cargo run --locked -p companion-ui --example preview -- --group-delay
@@ -147,7 +178,16 @@ cargo run --locked -p companion-ui --example preview -- --tone-burst
 
 This fixture window is labelled **UI PREVIEW · NO AUDIO**. Its speakers and
 microphone are synthetic; clicking Measure does not open hardware or create
-recordings.
+recordings. `--alignment` shows the chart with an invented five-speaker alignment
+(three repeatable speakers, one silent, one noisy at a long delay); `--lab` starts
+with Lab on.
+
+![Alignment chart, speaker cards and action bar with synthetic preview data](docs/images/companion-alignment.png)
+
+With **Lab** on, the same window adds the raw per-speaker evidence, exclusion
+reasons, pass details and the Reanalyze/Update actions below the action bar:
+
+![Lab view of the same synthetic alignment](docs/images/companion-alignment-lab.png)
 
 ![Native companion layout with synthetic preview data](docs/images/companion-preview.png)
 
@@ -181,8 +221,10 @@ never read or write personal settings. See [the application boundaries](docs/ui-
 1. Select the working broadband speakers, one microphone input and a fixed timing
    reference. Keep the microphone at the listening position and the preamp gain fixed.
 2. Choose **Align levels and delays**. Each pass uses the shared-reference
-   sequence. Progress remains in the active speaker row; Stop cancels the run.
-3. Inspect the alignment results directly in each speaker row. Levels use equal log-frequency
+   sequence. Progress remains in the active speaker card; Stop cancels the run.
+   The previous chart's space stays reserved during capture, so cards do not move.
+3. Read the result in the alignment chart and the speaker cards; Lab shows the raw
+   per-speaker numbers. Levels use equal log-frequency
    power weighting over 500–2000 Hz, including the room response. They are transfer
    dB, not sweep RMS, calibrated SPL or microphone-corrected levels.
 4. Each included speaker must pass acquisition/arrival checks,
@@ -192,20 +234,21 @@ never read or write personal settings. See [the application boundaries](docs/ui-
    levels. These are prototype gates, not certified accuracy. Ambiguous speakers
    remain visible with an exclusion reason. A proposal uses the qualified subset
    when at least two speakers qualify; excluded gains and delays stay unchanged.
-   Use **Update correction proposal** for complete original saved passes created
+   Use **Update correction proposal** (Lab) for complete original saved passes created
    by an older build. Shared-reference or session failures still block application.
-5. **Apply gains and delays** changes live absolute settings. Existing gains and
+5. **Apply to Omniphony** changes live absolute settings. Existing gains and
    delays are included; the policy attenuates louder speakers and delays earlier
-   arrivals. Application requires the unchanged renderer snapshot.
-6. **Verify · 2 passes** measures the corrected subset again and reports before/after arrival and level
-   spread. A failed or unresolved verification is not success. **Restore original
-   settings** restores the baseline only if the renderer has not changed meanwhile.
+   arrivals. Application requires the unchanged renderer snapshot. The
+   **Original / Corrected** switch restores or re-applies the same settings for listening.
+6. **Confirm by re-measuring** measures the corrected subset again, twice, and reports before/after arrival and level
+   spread. A failed or unresolved verification is not success. **Undo** (or
+   **Original**) restores the baseline only if the renderer has not changed meanwhile.
 7. Save in Studio after a satisfactory result if you want persistent renderer
    settings. Companion never sends the configuration-save command automatically.
 
 The session folder retains `alignment-plan.json`, `alignment-state.json`, both raw
 capture passes and verification captures. Use **Load alignment session** in the
-saved-take section to reopen it. Loading never emits audio or writes renderer
+Lab saved-take section to reopen it. Loading never emits audio or writes renderer
 settings. Restarting/reconfiguring the renderer invalidates an old application
 revision. An uncertain application must be inspected before further changes.
 
@@ -391,8 +434,8 @@ low-SNR, clipped and legacy ambiguity cases; a missing target does not receive a
 invented delay. Original rejection reasons remain visible. Interrupted, faulty or
 mismatched takes cannot be promoted by reanalysis.
 
-For a saved two-pass alignment, choose **Reanalyze saved passes** in the session
-controls above the speaker list, or run:
+For a saved two-pass alignment, choose **Reanalyze saved passes** in the Lab
+alignment evidence below the speaker cards, or run:
 
 ```sh
 cargo run --locked -p companion-cli -- capture review-alignment --session sessions/example-alignment

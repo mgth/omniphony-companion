@@ -29,7 +29,8 @@ pub enum ResultPlot {
 #[serde(default)]
 pub struct ViewPreferences {
     pub plot: ResultPlot,
-    /// Legacy tab preference retained for compatibility; alignment now lives in speaker rows.
+    /// The UI's Lab switch (show every diagnostic). The field name predates the switch
+    /// and is kept so existing settings files load unchanged.
     pub show_alignment: bool,
     pub saved_selected: bool,
     pub selected_take: Option<PathBuf>,

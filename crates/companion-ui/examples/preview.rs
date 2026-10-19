@@ -28,7 +28,10 @@ fn main() -> eframe::Result {
                 controller.state.review = Some(support::arrival_review());
             }
             if std::env::args().any(|a| a == "--alignment") {
-                controller.state.alignment = Some(support::alignment(&controller, true));
+                controller.state.alignment = Some(support::room_alignment(&controller));
+            }
+            if std::env::args().any(|a| a == "--blocked-alignment") {
+                controller.state.alignment = Some(support::alignment(&controller, false));
             }
             if std::env::args().any(|a| a == "--missing-target-review") {
                 controller.state.review = Some(support::missing_target_review());
@@ -64,6 +67,7 @@ fn main() -> eframe::Result {
                     ));
             }
             let mut app = companion_ui::CompanionApp::preview(&cc.egui_ctx, controller);
+            app.lab = std::env::args().any(|a| a == "--lab");
             for arg in std::env::args() {
                 app.result_plot = match arg.as_str() {
                     "--frequency-response" => companion_ui::ResultPlot::FrequencyResponse,

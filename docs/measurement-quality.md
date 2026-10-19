@@ -7,11 +7,12 @@ the software does not manufacture a delay from noise.
 
 ## Reading the indicators
 
-The result panel shows separate **Acquisition**, **Timing** and **Level** grades.
-Hover over a grade or expand **Measurement quality details** for measured ratios,
+The result panel shows one badge with the weakest grade; with Lab on it shows
+separate **Acquisition**, **Timing** and **Level** grades.
+Hover over a grade or expand **Measurement quality details** (Lab) for measured ratios,
 faults and unresolved reasons. Alignment rows retain estimates from each pass
-even when they cannot qualify; the Quality badge in each speaker row shows the
-weakest grade. Grades use a green circle/check (Good), amber warning triangle
+even when they cannot qualify; each speaker card's quality dot shows the
+weakest grade, and Lab's per-speaker evidence repeats it as a badge. Grades use a green circle/check (Good), amber warning triangle
 (Limited), red circle/cross (Poor), and grey circle/dash (Unavailable or Not rated).
 Each badge keeps its readable label and tooltip. Icons are drawn as vectors and
 remain distinct without colour or emoji-font support.
@@ -90,8 +91,8 @@ No automatic gain increase, playback or correction is introduced by this feature
 ## Existing recordings
 
 Loading saved state does not silently rerun analysis. Use **Reanalyze this take**
-for one result, or **Reanalyze saved passes** in the alignment session controls
-above the speaker rows for both passes.
+for one result, or **Reanalyze saved passes** in the Lab alignment evidence
+below the speaker cards for both passes.
 The corresponding commands are:
 
 ```sh

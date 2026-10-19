@@ -76,11 +76,14 @@ no measurement or mutation occurs on startup or load. A restarted renderer has a
 new identity/revision and invalidates the saved application state.
 
 Workers own acquisition, analysis, persistence and network requests. The UI only
-submits actions and displays the two-pass arrival, level, repeat spread, quality,
-qualification reason and proposed absolute settings inside each speaker row.
-Session actions and expandable diagnostics sit above the rows in the speaker
-scroll area. The lower panel is reserved for the selected speaker's individual
-measurement and graphs; there is no separate Alignment tab.
+submits actions and draws the result: an alignment chart (Timing lane: arrival
+relative to the reference, repeat spread, target and added delay; Level lane:
+level relative to the quietest reliable speaker, corrected level and gain), then
+speaker cards with the measured values and planned change, then one action bar
+(Apply to Omniphony, Original/Corrected, Confirm by re-measuring, Undo). Raw
+per-speaker numbers, exclusion reasons, pass details and the Reanalyze/Update
+actions are shown with **Lab** on. The lower panel is reserved for the selected
+speaker's individual measurement and graphs; there is no separate Alignment tab.
 The two passes keep the shared-reference optimization within each pass. Calibration
 and verification do not automatically change output level, repeat forever, or
 continue after cancellation.
@@ -110,8 +113,8 @@ microphone calibration, multipoint EQ and subwoofer integration remain deferred.
 ## Partial proposals and existing sessions
 
 The session summary reports how many speakers have targets and how many are
-excluded. It lists exclusion reasons; the same reason is visible in each excluded
-speaker row. Excluded observations do not determine the latest arrival, quietest
+excluded. Each excluded speaker shows a short reason in the chart and its card
+(the raw reason is in the tooltip and in Lab's exclusion list). Excluded observations do not determine the latest arrival, quietest
 level, or shared-reference consistency of the eligible subset. The two-capture,
 SNR, clipping and repeatability thresholds are unchanged. At least two speakers
 must qualify, even when the timing-reference speaker itself has no correction

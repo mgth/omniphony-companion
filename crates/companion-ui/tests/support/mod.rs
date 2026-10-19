@@ -369,3 +369,145 @@ pub fn alignment(
         physical_levels_changed: false,
     }
 }
+
+/// A fuller synthetic room for the preview and chart tests: three repeatable speakers,
+/// one silent, one noisy at a long delay. Values are invented; no capture happened.
+pub fn room_alignment(controller: &Controller) -> companion_service::alignment::Alignment {
+    use calibration_core::{
+        CalibrationPolicy, CalibrationProfile, InstallationSnapshot, ObservationOrigin,
+        OutputSettings, Speaker, SpeakerRole,
+        repeatability::{QualifiedEstimate, RepeatEstimate},
+    };
+    use companion_service::{
+        alignment::{Alignment, PassReport, Row},
+        quality::{Grade, Indicator, Report},
+    };
+    let snapshot = controller.state.snapshot.clone().unwrap();
+    // (arrival, level, grade, reason) per output; the subwoofer is muted and not aligned.
+    type Fixture<'a> = (Option<f64>, Option<f64>, Grade, Option<&'a str>);
+    let rows: [Fixture; 5] = [
+        (Some(0.0), Some(-7.6), Grade::Good, None),
+        (Some(0.32), Some(-4.2), Grade::Good, None),
+        (Some(-1.85), Some(-3.0), Grade::Good, None),
+        (
+            None,
+            None,
+            Grade::Unavailable,
+            Some("invalid calibration data: three reliable timing references were not found"),
+        ),
+        (
+            Some(176.9),
+            Some(-14.0),
+            Grade::Poor,
+            Some(
+                "invalid calibration data: excited-band acquisition signal/noise below 15 dB; diagnostic result only",
+            ),
+        ),
+    ];
+    let latest = 0.32;
+    let quietest = -7.6;
+    let base = InstallationSnapshot {
+        installation_id: "synthetic-room".into(),
+        layout_revision: snapshot.revision.clone(),
+        sample_rate_hz: 48000,
+        speakers: snapshot
+            .outputs
+            .iter()
+            .take(3)
+            .map(|o| Speaker {
+                id: o.id.clone(),
+                label: o.name.clone(),
+                role: SpeakerRole::FullRange,
+                settings: OutputSettings {
+                    gain_db: o.gain_db as f64,
+                    delay_ms: o.delay_ms as f64,
+                },
+            })
+            .collect(),
+    };
+    let mut target = base.clone();
+    for (speaker, (arrival, level, ..)) in target.speakers.iter_mut().zip(&rows) {
+        speaker.settings.delay_ms += latest - arrival.unwrap();
+        speaker.settings.gain_db += quietest - level.unwrap();
+    }
+    let rows = snapshot
+        .outputs
+        .iter()
+        .zip(rows)
+        .enumerate()
+        .map(|(i, (o, (arrival, level, grade, reason)))| {
+            let indicator = || Indicator {
+                grade,
+                details: vec!["Synthetic presentation fixture".into()],
+            };
+            Row {
+                output_id: o.id.clone(),
+                take_folders: vec![
+                    format!("synthetic-room-pass-1-{i}").into(),
+                    format!("synthetic-room-pass-2-{i}").into(),
+                ],
+                repeats: [0.0, 0.006]
+                    .iter()
+                    .map(|offset| RepeatEstimate {
+                        arrival_ms: arrival.map(|a| a + offset),
+                        level_db: level.map(|l| l + offset),
+                        minimum_snr_db: Some(if reason.is_some() { 9.0 } else { 34.0 }),
+                        reference_level_db: Some(0.0),
+                        reasons: reason.map(|r| vec![r.to_owned()]).unwrap_or_default(),
+                    })
+                    .collect(),
+                quality: vec![Report {
+                    method: "synthetic-preview".into(),
+                    acquisition: indicator(),
+                    timing: indicator(),
+                    level: indicator(),
+                    level_db: level,
+                    level_band_snr_db: Some(if reason.is_some() { 9.0 } else { 34.0 }),
+                    minimum_frequency_snr_db: None,
+                }],
+                qualified: reason.is_none().then(|| QualifiedEstimate {
+                    arrival_ms: arrival.unwrap(),
+                    level_db: level.unwrap(),
+                    minimum_snr_db: 34.0,
+                    arrival_repeat_spread_ms: 0.006,
+                    level_repeat_spread_db: 0.006,
+                }),
+                reason: reason.map(str::to_owned),
+            }
+        })
+        .collect();
+    Alignment {
+        schema_version: 1,
+        directory: "synthetic-room-alignment".into(),
+        endpoint: "127.0.0.1:9000".parse().unwrap(),
+        settings: controller.settings.clone(),
+        snapshot,
+        rows,
+        pass_reports: Some(vec![
+            PassReport {
+                analyzed_speakers: 5,
+                error: None
+            };
+            2
+        ]),
+        verification_pass_reports: None,
+        blockers: vec![],
+        session: None,
+        profile: Some(CalibrationProfile {
+            origin: ObservationOrigin::Simulated,
+            schema_version: 1,
+            source_session_id: "synthetic-room".into(),
+            source_batch_id: "synthetic-room-baseline".into(),
+            reference_position_id: "reference-seat".into(),
+            policy: CalibrationPolicy::default(),
+            base_snapshot: base,
+            target_snapshot: target,
+        }),
+        applied_snapshot: None,
+        restored_snapshot: None,
+        verification: None,
+        verification_note: None,
+        application_uncertain: false,
+        physical_levels_changed: false,
+    }
+}

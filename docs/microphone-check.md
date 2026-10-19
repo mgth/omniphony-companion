@@ -9,9 +9,9 @@
 3. Check only the connected speakers. The list summarizes manually excluded and
    unavailable outputs; checkbox preferences persist across restarts. The fixed
    reference speaker must also be connected, even if excluded as a target.
-4. Choose **Measure selected speakers** for one diagnostic pass, or **Align levels
-   and delays** for two independent passes and a proposal. Only **Apply gains and
-   delays** changes output settings. Keep microphone position and input gain fixed.
+4. Choose **Align levels and delays** for two independent passes and a proposal,
+   or, with Lab on, **Measure selected speakers** for one diagnostic pass. Only
+   **Apply to Omniphony** changes output settings. Keep microphone position and input gain fixed.
 
 The meter distinguishes no frames, exact digital silence, activity, clipping and
 capture faults. Its last reading is labeled as stopped, never as a lasting readiness
