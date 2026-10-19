@@ -2381,7 +2381,14 @@ fn draw_diagnostics(
                     ui.monospace(format!("{:.1}", segment.rms_dbfs));
                     ui.monospace(format!("{:.1} dB", segment.signal_to_noise_db));
                     ui.monospace(format!("{:.1}", segment.peak_dbfs));
-                    ui.monospace(segment.clipped_samples.to_string());
+                    ui.monospace(match segment.overdrive_db {
+                        Some(db) => format!(
+                            "{} · {} over",
+                            segment.clipped_samples,
+                            companion_service::review::clipping::label(db)
+                        ),
+                        None => segment.clipped_samples.to_string(),
+                    });
                     ui.end_row();
                 }
             });

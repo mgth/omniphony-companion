@@ -147,12 +147,22 @@ fn estimate(take: &TakeOutcome) -> RepeatEstimate {
     if take.cancelled {
         result.reject(ExclusionReason::Cancelled);
     } else if !take.accepted {
-        result.reject(take.rejection_reason.as_deref().map_or_else(
+        let mut reason = take.rejection_reason.as_deref().map_or_else(
             || ExclusionReason::CaptureFailed {
                 detail: "capture did not complete".into(),
             },
             ExclusionReason::from_message,
-        ));
+        );
+        // The rejection text only says "clipped"; the acquisition diagnostics say by how much.
+        if let ExclusionReason::Clipped { overdrive_db } = &mut reason {
+            *overdrive_db = overdrive_db.or_else(|| {
+                take.diagnostics
+                    .as_ref()
+                    .and_then(|d| d.overdrive_db())
+                    .map(|db| db.clamp(0.0, core::reason::MAX_OVERDRIVE_DB))
+            });
+        }
+        result.reject(reason);
     }
     if let Some(t) = &take.timing {
         let snr = t

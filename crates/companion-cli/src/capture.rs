@@ -215,14 +215,24 @@ fn print_impulse(report: Option<&companion_service::review::ImpulseReport>, erro
 }
 
 fn print_diagnostics(report: &measurement_capture::diagnostics::AcquisitionDiagnostics) {
+    use measurement_capture::clipping::label;
     println!(
         "Acquisition background: {:.1} dBFS; clipped samples: {}.",
         report.noise_rms_dbfs, report.total_clipped_samples
     );
     if let Some(segments) = &report.segments {
         for segment in segments {
+            let overdrive = match (segment.overdrive_db, segment.band_overdrive_db) {
+                (Some(max), Some(band)) => format!(
+                    " ({} over full scale; 500–2000 Hz band {})",
+                    label(max),
+                    label(band)
+                ),
+                (Some(max), None) => format!(" ({} over full scale)", label(max)),
+                _ => String::new(),
+            };
             println!(
-                "{}: {}; RMS {:.1} dBFS; signal / noise {:.1} dB; peak {:.1} dBFS; {} clipped samples.",
+                "{}: {}; RMS {:.1} dBFS; signal / noise {:.1} dB; peak {:.1} dBFS; {} clipped samples{overdrive}.",
                 segment.role,
                 segment.status.label(),
                 segment.rms_dbfs,

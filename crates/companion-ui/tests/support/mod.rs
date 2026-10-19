@@ -239,6 +239,8 @@ pub fn missing_target_review() -> companion_service::review::SavedReview {
         signal_to_noise_db: if i == 1 { 0.0 } else { 24.0 },
         peak_dbfs: if i == 1 { -38.0 } else { -14.0 },
         clipped_samples: 0,
+        overdrive_db: None,
+        band_overdrive_db: None,
         normalized_correlation: if i == 1 { 0.01 } else { 0.5 },
         status: if i == 1 {
             SegmentStatus::NoSweepDetected

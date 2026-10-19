@@ -5,7 +5,7 @@ use companion_service::{
     controller::{Backend, Settings},
     measurement::{MeasureProgress, MeasureRequest, TakeOutcome},
 };
-use measurement_capture::{impulse, timing};
+use measurement_capture::{diagnostics, impulse, timing};
 use omniphony_adapter::{
     Snapshot,
     protocol::{Output, OutputSetting},
@@ -27,6 +27,8 @@ struct Rig {
     silent_batch: AtomicBool,
     captures: AtomicUsize,
     rejected: Mutex<std::collections::BTreeMap<String, String>>,
+    /// Outputs whose acquisition diagnostics see the target this much louder, clipped.
+    clipped: Mutex<std::collections::BTreeMap<String, f32>>,
     batches: Mutex<Vec<Vec<String>>>,
 }
 impl Rig {
@@ -64,6 +66,7 @@ impl Rig {
             silent_batch: AtomicBool::new(false),
             captures: AtomicUsize::new(0),
             rejected: Mutex::new(Default::default()),
+            clipped: Mutex::new(Default::default()),
             batches: Mutex::new(vec![]),
         }
     }
@@ -167,6 +170,13 @@ impl Backend for Rig {
             let directory = args.out_dir.join(id);
             std::fs::create_dir(&directory).unwrap();
             let rejection = self.rejected.lock().unwrap().get(id).cloned();
+            let diagnostics = self.clipped.lock().unwrap().get(id).map(|&gain| {
+                let mut loud = samples.clone();
+                for x in &mut loud[24000 + source.len()..24000 + 2 * source.len()] {
+                    *x = (*x * gain).clamp(-1.0, 1.0);
+                }
+                diagnostics::analyze(&loud, 48000, 48000, args.sweep).unwrap()
+            });
             takes.push((
                 id.clone(),
                 TakeOutcome {
@@ -174,7 +184,7 @@ impl Backend for Rig {
                     accepted: rejection.is_none(),
                     cancelled: false,
                     rejection_reason: rejection,
-                    diagnostics: None,
+                    diagnostics,
                     timing: Some(timing),
                     impulse: Some(Arc::new(response)),
                     impulse_error: None,
@@ -517,7 +527,7 @@ fn reason_codes_round_trip_and_text_only_sessions_still_load() {
         None,
         None,
         Some(low.clone()),
-        Some(ExclusionReason::Clipped),
+        Some(ExclusionReason::Clipped { overdrive_db: None }),
     ];
     assert_eq!(codes(&a), expected);
     assert_eq!(a.rows[2].reason.as_deref(), Some(low.to_string().as_str()));
@@ -552,7 +562,10 @@ fn reason_codes_round_trip_and_text_only_sessions_still_load() {
     assert_eq!(old.targets(false).unwrap(), a.targets(false).unwrap());
     // Updating the old proposal writes the codes alongside the text.
     let updated = alignment::refresh_proposal(&old).unwrap();
-    assert_eq!(updated.rows[3].reason_code, Some(ExclusionReason::Clipped));
+    assert_eq!(
+        updated.rows[3].reason_code,
+        Some(ExclusionReason::Clipped { overdrive_db: None })
+    );
     assert_eq!(updated.corrected_output_ids(), ["L", "R"]);
     // Old text blockers are kept as they were and still block an update.
     let mut blocked = old.clone();
@@ -566,6 +579,78 @@ fn reason_codes_round_trip_and_text_only_sessions_still_load() {
         }]
     );
     assert!(alignment::refresh_proposal(&blocked).is_err());
+}
+
+#[test]
+fn a_clipped_speaker_says_how_much_to_lower_the_gain() {
+    let root = tempfile::tempdir().unwrap();
+    let rig = Rig::new();
+    let mut snapshot = rig.snapshot.lock().unwrap();
+    let mut loud = snapshot.outputs[2].clone();
+    loud.id = "Clipped".into();
+    loud.name = loud.id.clone();
+    loud.index = 3;
+    snapshot.outputs.push(loud);
+    drop(snapshot);
+    rig.rejected
+        .lock()
+        .unwrap()
+        .insert("Clipped".into(), "clipped recording".into());
+    // The rig's target peaks at 0.25 times the -30 dBFS sweep: this is 9.3 dB over.
+    let over_db = 9.3;
+    let gain = 10_f64.powf((over_db + 30.0) / 20.0) / 0.25;
+    rig.clipped
+        .lock()
+        .unwrap()
+        .insert("Clipped".into(), gain as f32);
+    let settings = Settings {
+        device: Some("test microphone".into()),
+        reference_output: Some("L".into()),
+        sweep: omniphony_adapter::Sweep {
+            duration_ms: 200,
+            ..Settings::default().sweep
+        },
+        ..Settings::default()
+    };
+    let request = alignment::request(
+        "127.0.0.1:9000".parse().unwrap(),
+        rig.discover("127.0.0.1:9000".parse().unwrap()).unwrap(),
+        &settings,
+        "L".into(),
+        root.path().join("clipped"),
+    )
+    .unwrap();
+    let a = alignment::capture(
+        &rig,
+        request,
+        settings,
+        vec!["L".into(), "R".into(), "Clipped".into()],
+        &AtomicBool::new(false),
+        &mut |_, _, _| {},
+    )
+    .unwrap()
+    .alignment;
+    let Some(ExclusionReason::Clipped {
+        overdrive_db: Some(db),
+    }) = a.rows[2].exclusion()
+    else {
+        panic!("{:?}", a.rows[2].exclusion());
+    };
+    assert!((db - over_db).abs() < 0.1, "{db}");
+    assert_eq!(
+        a.rows[2].exclusion().unwrap().human(),
+        "Clipped by about 9 dB. Lower the mic gain or test level by 13 dB."
+    );
+    assert!(
+        a.rows[2]
+            .reason
+            .as_ref()
+            .unwrap()
+            .starts_with("clipped recording, 9.")
+    );
+    assert_eq!(a.corrected_output_ids(), ["L", "R"]);
+    let loaded = alignment::load(&a.directory).unwrap();
+    assert_eq!(loaded.rows[2].exclusion(), a.rows[2].exclusion());
 }
 
 #[test]
@@ -592,7 +677,7 @@ fn the_16_october_session_sets_aside_the_late_device_and_keeps_its_text_reasons(
         ),
         (
             "TBL",
-            ExclusionReason::Clipped,
+            ExclusionReason::Clipped { overdrive_db: None },
             "Clipped. Lower the mic gain or test level.",
         ),
         (

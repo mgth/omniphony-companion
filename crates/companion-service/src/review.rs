@@ -3,6 +3,7 @@ use crate::{
     AppResult,
     files::{read_json, write_json},
 };
+pub use measurement_capture::clipping;
 pub use measurement_capture::diagnostics::{
     AcquisitionDiagnostics, SegmentDiagnostics, SegmentStatus,
 };
