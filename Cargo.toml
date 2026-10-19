@@ -23,3 +23,12 @@ unsafe_code = "forbid"
 
 [workspace.lints.clippy]
 all = "warn"
+
+# Signal analysis dominates test time: optimize it and its FFT in debug and test builds
+# too, keeping debug assertions and overflow checks. Unoptimized, one offline
+# reanalysis of a two-pass alignment takes about 20 s.
+[profile.dev.package.measurement-capture]
+opt-level = 2
+
+[profile.dev.package.rustfft]
+opt-level = 2
