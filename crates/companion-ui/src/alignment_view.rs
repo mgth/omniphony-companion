@@ -58,6 +58,9 @@ pub struct Speaker<'a> {
     pub level: Option<(f64, f64)>,
     /// Diagnostic arrival of an excluded speaker; never used for correction.
     pub diagnostic_arrival_ms: Option<f64>,
+    /// Diagnostic level of an excluded speaker, relative to the quietest aligned one;
+    /// never used for correction.
+    pub diagnostic_level_db: Option<f64>,
     pub change: Option<Change>,
     /// Why this speaker gets no target: not reliable, or set aside by the policy.
     pub reason: Option<ExclusionReason>,
@@ -131,6 +134,13 @@ impl<'a> Summary<'a> {
                         .is_none()
                         .then(|| row.repeats.iter().rev().find_map(|r| r.arrival_ms))
                         .flatten()
+                        .filter(|v| v.is_finite()),
+                    diagnostic_level_db: row
+                        .qualified
+                        .is_none()
+                        .then(|| row.repeats.iter().rev().find_map(|r| r.level_db))
+                        .flatten()
+                        .map(|db| db - quietest_db)
                         .filter(|v| v.is_finite()),
                     change,
                     reason: row.exclusion(),
@@ -714,6 +724,12 @@ fn tooltip(sp: &Speaker) -> String {
         if let Some(ms) = sp.diagnostic_arrival_ms {
             lines.push(format!("Diagnostic arrival {}", signed(ms, 3, "ms")));
         }
+        if let Some(db) = sp.diagnostic_level_db {
+            lines.push(format!(
+                "Diagnostic level {} above the quietest",
+                signed(db, 2, "dB")
+            ));
+        }
     }
     lines.join("\n")
 }
@@ -901,6 +917,11 @@ fn level_lane(ui: &mut egui::Ui, s: &Summary, selected: Option<&str>) -> Option<
                 hi = hi.max(db + change.gain_db());
             }
         }
+        // Excluded speakers sit where they measured, too.
+        if let Some(db) = sp.diagnostic_level_db {
+            lo = lo.min(db);
+            hi = hi.max(db);
+        }
     }
     let lo = lo - ((hi - lo) * 0.25).max(1.0);
     let hi = hi + ((hi - lo) * 0.05).max(0.25);
@@ -972,7 +993,8 @@ fn level_lane(ui: &mut egui::Ui, s: &Summary, selected: Option<&str>) -> Option<
             })
         } else {
             if let Some(reason) = &sp.reason {
-                hollow(&painter, Pos2::new(left + 6.0, y), reason_color(reason));
+                let at = sp.diagnostic_level_db.map_or(left + 6.0, x);
+                hollow(&painter, Pos2::new(at, y), reason_color(reason));
             }
             None
         };
@@ -1542,5 +1564,69 @@ fn pass_summary(
             ),
         };
         ui.label(format!("{label} pass {} / 2: {status}", pass + 1));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn excluded_speakers_keep_a_diagnostic_level_like_their_arrival() {
+        let repeat = |arrival: Option<f64>, level: Option<f64>| {
+            serde_json::json!({
+                "arrival_ms": arrival, "level_db": level, "minimum_snr_db": 30.0,
+                "reference_level_db": 0.0, "reasons": []
+            })
+        };
+        let qualified = |level: f64| {
+            serde_json::json!({
+                "arrival_ms": 0.0, "level_db": level, "minimum_snr_db": 30.0,
+                "arrival_repeat_spread_ms": 0.01, "level_repeat_spread_db": 0.1
+            })
+        };
+        let output = |id: &str, index: u32| {
+            serde_json::json!({
+                "id": id, "index": index, "name": id, "gain_db": 0.0, "delay_ms": 0.0,
+                "muted": false, "freq_low_hz": null, "freq_high_hz": null
+            })
+        };
+        let a: Alignment = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "endpoint": "127.0.0.1:9000",
+            "settings": {},
+            "snapshot": {
+                "instance_id": "renderer", "revision": "r1", "sample_rate": 48000,
+                "master_gain_db": 0.0, "max_delay_ms": 100.0, "unavailable_reason": null,
+                "outputs": [output("FL", 0), output("FR", 1), output("BR", 2), output("TBL", 3)]
+            },
+            "rows": [
+                {"output_id": "FL", "take_folders": [], "repeats": [], "reason": null,
+                 "qualified": qualified(-8.0)},
+                {"output_id": "FR", "take_folders": [], "repeats": [], "reason": null,
+                 "qualified": qualified(-4.0)},
+                {"output_id": "BR", "take_folders": [], "qualified": null,
+                 "reason": "excited-band acquisition signal/noise below 15 dB; diagnostic result only",
+                 "repeats": [repeat(Some(1.2), Some(-14.0)), repeat(Some(1.3), Some(-13.9))]},
+                {"output_id": "TBL", "take_folders": [], "qualified": null,
+                 "reason": "three reliable timing references were not found",
+                 "repeats": [repeat(None, None), repeat(None, None)]}
+            ],
+            "blockers": [], "session": null, "profile": null,
+            "applied_snapshot": null, "restored_snapshot": null,
+            "verification_note": null, "verification": null,
+            "application_uncertain": false
+        }))
+        .unwrap();
+        let s = Summary::new(&a);
+        // The latest measured value, relative to the quietest aligned speaker.
+        let br = s.speaker("BR").unwrap();
+        assert!((br.diagnostic_level_db.unwrap() + 5.9).abs() < 1e-9);
+        assert_eq!(br.diagnostic_arrival_ms, Some(1.3));
+        assert!(tooltip(br).contains("Diagnostic level -5.90 dB above the quietest"));
+        // Nothing measured, nothing shown; aligned speakers use their repeatable level.
+        assert_eq!(s.speaker("TBL").unwrap().diagnostic_level_db, None);
+        assert_eq!(s.speaker("FL").unwrap().diagnostic_level_db, None);
+        assert_eq!(s.speaker("FR").unwrap().level.map(|l| l.0), Some(4.0));
     }
 }
