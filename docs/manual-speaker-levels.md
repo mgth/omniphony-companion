@@ -9,24 +9,29 @@ Use it before acquiring a new alignment session.
 1. Connect to a renderer build with the optional finite level-noise extension.
    Select the measurement interface, microphone channel and reference speaker.
    Keep microphone position and interface input gain unchanged throughout.
-2. Open **Manual speaker levels · physical volume controls**, below the speaker
-   cards. It appears from the alignment chart's **Match knobs** hint (when the
-   quietest reliable speaker is more than 3 dB below the others), while a run
-   exists, or with Lab on. Start with the conservative default test peak (-30 dBFS).
-3. Choose **Play reference**. The renderer silences programme audio; the companion
-   measures background, starts noise and waits two seconds for settling.
-4. When the live meter is available, choose **Use live level as reference**,
-   then **Stop noise**. The reference uses the current one-second band-power
-   window. It is a snapshot, not a level that follows later knob movements.
-5. Select a different speaker card, then **Play selected**. Adjust that speaker's
-   physical volume. Negative difference means raise its volume; positive means
-   lower it. Green indicates a difference within ±0.5 dB.
-6. Stop noise before selecting the next speaker. Capture a new reference if the
-   microphone, its position, interface gain or any relevant setup changes.
+2. Every speaker card has a **▶ Noise** button next to its status. It is greyed
+   with the reason when the speaker cannot play the test noise (muted, outside
+   500–2000 Hz, no microphone, or no reference level yet for a speaker other than
+   the reference). Start with the conservative default test level (-30 dBFS); it
+   is set under the meter and can only change while no noise plays.
+3. Press **▶ Noise** on the reference speaker's card (marked REF). The renderer
+   silences programme audio; the companion measures background, starts noise and
+   waits two seconds for settling. The **Speaker levels** band appears below the
+   cards with the live meter, and the button becomes **■ Stop**.
+4. When the meter is live, choose **Use live level as reference** under it. The
+   reference uses the current one-second band-power window. It is a snapshot, not
+   a level that follows later knob movements.
+5. Press **▶ Noise** on another card. A noise already playing stops first, then the
+   new speaker plays. Adjust that speaker's physical volume. Negative difference
+   means raise its volume; positive means lower it. Green indicates a difference
+   within ±0.5 dB; the card of the speaker playing shows the same difference.
+6. Repeat for each speaker. Capture a new reference if the microphone, its
+   position, interface gain or any relevant setup changes. **Hide** closes the band
+   once no noise plays; the alignment chart's **Match knobs** hint opens it too.
 7. Acquire a fresh two-pass alignment after physical adjustments.
 
-Each run stops after 60 seconds; **Stop noise**, the global **Stop** button and
-closing the app also stop it. Closing/minimizing a panel does not own the timer.
+Each run stops after 60 seconds; the card's **■ Stop**, the global **Stop** button
+and closing the app also stop it. Hiding the band does not own the timer.
 There is no automatic playback on startup. The test-peak preference is saved;
 reference levels and active runs are intentionally not restored after restart.
 

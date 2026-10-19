@@ -531,6 +531,12 @@ impl Controller {
             let _ = sender.send(Event::ManualFinished(result));
         });
     }
+    /// Forget the last reading of a finished noise run; a running one is kept.
+    pub fn dismiss_manual_run(&mut self) {
+        if !matches!(self.state.job, Some(Job::ManualLevels { .. })) {
+            self.state.manual_run = None;
+        }
+    }
     pub fn can_set_manual_reference(&self, peak_dbfs: f32) -> bool {
         let Some(run) = &self.state.manual_run else {
             return false;

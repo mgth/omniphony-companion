@@ -1027,11 +1027,11 @@ fn starting_a_new_alignment_keeps_cards_in_place_and_chart_rows_select_speakers(
         let row = find_speaker_text(&mut app, &ctx, size, "Center");
         click(&mut app, &ctx, row.center(), size);
         find_result_text(&mut app, &ctx, size, "Center · Measurement result");
-        // "Match knobs" opens the physical level tool for the quietest speaker.
+        // "Match knobs" opens the level band below the cards for the quietest speaker.
         let link = find_speaker_text(&mut app, &ctx, size, "Match knobs");
         click(&mut app, &ctx, link.center(), size);
         find_result_text(&mut app, &ctx, size, "Front left · Measurement result");
-        find_speaker_text(&mut app, &ctx, size, "Play selected Front left");
+        find_speaker_text(&mut app, &ctx, size, "Speaker levels");
         find_speaker_text(&mut app, &ctx, size, "Measure");
         let output = frame(&mut app, &ctx, vec![], size);
         let cards: Vec<_> = ["Front left", "Front right"]
@@ -1787,16 +1787,6 @@ fn manual_level_panel_saves_a_fresh_reference_shows_direction_and_stops() {
     let mut app = CompanionApp::with_controller(&ctx, controller, false);
     let size = Vec2::new(1400.0, 1000.0);
     let output = frame(&mut app, &ctx, vec![], size);
-    let header = labels(&output)
-        .into_iter()
-        .find(|(s, _)| s.contains("Manual speaker levels"))
-        .unwrap()
-        .1;
-    click(&mut app, &ctx, header.center(), size);
-    for _ in 0..10 {
-        frame(&mut app, &ctx, vec![], size);
-    }
-    let output = frame(&mut app, &ctx, vec![], size);
     let save = labels(&output)
         .into_iter()
         .find(|(s, _)| s == "Use live level as reference")
@@ -1819,10 +1809,98 @@ fn manual_level_panel_saves_a_fresh_reference_shows_direction_and_stops() {
         text.iter()
             .any(|(s, _)| s == "Raise this speaker’s physical volume")
     );
-    let stop = text.into_iter().find(|(s, _)| s == "Stop noise").unwrap().1;
+    assert!(text.iter().any(|(s, _)| s == "Noise · -3.0 dB"));
+    let stop = text.into_iter().find(|(s, _)| s == "■ Stop").unwrap().1;
     click(&mut app, &ctx, stop.center(), size);
     assert!(app.controller.state.stopping);
     assert!(!app.controller.can_set_manual_reference(-30.0));
+    assert_eq!(starts.load(Ordering::Relaxed), 0);
+}
+
+/// The card's Noise button inside the named speaker card.
+fn noise_button(output: &egui::FullOutput, card: &str, text: &str) -> Option<Rect> {
+    let (card, _) = card_named(output, card)?;
+    labels(output)
+        .into_iter()
+        .find(|(s, r)| s == text && card.contains(r.center()))
+        .map(|(_, r)| r)
+}
+
+fn frames_until(
+    app: &mut CompanionApp,
+    ctx: &egui::Context,
+    size: Vec2,
+    what: &str,
+    done: impl Fn(&CompanionApp) -> bool,
+) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !done(app) {
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        frame(app, ctx, vec![], size);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn speaker_cards_play_noise_switch_speakers_and_the_band_below_reads_the_level() {
+    use companion_service::controller::Job;
+    let ctx = egui::Context::default();
+    let (controller, starts) = support::ready();
+    let mut app = CompanionApp::with_controller(&ctx, controller, false);
+    let size = Vec2::new(1400.0, 1000.0);
+    let playing = |app: &CompanionApp, id: &str| {
+        matches!(&app.controller.state.job, Some(Job::ManualLevels { output_id }) if output_id == id)
+            && !app.controller.state.stopping
+    };
+    let output = frame(&mut app, &ctx, vec![], size);
+    // No band until a speaker plays; other speakers wait for a reference level.
+    assert!(!labels(&output).iter().any(|(s, _)| s == "Speaker levels"));
+    let right = noise_button(&output, "Front right", "▶ Noise").unwrap();
+    click(&mut app, &ctx, right.center(), size);
+    assert!(!app.controller.busy());
+
+    let output = frame(&mut app, &ctx, vec![], size);
+    let left = noise_button(&output, "Front left", "▶ Noise").unwrap();
+    click(&mut app, &ctx, left.center(), size);
+    assert!(playing(&app, "Front left"));
+    frames_until(&mut app, &ctx, size, "a live reading", |app| {
+        app.controller.can_set_manual_reference(-30.0)
+    });
+    let output = frame(&mut app, &ctx, vec![], size);
+    assert!(labels(&output).iter().any(|(s, _)| s == "Speaker levels"));
+    let save = labels(&output)
+        .into_iter()
+        .find(|(s, _)| s == "Use live level as reference")
+        .unwrap()
+        .1;
+    click(&mut app, &ctx, save.center(), size);
+    assert!(app.controller.manual_reference(-30.0).is_some());
+
+    // Noise on another card stops this one, then plays there.
+    let output = frame(&mut app, &ctx, vec![], size);
+    let center = noise_button(&output, "Center", "▶ Noise").unwrap();
+    click(&mut app, &ctx, center.center(), size);
+    frames_until(&mut app, &ctx, size, "the switch to Center", |app| {
+        playing(app, "Center")
+    });
+    let output = frame(&mut app, &ctx, vec![], size);
+    assert!(noise_button(&output, "Front left", "▶ Noise").is_some());
+    let stop = noise_button(&output, "Center", "■ Stop").unwrap();
+    click(&mut app, &ctx, stop.center(), size);
+    finish_worker(&mut app, &ctx, size);
+
+    // The last reading stays until the band is hidden.
+    let output = frame(&mut app, &ctx, vec![], size);
+    let text = labels(&output);
+    assert!(
+        text.iter()
+            .any(|(s, _)| s.contains("Center · noise stopped"))
+    );
+    let hide = text.into_iter().find(|(s, _)| s == "Hide").unwrap().1;
+    click(&mut app, &ctx, hide.center(), size);
+    let output = frame(&mut app, &ctx, vec![], size);
+    assert!(!labels(&output).iter().any(|(s, _)| s == "Speaker levels"));
+    assert!(app.controller.state.manual_run.is_none());
     assert_eq!(starts.load(Ordering::Relaxed), 0);
 }
 

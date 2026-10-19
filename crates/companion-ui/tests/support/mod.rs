@@ -1,5 +1,6 @@
 use companion_service::{
     controller::{Backend, Controller},
+    manual_level,
     measurement::{MeasureProgress, MeasureRequest, TakeOutcome},
 };
 use measurement_capture::{InputConfiguration, InputDevice};
@@ -10,6 +11,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
+    time::{Duration, Instant},
 };
 
 pub struct UiBench {
@@ -65,6 +67,53 @@ impl Backend for UiBench {
             })
             .collect(),
         })
+    }
+    /// A synthetic meter: each speaker sits a few dB from the reference and drifts
+    /// slowly, so the preview's level band moves. No audio is played or recorded.
+    fn manual_levels(
+        &self,
+        request: manual_level::Request,
+        cancel: &AtomicBool,
+        update: &mut dyn FnMut(manual_level::Reading),
+    ) -> Result<(), String> {
+        let offset_db = match request.output_id.as_str() {
+            "Front right" => 2.5,
+            "Center" => -4.0,
+            "Surround left" => -1.5,
+            "Surround right" => 0.3,
+            _ => 0.0,
+        };
+        let start = Instant::now();
+        while !cancel.load(Ordering::Relaxed) {
+            let elapsed = start.elapsed().as_secs_f64();
+            if elapsed >= f64::from(manual_level::RUN_SECONDS) {
+                break;
+            }
+            let phase = match elapsed {
+                t if t < 0.4 => manual_level::Phase::CheckingInput,
+                t if t < 0.9 => manual_level::Phase::Background,
+                t if t < 1.4 => manual_level::Phase::Settling,
+                _ => manual_level::Phase::Listening,
+            };
+            let db = offset_db + 0.4 * (elapsed * 0.7).sin();
+            let level = (phase == manual_level::Phase::Listening)
+                .then(|| {
+                    calibration_core::manual_level::estimate(
+                        0.01 * 10f64.powf(db / 20.0) + 0.0001,
+                        0.0001,
+                        0.0,
+                    )
+                })
+                .flatten();
+            update(manual_level::Reading {
+                phase,
+                level,
+                remaining_seconds: manual_level::RUN_SECONDS - elapsed as u32,
+                captured_at: Instant::now(),
+            });
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        Ok(())
     }
     fn measure(
         &self,
