@@ -3,6 +3,7 @@ mod alignment_view;
 mod manual_level_view;
 mod microphone_view;
 mod quality_view;
+mod room_map;
 mod spectral_plot;
 mod waveform_plot;
 use companion_service::{
@@ -27,6 +28,9 @@ const RED: Color32 = Color32::from_rgb(248, 136, 139);
 const CARD_MIN_WIDTH: f32 = 210.0;
 const CARD_HEIGHT: f32 = 112.0;
 const CARD_GAP: f32 = 8.0;
+/// Narrowest alignment chart drawn beside the room map, so the far-arrival bracket keeps
+/// its values readable; a narrower chart spans the full width above the map and cards.
+const CHART_MIN_WIDTH: f32 = 700.0;
 
 pub use companion_service::preferences::ResultPlot;
 use companion_service::preferences::ViewPreferences;
@@ -848,33 +852,82 @@ impl CompanionApp {
         let mut stage = alignment_view::StageResponse::default();
         let mut cards: Vec<Option<alignment_view::Card>> = Vec::new();
         let mut alignment_action = None;
-        if let Some(alignment) = &self.controller.state.alignment {
-            let summary = alignment_view::Summary::new(alignment);
-            self.stage_height = card()
-                .show(ui, |ui| {
-                    ui.set_min_width(ui.available_width());
-                    stage = alignment_view::stage(ui, &summary, self.selected_speaker.as_deref());
-                })
-                .response
-                .rect
-                .height();
-            ui.add_space(10.0);
-            if let Some(outputs) = &outputs {
-                cards = outputs
-                    .iter()
-                    .map(|o| summary.speaker(&o.id).map(alignment_view::card))
-                    .collect();
+        let summary = self
+            .controller
+            .state
+            .alignment
+            .as_ref()
+            .map(alignment_view::Summary::new);
+        // The chart, or the previous chart's place while a new alignment is captured.
+        let chart = summary.is_some()
+            || matches!(self.controller.state.job, Some(Job::Alignment { .. }))
+                && self.stage_height > 0.0;
+        let chips = outputs
+            .as_deref()
+            .map(|o| self.map_chips(o, summary.as_ref()))
+            .unwrap_or_default();
+        // The room map takes a column on the right, beside the speaker cards, and beside
+        // the chart too when the chart keeps a readable width; a window too narrow for two
+        // card columns beside it shows the map below the cards. Nothing above the cards
+        // moves for it, and no placement or size depends on capture state.
+        let width = ui.available_width();
+        let count = outputs.as_ref().map_or(0, Vec::len);
+        let map = room_map::available(&chips)
+            .then(|| room_map::placement(width, count, CARD_MIN_WIDTH, CARD_HEIGHT, CARD_GAP));
+        let map_width = match map {
+            Some(room_map::Placement::Beside { side }) => Some(side + room_map::CARD_MARGINS),
+            _ => None,
+        };
+        let chart_in_column =
+            map_width.is_some_and(|map| width - map - CARD_GAP >= CHART_MIN_WIDTH);
+        if let (Some(summary), Some(outputs)) = (&summary, &outputs) {
+            cards = outputs
+                .iter()
+                .map(|o| summary.speaker(&o.id).map(alignment_view::card))
+                .collect();
+        }
+        let mut map_click = None;
+        let reserved = self.stage_height;
+        if chart && !chart_in_column {
+            let height = chart_card(
+                ui,
+                summary.as_ref(),
+                reserved,
+                self.selected_speaker.as_deref(),
+                &mut stage,
+            );
+            if summary.is_some() {
+                self.stage_height = height;
             }
-        } else if matches!(self.controller.state.job, Some(Job::Alignment { .. }))
-            && self.stage_height > 0.0
-        {
-            let height = self.stage_height;
-            card().show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
-                alignment_view::placeholder(ui, height - 28.0);
-            });
             ui.add_space(10.0);
         }
+        let top = ui.cursor().min;
+        let column_width = width - map_width.map_or(0.0, |map| map + CARD_GAP);
+        // Explicit child columns rather than closures: the cards below borrow `self`.
+        let outer = ui;
+        let mut left = outer.new_child(
+            egui::UiBuilder::new()
+                .max_rect(egui::Rect::from_min_size(
+                    top,
+                    Vec2::new(column_width, f32::INFINITY),
+                ))
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
+        left.set_width(column_width);
+        if chart && chart_in_column {
+            let height = chart_card(
+                &mut left,
+                summary.as_ref(),
+                reserved,
+                self.selected_speaker.as_deref(),
+                &mut stage,
+            );
+            if summary.is_some() {
+                self.stage_height = height;
+            }
+            left.add_space(10.0);
+        }
+        let ui = &mut left;
         if self.controller.state.snapshot.is_none()
             && self.controller.state.saved_snapshot.is_some()
         {
@@ -951,6 +1004,30 @@ impl CompanionApp {
                 ui.add_space(4.0);
             }
         }
+        if let Some(room_map::Placement::Below { side }) = map {
+            ui.add_space(6.0);
+            card().show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                map_click = room_map::wide(ui, &chips, side);
+            });
+        }
+        let mut used = left.min_rect();
+        if let (Some(map), Some(room_map::Placement::Beside { side })) = (map_width, map) {
+            let mut right = outer.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(egui::Rect::from_min_size(
+                        egui::pos2(top.x + column_width + CARD_GAP, top.y),
+                        Vec2::new(map, f32::INFINITY),
+                    ))
+                    .layout(egui::Layout::top_down(egui::Align::Min)),
+            );
+            card().show(&mut right, |ui| {
+                map_click = room_map::compact(ui, &chips, side);
+            });
+            used = used.union(right.min_rect());
+        }
+        outer.advance_cursor_after_rect(used);
+        let ui = outer;
         if let Some(alignment) = &self.controller.state.alignment {
             ui.add_space(6.0);
             card().show(ui, |ui| {
@@ -990,7 +1067,7 @@ impl CompanionApp {
                 });
             }
         }
-        if let Some(id) = stage.select {
+        if let Some(id) = stage.select.or(map_click) {
             self.select_speaker(&id);
         }
         if let Some(id) = stage.match_knobs {
@@ -1086,6 +1163,52 @@ impl CompanionApp {
                 }
             });
         }
+    }
+
+    /// The room map's view of each output: its layout position, the card's quality
+    /// grade, selection and role. Set aside means unchecked, muted or outside the sweep
+    /// band: speaker-specific facts, so an unfinished setup does not dim every speaker.
+    fn map_chips<'a>(
+        &self,
+        outputs: &'a [omniphony_adapter::protocol::Output],
+        summary: Option<&alignment_view::Summary>,
+    ) -> Vec<room_map::Chip<'a>> {
+        let sweep = self.controller.settings.sweep;
+        outputs
+            .iter()
+            .map(|o| {
+                let speaker = summary.and_then(|s| s.speaker(&o.id));
+                let dimmed = if self.controller.excluded_outputs.contains(&o.id) {
+                    Some("Set aside: unchecked for capture".to_owned())
+                } else if o.muted {
+                    Some("Set aside: muted in Omniphony".to_owned())
+                } else if sweep.start_hz < o.freq_low_hz.unwrap_or(20.0)
+                    || sweep.end_hz > o.freq_high_hz.unwrap_or(f32::MAX)
+                {
+                    Some("Set aside: the sweep does not fit its frequency range".to_owned())
+                } else {
+                    speaker
+                        .and_then(|sp| sp.reason.as_ref())
+                        .map(|reason| format!("Excluded from correction: {}", reason.text))
+                };
+                room_map::Chip {
+                    id: &o.id,
+                    name: &o.name,
+                    position: room_map::Position::from_output(o),
+                    grade: speaker.and_then(|sp| sp.grade).or_else(|| {
+                        self.controller
+                            .display_take(&o.id)
+                            .and_then(|t| t.outcome.as_ref().ok())
+                            .map(|outcome| outcome.quality().grade())
+                    }),
+                    selected: self.selected_speaker.as_deref() == Some(o.id.as_str()),
+                    active: self.controller.active_output() == Some(o.id.as_str()),
+                    reference: self.controller.settings.reference_output.as_deref()
+                        == Some(o.id.as_str()),
+                    dimmed,
+                }
+            })
+            .collect()
     }
 
     /// One fixed-size speaker card: name, quality, measured/planned values and progress.
@@ -1884,6 +2007,26 @@ fn lab_switch(ui: &mut egui::Ui, on: &mut bool) {
     response
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text("Lab shows every diagnostic: segment S/N tables, band candidates, threshold checks, saved-take review, proposal maintenance and the full caveats.");
+}
+/// The alignment chart card, or its placeholder at the reserved height; returns its height.
+fn chart_card(
+    ui: &mut egui::Ui,
+    summary: Option<&alignment_view::Summary>,
+    reserved: f32,
+    selected: Option<&str>,
+    stage: &mut alignment_view::StageResponse,
+) -> f32 {
+    card()
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            match summary {
+                Some(summary) => *stage = alignment_view::stage(ui, summary, selected),
+                None => alignment_view::placeholder(ui, reserved - 28.0),
+            }
+        })
+        .response
+        .rect
+        .height()
 }
 fn card() -> egui::Frame {
     egui::Frame::new()

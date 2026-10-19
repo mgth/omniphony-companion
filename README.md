@@ -76,6 +76,16 @@ The Rust/egui desktop window lets you:
   the measured ms/dB and the planned delay/gain, or the one-line reason when a
   speaker is excluded. Cards keep a fixed size and place; capture progress stays
   inside the active card.
+- See where each speaker is on the **room map**, a top view beside the cards (and
+  beside the chart in a wide window): the listener in the centre, front up, each
+  speaker as a chip placed by its layout azimuth and distance, with the card's
+  quality dot and a small triangle for speakers above or below ear level. The speaker
+  being measured pulses, unchecked, muted, out-of-band and excluded speakers are
+  dimmed, and the timing reference is labelled REF. Clicking a chip selects that
+  speaker like its card. Positions come from Omniphony's speaker layout (measurement
+  protocol 5); they are display only, never measured evidence. A speaker whose
+  distance the layout does not state sits on a dashed ring at the typical distance;
+  an older renderer without positions shows no map.
 - Use one action bar: **Apply to Omniphony**, an **Original / Corrected** switch for
   listening (restore or apply, available only with a proposal and an unchanged
   renderer revision), **Confirm by re-measuring** and **Undo**. One status line says
@@ -180,7 +190,8 @@ This fixture window is labelled **UI PREVIEW · NO AUDIO**. Its speakers and
 microphone are synthetic; clicking Measure does not open hardware or create
 recordings. `--alignment` shows the chart with an invented five-speaker alignment
 (three repeatable speakers, one silent, one noisy at a long delay); `--lab` starts
-with Lab on.
+with Lab on. The synthetic room places its 5.1 speakers on the map, with surrounds
+above the ear and a floor subwoofer whose distance is not stated.
 
 ![Alignment chart, speaker cards and action bar with synthetic preview data](docs/images/companion-alignment.png)
 
@@ -190,6 +201,10 @@ reasons, pass details and the Reanalyze/Update actions below the action bar:
 ![Lab view of the same synthetic alignment](docs/images/companion-alignment-lab.png)
 
 ![Native companion layout with synthetic preview data](docs/images/companion-preview.png)
+
+During capture (`--batch-progress`), the speaker playing pulses on the room map:
+
+![Room map pulsing the measured speaker during a synthetic capture](docs/images/companion-room-map-capture.png)
 
 The native frontend uses egui/eframe 0.32 with OpenGL to retain the workspace's
 Rust 1.89 minimum. This increment is validated on Linux; native packaging and
@@ -221,8 +236,9 @@ never read or write personal settings. See [the application boundaries](docs/ui-
 1. Select the working broadband speakers, one microphone input and a fixed timing
    reference. Keep the microphone at the listening position and the preamp gain fixed.
 2. Choose **Align levels and delays**. Each pass uses the shared-reference
-   sequence. Progress remains in the active speaker card; Stop cancels the run.
-   The previous chart's space stays reserved during capture, so cards do not move.
+   sequence. Progress remains in the active speaker card, and the speaker playing
+   pulses on the room map; Stop cancels the run. The previous chart's space stays
+   reserved during capture, so the chart, the map and the cards do not move.
 3. Read the result in the alignment chart and the speaker cards; Lab shows the raw
    per-speaker numbers. Levels use equal log-frequency
    power weighting over 500–2000 Hz, including the room response. They are transfer
@@ -293,8 +309,10 @@ again. Local sessions are ignored by Git.
 ## Renderer measurement control
 
 Requires an Omniphony build with OSC contract revision 9 and measurement protocol
-version 4 from the calibration development branch. Update the renderer and
-Companion together. Saved version-2 and version-3 takes remain reviewable.
+version 4 or 5 from the calibration development branch. The Companion speaks
+version 5, whose discovery adds each output's layout position for the room map;
+when an older renderer refuses it, discovery continues in version 4 without
+positions. Saved version-2 and version-3 takes remain reviewable.
 The adapter uses its existing local TCP listener, normally port 9000.
 It shares the typed protocol through a pinned revision of Omniphony's
 `omniphony-osc-contract` crate; no local sibling checkout is needed to build.
@@ -325,7 +343,7 @@ explicit `stop` and `end` operations. A host that does not render expires the
 signal instead of reporting completion. Render progress is not a DAC timestamp
 or an acoustic timing reference.
 
-See the [wire protocol](https://github.com/mgth/Omniphony/blob/d1b18ba2400371b5713bbb8f594befa5f556b8a9/docs/measurement-protocol.md)
+See the [wire protocol](https://github.com/mgth/Omniphony/blob/41a4afc485da23c255d59057eb526a7122a71fb6/docs/measurement-protocol.md)
 for limits, identifiers and the hardware-free `measurement_fixture` bench.
 
 ## Single-microphone acquisition
