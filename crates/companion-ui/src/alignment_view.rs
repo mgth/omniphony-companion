@@ -213,6 +213,9 @@ pub struct Card {
     /// None when `measured` is an exclusion reason, which may then use both lines.
     pub planned: Option<(String, Color32)>,
     pub details: String,
+    /// A far speaker the policy sets aside: `Some(false)` while set aside,
+    /// `Some(true)` once aligned to anyway. The card offers the other choice.
+    pub far: Option<bool>,
 }
 pub fn card(sp: &Speaker) -> Card {
     let (measured, planned) = match (sp.arrival, &sp.reason) {
@@ -244,6 +247,11 @@ pub fn card(sp: &Speaker) -> Card {
         measured,
         planned,
         details: tooltip(sp),
+        far: if sp.row.include_anyway {
+            Some(true)
+        } else {
+            sp.row.set_aside().then_some(false)
+        },
     }
 }
 
