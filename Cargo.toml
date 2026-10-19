@@ -12,7 +12,7 @@ repository = "https://github.com/mgth/omniphony-companion"
 
 [workspace.dependencies]
 omniphony-adapter = { path = "crates/omniphony-adapter" }
-omniphony-osc-contract = { git = "https://github.com/mgth/Omniphony", rev = "41a4afc485da23c255d59057eb526a7122a71fb6", features = ["measurement"] }
+omniphony-osc-contract = { git = "https://github.com/mgth/Omniphony", rev = "b2e69676991b4634a785ef87eed2af8849b9bcbd", features = ["measurement"] }
 calibration-core = { path = "crates/calibration-core" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["float_roundtrip"] }
@@ -33,3 +33,4 @@ opt-level = 2
 
 [profile.dev.package.rustfft]
 opt-level = 2
+
