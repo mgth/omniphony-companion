@@ -42,6 +42,7 @@ fn autosave_and_immediate_exit_restore_all_choices_and_the_latest_edit() {
             start_hz: 120.0,
             end_hz: 18000.0,
         },
+        retake_clipped: false,
     };
     let excluded = BTreeSet::from(["Rear".into(), "Height".into()]);
     store.update(&settings, "127.0.0.1:9003", &excluded, "takes/previous");
@@ -84,6 +85,8 @@ fn bad_and_future_files_are_not_overwritten_and_missing_fields_get_defaults() {
     let store = PreferenceStore::open(path).unwrap();
     assert_eq!(store.preferences().settings.input_channel, 2);
     assert_eq!(store.preferences().settings.sample_rate, 48000);
+    // Settings saved before the option existed measure clipped speakers again.
+    assert!(store.preferences().settings.retake_clipped);
 }
 
 #[test]

@@ -688,6 +688,14 @@ fn tooltip(sp: &Speaker) -> String {
             signed(db, 2, "dB")
         ));
     }
+    let lowered = sp.row.repeats.iter().map(|r| r.output_gain_offset_db);
+    let runs = lowered.clone().filter(|db| *db > 0.0).count();
+    if let Some(db) = lowered.reduce(f64::max).filter(|db| *db > 0.0) {
+        lines.push(format!(
+            "Clipped at its setting: {runs} / {} runs measured {db:.0} dB lower, counted back in the level",
+            sp.row.repeats.len()
+        ));
+    }
     if let Some(change) = &sp.change {
         lines.push(format!(
             "Delay {:.3} ms to {:.3} ms · Gain {:+.2} dB to {:+.2} dB",

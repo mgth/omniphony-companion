@@ -27,8 +27,9 @@ struct Rig {
     silent_batch: AtomicBool,
     captures: AtomicUsize,
     rejected: Mutex<std::collections::BTreeMap<String, String>>,
-    /// Outputs whose acquisition diagnostics see the target this much louder, clipped.
-    clipped: Mutex<std::collections::BTreeMap<String, f32>>,
+    /// Outputs this much louder at the microphone; a capture that reaches full scale
+    /// clips and is rejected as the measurement would.
+    loud: Mutex<std::collections::BTreeMap<String, f32>>,
     batches: Mutex<Vec<Vec<String>>>,
 }
 impl Rig {
@@ -66,7 +67,7 @@ impl Rig {
             silent_batch: AtomicBool::new(false),
             captures: AtomicUsize::new(0),
             rejected: Mutex::new(Default::default()),
-            clipped: Mutex::new(Default::default()),
+            loud: Mutex::new(Default::default()),
             batches: Mutex::new(vec![]),
         }
     }
@@ -155,28 +156,37 @@ impl Backend for Rig {
                 };
                 let delay = physical_delay + (o.delay_ms as f64 * 48.0).round() as usize;
                 let gain = if *output_id == "L" { 0.5 } else { 0.25 };
-                let gain = gain * 10_f32.powf(o.gain_db / 20.0);
+                let loud = self.loud.lock().unwrap().get(*output_id).copied();
+                let gain = gain * 10_f32.powf(o.gain_db / 20.0) * loud.unwrap_or(1.0);
                 let start = 24000 + source.len() * segment + delay;
                 for (j, x) in source.iter().enumerate() {
                     samples[start + j] += gain * x;
                 }
             }
-            let timing = timing::analyze(&samples, 48000, 48000, args.sweep).unwrap();
-            let mut response =
-                impulse::analyze(&samples, 48000, 48000, args.sweep, &timing).unwrap();
+            let clipped = samples.iter().any(|x| x.abs() >= 0.999);
+            for x in &mut samples {
+                *x = x.clamp(-1.0, 1.0);
+            }
+            let (timing, mut response) = if clipped {
+                let timing = timing::inspect(&samples, 48000, 48000, args.sweep).unwrap();
+                let response =
+                    impulse::inspect(&samples, 48000, 48000, args.sweep, &timing).unwrap();
+                (timing, response)
+            } else {
+                let timing = timing::analyze(&samples, 48000, 48000, args.sweep).unwrap();
+                let response =
+                    impulse::analyze(&samples, 48000, 48000, args.sweep, &timing).unwrap();
+                (timing, response)
+            };
             if self.bad_repeat.load(Ordering::Relaxed) && pass % 2 == 1 && id == "R" {
                 response.relative_arrival_ms = response.relative_arrival_ms.map(|v| v + 2.0);
             }
             let directory = args.out_dir.join(id);
             std::fs::create_dir(&directory).unwrap();
             let rejection = self.rejected.lock().unwrap().get(id).cloned();
-            let diagnostics = self.clipped.lock().unwrap().get(id).map(|&gain| {
-                let mut loud = samples.clone();
-                for x in &mut loud[24000 + source.len()..24000 + 2 * source.len()] {
-                    *x = (*x * gain).clamp(-1.0, 1.0);
-                }
-                diagnostics::analyze(&loud, 48000, 48000, args.sweep).unwrap()
-            });
+            let rejection = rejection.or_else(|| clipped.then(|| "clipped recording".into()));
+            let diagnostics =
+                clipped.then(|| diagnostics::analyze(&samples, 48000, 48000, args.sweep).unwrap());
             takes.push((
                 id.clone(),
                 TakeOutcome {
@@ -581,28 +591,25 @@ fn reason_codes_round_trip_and_text_only_sessions_still_load() {
     assert!(alignment::refresh_proposal(&blocked).is_err());
 }
 
-#[test]
-fn a_clipped_speaker_says_how_much_to_lower_the_gain() {
-    let root = tempfile::tempdir().unwrap();
+/// The rig with a fourth speaker, "Loud", whose take peaks `over_db` above full scale at
+/// its own gain: the rig's target is 0.25 times the -30 dBFS sweep.
+fn loud_rig(over_db: f64) -> (Rig, f64) {
     let rig = Rig::new();
     let mut snapshot = rig.snapshot.lock().unwrap();
     let mut loud = snapshot.outputs[2].clone();
-    loud.id = "Clipped".into();
+    loud.id = "Loud".into();
     loud.name = loud.id.clone();
     loud.index = 3;
     snapshot.outputs.push(loud);
     drop(snapshot);
-    rig.rejected
+    let factor = 10_f64.powf((over_db + 30.0) / 20.0) / 0.25;
+    rig.loud
         .lock()
         .unwrap()
-        .insert("Clipped".into(), "clipped recording".into());
-    // The rig's target peaks at 0.25 times the -30 dBFS sweep: this is 9.3 dB over.
-    let over_db = 9.3;
-    let gain = 10_f64.powf((over_db + 30.0) / 20.0) / 0.25;
-    rig.clipped
-        .lock()
-        .unwrap()
-        .insert("Clipped".into(), gain as f32);
+        .insert("Loud".into(), factor as f32);
+    (rig, 20.0 * factor.log10())
+}
+fn capture_loud(rig: &Rig, root: &std::path::Path, retake_clipped: bool) -> alignment::Outcome {
     let settings = Settings {
         device: Some("test microphone".into()),
         reference_output: Some("L".into()),
@@ -610,6 +617,7 @@ fn a_clipped_speaker_says_how_much_to_lower_the_gain() {
             duration_ms: 200,
             ..Settings::default().sweep
         },
+        retake_clipped,
         ..Settings::default()
     };
     let request = alignment::request(
@@ -617,26 +625,32 @@ fn a_clipped_speaker_says_how_much_to_lower_the_gain() {
         rig.discover("127.0.0.1:9000".parse().unwrap()).unwrap(),
         &settings,
         "L".into(),
-        root.path().join("clipped"),
+        root.join("loud"),
     )
     .unwrap();
-    let a = alignment::capture(
-        &rig,
+    alignment::capture(
+        rig,
         request,
         settings,
-        vec!["L".into(), "R".into(), "Clipped".into()],
+        vec!["L".into(), "R".into(), "Loud".into()],
         &AtomicBool::new(false),
         &mut |_, _, _| {},
     )
     .unwrap()
-    .alignment;
+}
+
+#[test]
+fn a_clipped_speaker_says_how_much_to_lower_the_gain() {
+    let root = tempfile::tempdir().unwrap();
+    let (rig, _) = loud_rig(9.3);
+    let a = capture_loud(&rig, root.path(), false).alignment;
     let Some(ExclusionReason::Clipped {
         overdrive_db: Some(db),
     }) = a.rows[2].exclusion()
     else {
         panic!("{:?}", a.rows[2].exclusion());
     };
-    assert!((db - over_db).abs() < 0.1, "{db}");
+    assert!((db - 9.3).abs() < 0.1, "{db}");
     assert_eq!(
         a.rows[2].exclusion().unwrap().human(),
         "Clipped by about 9 dB. Lower the mic gain or test level by 13 dB."
@@ -649,8 +663,86 @@ fn a_clipped_speaker_says_how_much_to_lower_the_gain() {
             .starts_with("clipped recording, 9.")
     );
     assert_eq!(a.corrected_output_ids(), ["L", "R"]);
+    assert_eq!(rig.writes.load(Ordering::Relaxed), 0);
+    assert!(a.restored_snapshot.is_none());
     let loaded = alignment::load(&a.directory).unwrap();
     assert_eq!(loaded.rows[2].exclusion(), a.rows[2].exclusion());
+}
+
+#[test]
+fn a_clipped_speaker_is_measured_again_at_a_lower_gain_and_counted_back() {
+    assert!(Settings::default().retake_clipped);
+    let root = tempfile::tempdir().unwrap();
+    let (rig, louder_db) = loud_rig(9.3);
+    let original = rig.snapshot.lock().unwrap().clone();
+    let outcome = capture_loud(&rig, root.path(), true);
+    let mut a = outcome.alignment;
+    // Each pass measured Loud again 13 dB lower (9.3 dB over plus 3 dB, rounded up).
+    assert_eq!(
+        *rig.batches.lock().unwrap(),
+        [
+            vec!["L", "R", "Loud"],
+            vec!["Loud"],
+            vec!["L", "R", "Loud"],
+            vec!["Loud"]
+        ]
+    );
+    let loud = &a.rows[2];
+    assert!(loud.qualified.is_some(), "{:?}", loud.exclusion());
+    assert!(loud.repeats.iter().all(|r| r.output_gain_offset_db == 13.0));
+    assert!(
+        loud.take_folders
+            .iter()
+            .all(|f| f.parent().unwrap().ends_with("pass-1-lowered-gain")
+                || f.parent().unwrap().ends_with("pass-2-lowered-gain"))
+    );
+    assert_eq!(outcome.retakes.len(), 2);
+    assert!(outcome.retakes.iter().all(|r| r.gain_offset_db == 13.0));
+    // The level counts the lowered gain back: Loud reads as loud as it is.
+    let level = |i: usize| a.rows[i].qualified.as_ref().unwrap().level_db;
+    assert!(
+        (level(2) - level(1) - louder_db).abs() < 0.1,
+        "{} vs {louder_db}",
+        level(2) - level(1)
+    );
+    // The gains are back; the alignment follows the renderer's newer revision.
+    let live = rig.snapshot.lock().unwrap().clone();
+    assert_eq!(rig.writes.load(Ordering::Relaxed), 4);
+    assert_ne!(live.revision, original.revision);
+    assert!(omniphony_adapter::same_configuration(&live, &original));
+    assert_eq!(a.restored_snapshot.as_ref(), Some(&live));
+    assert_eq!(a.snapshot, original);
+    // Lowered and restored states of both passes, for reanalysis of these takes.
+    assert_eq!(a.retake_snapshots.len(), 4);
+    assert_eq!(a.retake_snapshots[3], live);
+    // The proposal corrects Loud from its own gain, and applies to the live renderer.
+    assert_eq!(a.corrected_output_ids(), ["L", "R", "Loud"]);
+    let targets = a.targets(false).unwrap();
+    let gain = |id: &str| targets.iter().find(|t| t.output_id == id).unwrap().gain_db as f64;
+    assert!((gain("Loud") - gain("R") + louder_db).abs() < 0.1);
+    alignment::apply(&rig, &mut a, false).unwrap();
+    let applied = rig.snapshot.lock().unwrap().clone();
+    let loud_gain = applied
+        .outputs
+        .iter()
+        .find(|o| o.id == "Loud")
+        .unwrap()
+        .gain_db as f64;
+    assert!((loud_gain - gain("Loud")).abs() < 0.001);
+    let loaded = alignment::load(&a.directory).unwrap();
+    assert_eq!(loaded.rows[2].repeats, a.rows[2].repeats);
+}
+
+#[test]
+fn a_clipping_reference_speaker_is_not_measured_again() {
+    // Lowering the reference would change every take; only the test level can help.
+    let root = tempfile::tempdir().unwrap();
+    let (rig, _) = loud_rig(9.3);
+    rig.loud.lock().unwrap().insert("L".into(), 400.0);
+    let a = capture_loud(&rig, root.path(), true).alignment;
+    assert_eq!(rig.batches.lock().unwrap().len(), 2);
+    assert_eq!(rig.writes.load(Ordering::Relaxed), 0);
+    assert!(a.rows.iter().all(|r| r.qualified.is_none()));
 }
 
 #[test]

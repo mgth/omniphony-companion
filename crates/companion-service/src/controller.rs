@@ -143,6 +143,10 @@ pub struct Settings {
     pub calibration_path: String,
     pub output_root: String,
     pub sweep: Sweep,
+    /// During an alignment, measure a speaker whose own interval clipped again in the
+    /// same pass, with its output gain lowered by the overdrive plus margin; its level
+    /// adds that gain back. The gain is restored right after.
+    pub retake_clipped: bool,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -161,6 +165,7 @@ impl Default for Settings {
                 start_hz: 200.0,
                 end_hz: 10000.0,
             },
+            retake_clipped: true,
         }
     }
 }
@@ -1279,11 +1284,25 @@ impl Controller {
                 Event::Aligned(result) => {
                     match *result {
                         Ok(outcome) => {
+                            let settings = outcome.alignment.settings.clone();
                             self.append_alignment_takes(
-                                outcome.alignment.settings.clone(),
+                                settings.clone(),
                                 outcome.alignment.snapshot.revision.clone(),
                                 outcome.takes,
                             );
+                            // Takes at a lowered gain stay previous measurements.
+                            for retake in outcome.retakes {
+                                self.append_alignment_takes(
+                                    settings.clone(),
+                                    retake.revision,
+                                    vec![(retake.output_id, retake.take)],
+                                );
+                            }
+                            // Restoring lowered gains gave the renderer a newer revision.
+                            if let Some(live) = &outcome.alignment.restored_snapshot {
+                                self.state.saved_snapshot = Some(live.clone());
+                                self.state.snapshot = Some(live.clone());
+                            }
                             self.state.alignment = Some(outcome.alignment);
                         }
                         Err(e) => self.state.error = Some(e),

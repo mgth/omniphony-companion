@@ -426,7 +426,10 @@ takes may have diagnostic response curves, without qualifying a correction.
 A clipped take also reports how far the sweep overshot full scale, from a fit of
 the known sweep frequency to the unclipped samples before each plateau, and the
 hint suggests lowering the gain by that much plus 3 dB; analog preamplifier
-saturation below full scale is not detected.
+saturation below full scale is not detected. During an alignment such a speaker is
+measured again by default with its output gain lowered by that amount, restored
+afterwards, and its level counts the change back (see
+[gain and delay alignment](docs/gain-delay-alignment.md)).
 Excited-band SNR grades are Good (at least 20 dB), Limited (15–20 dB), or Poor
 (below 15 dB); missing evidence is Unavailable. Timing still needs a synchronized
 sequence within 2000 ppm linear drift. These are prototype indicators, not

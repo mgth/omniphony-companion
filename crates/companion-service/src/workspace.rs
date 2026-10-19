@@ -412,6 +412,8 @@ fn import_existing(settings: &Settings) -> (WorkspaceIndex, Vec<String>) {
                     String::new()
                 },
                 output_root: settings.output_root.clone(),
+                // Alignment-only behaviour; a single take is the same either way.
+                retake_clipped: settings.retake_clipped,
             };
             Ok((
                 TakeReference {

@@ -16,6 +16,14 @@ pub struct RepeatEstimate {
     /// Typed `reasons`, in the same order. Empty on sessions saved before reason codes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub codes: Vec<ExclusionReason>,
+    /// How far the speaker's output gain was lowered for this take, after it clipped at
+    /// its own setting. `level_db` already adds it back, so repeats compare at the
+    /// original gain. Zero for a regular take.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub output_gain_offset_db: f64,
+}
+fn is_zero(value: &f64) -> bool {
+    *value == 0.0
 }
 impl RepeatEstimate {
     pub fn reject(&mut self, code: ExclusionReason) {
@@ -139,6 +147,7 @@ mod tests {
             reference_level_db: Some(-1.0),
             reasons: vec![],
             codes: vec![],
+            output_gain_offset_db: 0.0,
         }
     }
     #[test]
@@ -336,6 +345,7 @@ mod subset_tests {
                 reference_level_db: Some(reference),
                 reasons: vec![],
                 codes: vec![],
+                output_gain_offset_db: 0.0,
             };
             2
         ]
