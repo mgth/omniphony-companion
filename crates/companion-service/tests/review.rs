@@ -114,6 +114,25 @@ fn offline_reanalysis_uses_wav_not_old_estimates_and_preserves_every_source_file
     );
 }
 #[test]
+fn takes_stay_reviewable_under_every_protocol_up_to_the_current_one() {
+    // A take keeps the protocol it was recorded with. Takes at protocol 4 were refused
+    // once the Companion spoke 5, which made their sessions impossible to reanalyze.
+    for version in 1..=protocol::VERSION + 1 {
+        let dir = tempfile::tempdir().unwrap();
+        fixture(dir.path());
+        change(dir.path(), "stimulus.json", |s| {
+            s["protocol_version"] = json!(version)
+        });
+        let supported = (2..=protocol::VERSION).contains(&version);
+        assert_eq!(
+            saved_take(dir.path()).is_ok(),
+            supported,
+            "protocol {version}"
+        );
+    }
+}
+
+#[test]
 fn cancelled_faulty_or_inconsistent_takes_cannot_be_promoted() {
     for mode in 0..9 {
         let dir = tempfile::tempdir().unwrap();
@@ -199,6 +218,17 @@ fn sequence_child_checks_parent_progress_and_keeps_local_timing() {
     .unwrap();
     let review = saved_take(&child).unwrap();
     assert!((review.timing.unwrap().relative_peak_delay_ms.unwrap() - 5.0).abs() < 0.1);
+    // A sequence child keeps the protocol it was recorded with, from 3 to the current one.
+    for version in 2..=protocol::VERSION {
+        change(&child, "stimulus.json", |s| {
+            s["protocol_version"] = json!(version)
+        });
+        assert_eq!(
+            saved_take(&child).is_ok(),
+            version >= 3,
+            "protocol {version}"
+        );
+    }
     change(root.path(), "batch-report.json", |r| {
         r["renderer_progress"]["sequence_outputs"] = json!(["L"])
     });
