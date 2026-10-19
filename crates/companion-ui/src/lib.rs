@@ -61,8 +61,13 @@ pub struct CompanionApp {
     preferences_error: Option<String>,
     /// Lab shows every diagnostic; off keeps the chart, cards and one action bar.
     pub lab: bool,
+    /// The level band below the speaker cards is shown.
     show_manual: bool,
+    /// Scroll the level band into view on the next frame.
     open_manual: bool,
+    /// Noise asked for on another speaker while one was still playing: it starts
+    /// once the previous noise has stopped.
+    pending_noise: Option<String>,
     /// Last drawn alignment stage height, reserved while a new alignment is captured
     /// so the action bar below never moves during capture.
     stage_height: f32,
@@ -155,6 +160,7 @@ impl CompanionApp {
             lab: false,
             show_manual: false,
             open_manual: false,
+            pending_noise: None,
             stage_height: 0.0,
             edit_microphone: false,
             edit_reference: false,
@@ -174,6 +180,12 @@ impl CompanionApp {
 
     pub fn draw(&mut self, ctx: &egui::Context) {
         self.controller.poll();
+        if !self.controller.busy()
+            && let Some(id) = self.pending_noise.take()
+        {
+            self.controller
+                .start_manual_levels(&id, self.manual_noise_dbfs);
+        }
         if self.controller.state.workspace_ready
             && let Some(view) = self.pending_view.take()
         {
@@ -1106,6 +1118,28 @@ impl CompanionApp {
                     self.speaker_card(ui, &output, rect, cards.get(i).and_then(Option::as_ref));
                 }
                 ui.add_space(4.0);
+                if self.show_manual
+                    || self.pending_noise.is_some()
+                    || self.controller.state.manual_run.is_some()
+                {
+                    ui.add_space(6.0);
+                    let band = card().show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        manual_level_view::band(
+                            ui,
+                            &mut self.controller,
+                            self.pending_noise.as_deref(),
+                            &mut self.manual_noise_dbfs,
+                        )
+                    });
+                    if std::mem::take(&mut self.open_manual) {
+                        band.response.scroll_to_me(None);
+                    }
+                    if band.inner.close {
+                        self.show_manual = false;
+                        self.controller.dismiss_manual_run();
+                    }
+                }
             }
         }
         if let Some(room_map::Placement::Below { side }) = map {
@@ -1212,19 +1246,6 @@ impl CompanionApp {
             }
         }
         ui.add_space(10.0);
-        if self.lab || self.show_manual || self.controller.state.manual_run.is_some() {
-            let open = std::mem::take(&mut self.open_manual);
-            let header = manual_level_view::draw(
-                ui,
-                &mut self.controller,
-                self.selected_speaker.as_deref(),
-                &mut self.manual_noise_dbfs,
-                open,
-            );
-            if open {
-                header.scroll_to_me(Some(egui::Align::TOP));
-            }
-        }
         if self.lab {
             egui::CollapsingHeader::new("Review a saved take · no playback").show(ui, |ui| {
                 ui.add(
@@ -1333,7 +1354,11 @@ impl CompanionApp {
                             .map(|outcome| outcome.quality().grade())
                     }),
                     selected: self.selected_speaker.as_deref() == Some(o.id.as_str()),
-                    active: self.controller.active_output() == Some(o.id.as_str()),
+                    active: self.controller.active_output() == Some(o.id.as_str())
+                        || manual_level_view::noise_output(
+                            &self.controller,
+                            self.pending_noise.as_deref(),
+                        ) == Some(o.id.as_str()),
                     reference: self.controller.settings.reference_output.as_deref()
                         == Some(o.id.as_str()),
                     dimmed,
@@ -1364,7 +1389,8 @@ impl CompanionApp {
                 .and_then(|t| t.outcome.as_ref().ok())
                 .map(|o| o.quality().grade())
         });
-        let mut controls = [egui::Rect::NOTHING; 2];
+        let mut controls = [egui::Rect::NOTHING; 3];
+        let mut noise = None;
         let card = ui.scope_builder(
             egui::UiBuilder::new()
                 .max_rect(rect)
@@ -1551,24 +1577,33 @@ impl CompanionApp {
                     if output.muted {
                         badge(ui, "MUTED", WARM);
                     }
-                    if active {
-                        self.row_progress(ui);
-                    } else if let Some(take) = &take {
-                        let (text, color) = self.measurement_status(take);
-                        ui.add(
-                            egui::Label::new(RichText::new(text).small().color(color)).truncate(),
+                    let playing = manual_level_view::noise_output(
+                        &self.controller,
+                        self.pending_noise.as_deref(),
+                    ) == Some(output.id);
+                    // The Noise button on the right; the status takes what is left.
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let (button, action) = manual_level_view::card_button(
+                            ui,
+                            &self.controller,
+                            output.id,
+                            self.pending_noise.as_deref(),
+                            self.manual_noise_dbfs,
                         );
-                    } else if let Err(reason) = &readiness {
-                        ui.add(
-                            egui::Label::new(RichText::new(reason).small().color(MUTED)).truncate(),
-                        )
-                        .on_hover_text(reason);
-                    } else {
-                        ui.label(RichText::new("Ready for a first take").small().color(MUTED));
-                    }
+                        controls[2] = button.rect;
+                        noise = action;
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            self.card_status(ui, playing, active, take.as_ref(), &readiness);
+                        });
+                    });
                 });
             },
         );
+        match noise {
+            Some(manual_level_view::NoiseAction::Start) => self.start_noise(output.id),
+            Some(manual_level_view::NoiseAction::Stop) => self.stop_noise(output.id),
+            None => {}
+        }
         card.response.widget_info(|| {
             egui::WidgetInfo::selected(
                 egui::WidgetType::SelectableLabel,
@@ -1638,6 +1673,64 @@ impl CompanionApp {
                 .text(label)
                 .fill(ACCENT.gamma_multiply(0.45)),
         );
+    }
+
+    /// The card's bottom status: its noise reading, capture progress, last take or
+    /// why it cannot be measured.
+    fn card_status(
+        &self,
+        ui: &mut egui::Ui,
+        playing: bool,
+        active: bool,
+        take: Option<&Take>,
+        readiness: &Result<(), String>,
+    ) {
+        let muted = |ui: &mut egui::Ui, text: &str| {
+            ui.add(egui::Label::new(RichText::new(text).small().color(MUTED)).truncate())
+        };
+        if playing {
+            let (text, color) =
+                manual_level_view::card_status(&self.controller, self.manual_noise_dbfs);
+            ui.add(egui::Label::new(RichText::new(text).small().strong().color(color)).truncate());
+        } else if active {
+            self.row_progress(ui);
+        } else if let Some(take) = take {
+            let (text, color) = self.measurement_status(take);
+            ui.add(egui::Label::new(RichText::new(text).small().color(color)).truncate());
+        } else if let Some(Job::ManualLevels { output_id }) = &self.controller.state.job {
+            // Not the measurement's wait reason on every other card while noise plays.
+            muted(ui, &format!("Noise on {output_id}"));
+        } else if let Err(reason) = readiness {
+            muted(ui, reason).on_hover_text(reason);
+        } else {
+            muted(ui, "Ready for a first take");
+        }
+    }
+
+    /// Play the level-matching noise on a speaker; a noise already playing elsewhere
+    /// is stopped first and this one follows. The selection is left alone: opening a
+    /// result below would shrink the speaker area and push the level band out of view.
+    fn start_noise(&mut self, output_id: &str) {
+        if !self.show_manual && self.controller.state.manual_run.is_none() {
+            self.open_manual = true;
+        }
+        self.show_manual = true;
+        if matches!(self.controller.state.job, Some(Job::ManualLevels { .. })) {
+            self.controller.cancel();
+            self.pending_noise = Some(output_id.to_owned());
+        } else {
+            self.controller
+                .start_manual_levels(output_id, self.manual_noise_dbfs);
+        }
+    }
+
+    fn stop_noise(&mut self, output_id: &str) {
+        if self.pending_noise.as_deref() == Some(output_id) {
+            self.pending_noise = None;
+        }
+        if matches!(self.controller.state.job, Some(Job::ManualLevels { .. })) {
+            self.controller.cancel();
+        }
     }
 
     fn select_speaker(&mut self, output_id: &str) {

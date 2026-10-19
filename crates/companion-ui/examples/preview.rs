@@ -73,6 +73,18 @@ fn main() -> eframe::Result {
                         },
                     ));
             }
+            if std::env::args().any(|a| a == "--level-matching") {
+                // A saved reference, then synthetic noise on Center: the level band below
+                // the cards moves with the preview meter.
+                let context = controller.manual_context(-30.0).unwrap();
+                controller.state.manual_reference =
+                    Some(companion_service::manual_level::Reference {
+                        context,
+                        level: calibration_core::manual_level::estimate(0.0101, 0.0001, 0.0)
+                            .unwrap(),
+                    });
+                controller.start_manual_levels("Center", -30.0);
+            }
             let mut app = companion_ui::CompanionApp::preview(&cc.egui_ctx, controller);
             app.lab = std::env::args().any(|a| a == "--lab");
             for arg in std::env::args() {
