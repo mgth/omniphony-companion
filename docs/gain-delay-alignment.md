@@ -88,6 +88,17 @@ The two passes keep the shared-reference optimization within each pass. Calibrat
 and verification do not automatically change output level, repeat forever, or
 continue after cancellation.
 
+**Measure again into the session** (a card's Measure choice) captures one speaker
+twice more, one take per pass in the session's reference–speaker–reference sequence,
+under the session's settings and the renderer state it expects (its original
+snapshot, or the restored one after a retake). The two takes replace that speaker's
+repeats in `alignment-state.json`; the other rows, the pass reports and the plan are
+unchanged, the proposal is rebuilt and validated as **Update correction proposal**
+does, and the new takes live in `pass-1-again-*` / `pass-2-again-*` directories of the
+session. A clipped take is measured again at a lower gain as in a full alignment. The
+action is refused for applied or uncertain sessions, changed settings or a renderer
+whose settings differ; a stopped or failed re-measure keeps the previous takes.
+
 **Reanalyze saved passes** recomputes the two passes from retained WAV files and
 shows new estimates, repeatability and quality grades. It writes a separate
 `alignment-review-*` directory, preserves every original report and cannot apply

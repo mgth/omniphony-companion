@@ -2274,3 +2274,99 @@ fn a_speaker_set_aside_by_the_policy_is_dimmed_on_the_map_until_included() {
     let output = frame(&mut app, &ctx, vec![], size);
     assert_eq!(text_alpha(&output, "SR"), Some(included));
 }
+
+#[test]
+fn a_card_measures_its_speaker_again_into_the_alignment_or_takes_one_diagnostic_take() {
+    use companion_service::controller::Job;
+    for size in [
+        Vec2::new(850.0, 640.0),
+        Vec2::new(1160.0, 800.0),
+        Vec2::new(1400.0, 1000.0),
+    ] {
+        let ctx = egui::Context::default();
+        let (mut controller, starts) = support::ready();
+        let mut alignment = support::alignment(&controller, true);
+        alignment.profile.as_mut().unwrap().origin = calibration_core::ObservationOrigin::Measured;
+        controller.state.alignment = Some(alignment);
+        let mut app = CompanionApp::preview(&ctx, controller);
+        for _ in 0..3 {
+            frame(&mut app, &ctx, vec![], size);
+        }
+        // The first card's Measure opens the choice; the menu floats over the cards.
+        let measure = find_speaker_text(&mut app, &ctx, size, "Measure");
+        let output = frame(&mut app, &ctx, vec![], size);
+        let cards: Vec<_> = ["Front left", "Front right"]
+            .iter()
+            .map(|name| card_named(&output, name).expect("card").0)
+            .collect();
+        click(&mut app, &ctx, measure.center(), size);
+        let output = frame(&mut app, &ctx, vec![], size);
+        let text = labels(&output);
+        let again = text
+            .iter()
+            .find(|(s, _)| s == "Measure again into the session")
+            .expect("session choice")
+            .1;
+        assert!(text.iter().any(|(s, _)| s == "One diagnostic take"));
+        for (name, before) in ["Front left", "Front right"].iter().zip(&cards) {
+            let after = card_named(&output, name).expect("card").0;
+            assert!(
+                (after.top() - before.top()).abs() < 0.5,
+                "{name} moved when the menu opened: {before:?} -> {after:?}"
+            );
+        }
+        click(&mut app, &ctx, again.center(), size);
+        assert!(
+            matches!(&app.controller.state.job, Some(Job::Remeasure { output_id, .. }) if output_id == "Front left"),
+            "{:?}",
+            app.controller.state.job
+        );
+        finish_worker(&mut app, &ctx, size);
+        // The bench has no batch capture: the request reached it, no single take ran.
+        assert!(
+            app.controller
+                .state
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("unavailable")),
+            "{:?}",
+            app.controller.state.error
+        );
+        assert_eq!(starts.load(Ordering::Relaxed), 0);
+        assert!(app.controller.state.alignment.is_some());
+        assert!(
+            !labels(&frame(&mut app, &ctx, vec![], size))
+                .iter()
+                .any(|(s, _)| s == "One diagnostic take"),
+            "the menu stayed open"
+        );
+        // The diagnostic take is still one choice away.
+        let measure = find_speaker_text(&mut app, &ctx, size, "Measure");
+        click(&mut app, &ctx, measure.center(), size);
+        let take = labels(&frame(&mut app, &ctx, vec![], size))
+            .into_iter()
+            .find(|(s, _)| s == "One diagnostic take")
+            .expect("diagnostic choice")
+            .1;
+        click(&mut app, &ctx, take.center(), size);
+        finish_worker(&mut app, &ctx, size);
+        assert_eq!(starts.load(Ordering::Relaxed), 1);
+        // An applied session is not measured into: Measure is the plain take again.
+        let live = app.controller.state.snapshot.clone().unwrap();
+        app.controller
+            .state
+            .alignment
+            .as_mut()
+            .unwrap()
+            .applied_snapshot = Some(live);
+        let measure = find_speaker_text(&mut app, &ctx, size, "Measure");
+        click(&mut app, &ctx, measure.center(), size);
+        assert!(
+            !labels(&frame(&mut app, &ctx, vec![], size))
+                .iter()
+                .any(|(s, _)| s == "Measure again into the session")
+        );
+        finish_worker(&mut app, &ctx, size);
+        assert_eq!(starts.load(Ordering::Relaxed), 2);
+    }
+}

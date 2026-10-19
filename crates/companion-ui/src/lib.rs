@@ -855,6 +855,16 @@ impl CompanionApp {
                     current + 1,
                     output_ids.len()
                 ),
+                Some(Job::Remeasure { output_id, pass }) => format!(
+                    "{} again · Pass {} / 2{left}",
+                    self.controller
+                        .state
+                        .snapshot
+                        .as_ref()
+                        .and_then(|s| s.outputs.iter().find(|o| o.id == *output_id))
+                        .map_or(output_id.as_str(), |o| o.name.as_str()),
+                    pass + 1
+                ),
                 Some(Job::Batch {
                     output_ids,
                     current,
@@ -1456,31 +1466,88 @@ impl CompanionApp {
                             );
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let button = ui.add_enabled(
-                            if active {
-                                !self.controller.state.stopping
-                            } else {
-                                readiness.is_ok()
-                            },
-                            egui::Button::new(
-                                RichText::new(if active { "Stop" } else { "Measure" })
-                                    .color(if readiness.is_ok() { BG } else { MUTED }),
-                            )
-                            .fill(if readiness.is_ok() { ACCENT } else { PANEL })
-                            .min_size(Vec2::new(70.0, 26.0)),
-                        );
-                        controls[1] = button.rect;
-                        if button.clicked() {
-                            if active {
-                                self.controller.cancel();
-                            } else {
-                                self.controller.start(output.id);
-                            }
-                        }
-                        let button = button.on_hover_text(format!(
+                        // With an alignment that is not applied, Measure offers to measure
+                        // this speaker again into it; the diagnostic take stays a choice.
+                        let session = !active
+                            && self.controller.state.alignment.as_ref().is_some_and(|a| {
+                                a.applied_snapshot.is_none()
+                                    && !a.application_uncertain
+                                    && a.rows.iter().any(|r| r.output_id == output.id)
+                            });
+                        let enabled = if active {
+                            !self.controller.state.stopping
+                        } else {
+                            readiness.is_ok()
+                        };
+                        let button = egui::Button::new(
+                            RichText::new(if active { "Stop" } else { "Measure" })
+                                .color(if readiness.is_ok() { BG } else { MUTED }),
+                        )
+                        .fill(if readiness.is_ok() { ACCENT } else { PANEL })
+                        .min_size(Vec2::new(70.0, 26.0));
+                        let take_hint = format!(
                             "One diagnostic take of this speaker, {}. Does not change any setting.",
                             about(self.controller.take_estimate().total)
-                        ));
+                        );
+                        let button = if session {
+                            let again = self.controller.can_remeasure(output.id);
+                            let again_hint = format!(
+                                "Two takes of this speaker, one per pass, replace its takes in the alignment and the proposal is rebuilt; the other speakers keep theirs. {}. Does not change any setting.",
+                                capitalized(&about(
+                                    companion_service::duration::alignment(
+                                        self.controller.settings.sweep,
+                                        1
+                                    )
+                                    .total
+                                ))
+                            );
+                            let (button, _) = ui
+                                .add_enabled_ui(enabled, |ui| {
+                                    egui::containers::menu::MenuButton::from_button(button).ui(
+                                        ui,
+                                        |ui| {
+                                            let mut entry = ui
+                                                .add_enabled(
+                                                    again.is_ok(),
+                                                    egui::Button::new(
+                                                        "Measure again into the session",
+                                                    ),
+                                                )
+                                                .on_hover_text(&again_hint);
+                                            if let Err(reason) = &again {
+                                                entry = entry.on_disabled_hover_text(reason);
+                                            }
+                                            if entry.clicked() {
+                                                self.controller.remeasure(output.id);
+                                                ui.close();
+                                            }
+                                            if ui
+                                                .button("One diagnostic take")
+                                                .on_hover_text(&take_hint)
+                                                .clicked()
+                                            {
+                                                self.controller.start(output.id);
+                                                ui.close();
+                                            }
+                                        },
+                                    )
+                                })
+                                .inner;
+                            button.on_hover_text(
+                                "Measure this speaker again into the alignment, or take one diagnostic take.",
+                            )
+                        } else {
+                            let button = ui.add_enabled(enabled, button);
+                            if button.clicked() {
+                                if active {
+                                    self.controller.cancel();
+                                } else {
+                                    self.controller.start(output.id);
+                                }
+                            }
+                            button.on_hover_text(take_hint)
+                        };
+                        controls[1] = button.rect;
                         if let Err(reason) = &readiness {
                             button.on_disabled_hover_text(reason);
                         }
