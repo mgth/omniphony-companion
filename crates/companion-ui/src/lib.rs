@@ -28,9 +28,6 @@ const RED: Color32 = Color32::from_rgb(248, 136, 139);
 const CARD_MIN_WIDTH: f32 = 210.0;
 const CARD_HEIGHT: f32 = 112.0;
 const CARD_GAP: f32 = 8.0;
-/// Narrowest alignment chart drawn beside the room map, so the far-arrival bracket keeps
-/// its values readable; a narrower chart spans the full width above the map and cards.
-const CHART_MIN_WIDTH: f32 = 700.0;
 
 pub use companion_service::preferences::ResultPlot;
 use companion_service::preferences::ViewPreferences;
@@ -67,7 +64,7 @@ pub struct CompanionApp {
     show_manual: bool,
     open_manual: bool,
     /// Last drawn alignment stage height, reserved while a new alignment is captured
-    /// so the speaker cards below never move during capture.
+    /// so the action bar below never moves during capture.
     stage_height: f32,
     /// The setup rail shows chosen values; these open their editors.
     edit_microphone: bool,
@@ -997,10 +994,10 @@ impl CompanionApp {
             .as_deref()
             .map(|o| self.map_chips(o, summary.as_ref()))
             .unwrap_or_default();
-        // The room map takes a column on the right, beside the speaker cards, and beside
-        // the chart too when the chart keeps a readable width; a window too narrow for two
-        // card columns beside it shows the map below the cards. Nothing above the cards
-        // moves for it, and no placement or size depends on capture state.
+        // The speaker cards come first, so they never move for the chart below them. The
+        // room map takes a column on the right beside the cards; a window too narrow for
+        // two card columns beside it shows the map below the cards. The chart then takes
+        // the full width under both. No placement or size depends on capture state.
         let width = ui.available_width();
         let count = outputs.as_ref().map_or(0, Vec::len);
         let map = room_map::available(&chips)
@@ -1009,8 +1006,6 @@ impl CompanionApp {
             Some(room_map::Placement::Beside { side }) => Some(side + room_map::CARD_MARGINS),
             _ => None,
         };
-        let chart_in_column =
-            map_width.is_some_and(|map| width - map - CARD_GAP >= CHART_MIN_WIDTH);
         if let (Some(summary), Some(outputs)) = (&summary, &outputs) {
             cards = outputs
                 .iter()
@@ -1019,20 +1014,6 @@ impl CompanionApp {
         }
         let mut map_click = None;
         let reserved = self.stage_height;
-        if chart && !chart_in_column {
-            let height = chart_card(
-                ui,
-                summary.as_ref(),
-                reserved,
-                self.selected_speaker.as_deref(),
-                busy,
-                &mut stage,
-            );
-            if summary.is_some() {
-                self.stage_height = height;
-            }
-            ui.add_space(10.0);
-        }
         let top = ui.cursor().min;
         let column_width = width - map_width.map_or(0.0, |map| map + CARD_GAP);
         // Explicit child columns rather than closures: the cards below borrow `self`.
@@ -1046,20 +1027,6 @@ impl CompanionApp {
                 .layout(egui::Layout::top_down(egui::Align::Min)),
         );
         left.set_width(column_width);
-        if chart && chart_in_column {
-            let height = chart_card(
-                &mut left,
-                summary.as_ref(),
-                reserved,
-                self.selected_speaker.as_deref(),
-                busy,
-                &mut stage,
-            );
-            if summary.is_some() {
-                self.stage_height = height;
-            }
-            left.add_space(10.0);
-        }
         let ui = &mut left;
         if self.controller.state.snapshot.is_none()
             && self.controller.state.saved_snapshot.is_some()
@@ -1161,6 +1128,26 @@ impl CompanionApp {
         }
         outer.advance_cursor_after_rect(used);
         let ui = outer;
+        if chart {
+            ui.add_space(10.0);
+            let summary = self
+                .controller
+                .state
+                .alignment
+                .as_ref()
+                .map(alignment_view::Summary::new);
+            let height = chart_card(
+                ui,
+                summary.as_ref(),
+                reserved,
+                self.selected_speaker.as_deref(),
+                busy,
+                &mut stage,
+            );
+            if summary.is_some() {
+                self.stage_height = height;
+            }
+        }
         if let Some(alignment) = &self.controller.state.alignment {
             ui.add_space(6.0);
             card().show(ui, |ui| {
