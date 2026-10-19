@@ -1937,3 +1937,94 @@ fn a_late_speaker_is_set_aside_with_a_reason_and_can_be_included_from_the_chart(
         assert_eq!(starts.load(Ordering::Relaxed), 0);
     }
 }
+
+#[test]
+fn the_setup_rail_shows_chosen_values_with_a_change_link() {
+    let ctx = egui::Context::default();
+    let (mut controller, starts) = support::ready();
+    controller.settings.sample_rate = 48000;
+    controller.state.defaults.device = true;
+    controller.state.defaults.reference = true;
+    let mut app = CompanionApp::preview(&ctx, controller);
+    let size = Vec2::new(1160.0, 800.0);
+    frame(&mut app, &ctx, vec![], size);
+    let rail = |app: &mut CompanionApp| {
+        labels(&frame(app, &ctx, vec![], size))
+            .into_iter()
+            .filter(|(_, r)| r.right() <= 310.0)
+            .collect::<Vec<_>>()
+    };
+    let text = rail(&mut app);
+    for value in [
+        "Preview audio interface",
+        "1 · Mic 1 · 48000 Hz\nmic-1 · main-seat",
+        "Front left",
+        "Arrivals are measured against this speaker.",
+    ] {
+        assert!(text.iter().any(|(t, _)| t == value), "{value}: {text:?}");
+    }
+    assert_eq!(
+        text.iter()
+            .filter(|(t, _)| t == "Chosen automatically")
+            .count(),
+        2
+    );
+    assert!(!text.iter().any(|(t, _)| t == "Input channel"));
+    let changes: Vec<_> = text.iter().filter(|(t, _)| t == "change").collect();
+    assert_eq!(changes.len(), 2);
+    click(&mut app, &ctx, changes[0].1.center(), size);
+    let text = rail(&mut app);
+    assert!(text.iter().any(|(t, _)| t == "Input channel"));
+    let done = text.iter().find(|(t, _)| t == "Done").unwrap().1;
+    click(&mut app, &ctx, done.center(), size);
+    assert!(!rail(&mut app).iter().any(|(t, _)| t == "Input channel"));
+    // A choice the user made is shown without the automatic note.
+    app.controller.state.defaults = Default::default();
+    assert!(
+        !rail(&mut app)
+            .iter()
+            .any(|(t, _)| t == "Chosen automatically")
+    );
+    // A missing reference opens its chooser instead of a summary.
+    app.controller.settings.reference_output = Some("Gone".into());
+    let text = rail(&mut app);
+    assert!(
+        text.iter()
+            .any(|(t, _)| t.starts_with("Selected reference is missing"))
+    );
+    assert_eq!(starts.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn measure_actions_show_their_expected_duration_and_running_captures_the_time_left() {
+    use companion_service::{controller::Job, measurement::MeasureProgress};
+    let ctx = egui::Context::default();
+    let (controller, starts) = support::ready();
+    let mut app = CompanionApp::preview(&ctx, controller);
+    let size = Vec2::new(1160.0, 800.0);
+    frame(&mut app, &ctx, vec![], size);
+    let expected = companion_service::duration::alignment(app.controller.settings.sweep, 5);
+    let minutes = (expected.total.as_secs_f64().ceil() as u64 + 30) / 60;
+    find_speaker_text(
+        &mut app,
+        &ctx,
+        size,
+        &format!("5 selected · about {minutes} min"),
+    );
+    app.lab = true;
+    find_speaker_text(&mut app, &ctx, size, "s · One diagnostic pass.");
+    app.lab = false;
+    app.controller.state.job = Some(Job::Alignment {
+        output_ids: vec!["Front left".into(), "Front right".into()],
+        current: 1,
+        pass: 1,
+    });
+    app.controller.state.progress = Some(MeasureProgress::Tail);
+    let left = app.controller.remaining().unwrap();
+    assert!(left < expected.total && !left.is_zero(), "{left:?}");
+    find_speaker_text(&mut app, &ctx, size, "Pass 2 / 2 · Speaker 2 / 2 · about");
+    find_speaker_text(&mut app, &ctx, size, "Acoustic tail · about");
+    app.controller.state.job = None;
+    app.controller.state.progress = None;
+    assert_eq!(starts.load(Ordering::Relaxed), 0);
+}

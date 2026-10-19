@@ -398,9 +398,11 @@ fn far_hint(ui: &mut egui::Ui, s: &Summary, busy: bool) -> Option<(String, bool)
                     .strong()
                     .color(FAR),
                 );
-                ui.label(
-                    "They keep their settings and the others are aligned without them. Aligning to them delays every other speaker by as much, which may affect lip sync.",
-                );
+                ui.label(if names.len() == 1 {
+                    "It keeps its settings and the others are aligned without it. Aligning to it delays every other speaker by as much, which may affect lip sync."
+                } else {
+                    "They keep their settings and the others are aligned without them. Aligning to them delays every other speaker by as much, which may affect lip sync."
+                });
             } else {
                 ui.label("Aligned to a far speaker on request: every other speaker is delayed to match it, which may affect lip sync.");
             }

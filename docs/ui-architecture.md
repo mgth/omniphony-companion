@@ -34,6 +34,20 @@ renderer; it restores no snapshot, session ownership, progress or measurement
 result. Selected input names, channels and reference IDs survive failed refreshes
 and missing/muted devices. Live readiness checks remain mandatory.
 
+Setup defaults live in the service (`companion_service::defaults`) and only fill
+values that were never chosen. When no device is saved, the controller picks the
+first input that is not a sink monitor and has a usable configuration (f32/i16/i32,
+1–64 channels), with its preferred rate: 48 kHz when supported, otherwise the
+supported rate closest to it, and channel 1. When no reference is saved, discovery
+picks the speaker named C/Center (by ID or name, unmuted and able to play the sweep),
+else FL/Front left, else the first speaker that can play the sweep. Empty microphone
+and position names become `mic-1` and `main-seat`. A saved choice is never replaced,
+even when that device or speaker is missing; the rail then opens its chooser with
+the warning. `State::defaults` records which values were chosen automatically, and
+the setup rail shows each chosen value with a **change** link (and "Chosen
+automatically" when it applies). Editors stay open while a choice is missing and
+close with **Done**.
+
 Panels submit changed preferences to a bounded worker that keeps only the latest
 value, debounces edits for 400 ms and publishes a synced temporary file by atomic
 replacement. Normal window closure flushes pending edits. No filesystem writes
@@ -48,6 +62,18 @@ The service saves the full recording and derives overlapping per-speaker windows
 shared references contain exactly the same raw samples. Panels draw progress in
 a fixed-height speaker status row. Stop cancels the entire batch and retains the
 partial raw recording; it never automatically starts another speaker.
+
+The service estimates run time (`companion_service::duration`) from the sweep, the
+speaker count and the passes: an input opening of 0.1 s, the 0.6 s metered lead-in,
+the renderer sequence of 2 × speakers + 1 segments (sweep plus 2 × 250 ms settle),
+up to 0.2 s of status latency, the 0.6 s tail, and offline analysis at 0.7 s per
+second of take audio (measured on the session of 16 Oct 2026: nine 1 s sweeps
+recorded in 30.1 s and analysed in 31.5 s per pass; machine dependent). The capture
+loops use the same lead-in, tail and polling constants. The UI shows "about N s/min"
+next to **Align levels and delays**, before Lab's diagnostic pass and in each card's
+Measure tooltip; while a capture runs, `Controller::remaining` turns the job, pass,
+speaker and latest progress into the time left shown in the run label and the
+active card.
 
 A new connection attempt discards the prior displayed snapshot immediately.
 Measurement readiness checks the selected input format/rate/channel, reference,

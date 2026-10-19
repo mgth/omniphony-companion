@@ -42,6 +42,16 @@ The Rust/egui desktop window lets you:
   continuous diagnostic capture with shared reference sweeps. **Stop** cancels the complete run.
 - Restore input/channel/rate, renderer address, reference, microphone/position,
   sweep settings, recording/calibration paths and speaker checkboxes on startup.
+- On a first run, the setup rail is already filled in: the first microphone input
+  with a usable configuration at its preferred rate (48 kHz when supported), the
+  centre speaker (else the front left) as timing reference, and the names `mic-1`
+  and `main-seat`. Each value is shown as chosen, with a **change** link. A saved
+  choice is never replaced, even if that device is missing.
+- See how long a run takes before starting it ("5 selected · about 2 min" next to
+  **Align levels and delays**; Lab's diagnostic pass and each card's Measure tooltip
+  show theirs), and the time left while it runs, in the run label and the active
+  card. Estimates come from the sweep, speaker count and passes; analysis time is
+  machine dependent.
 - Resume the previous workspace: recent measurements, saved review, alignment,
   selected result/graph, burst options, window size and panel layout. Saved results
   remain viewable while the renderer is offline. See `docs/workspace-restoration.md`.

@@ -150,8 +150,8 @@ impl Default for Settings {
             device: None,
             input_channel: 1,
             sample_rate: 48000,
-            microphone_id: "mic-1".into(),
-            position_id: "reference-seat".into(),
+            microphone_id: crate::defaults::MICROPHONE_ID.into(),
+            position_id: crate::defaults::POSITION_ID.into(),
             reference_output: None,
             calibration_path: String::new(),
             output_root: "sessions".into(),
@@ -232,6 +232,8 @@ pub struct State {
     pub stopping: bool,
     pub takes: Vec<Take>,
     pub error: Option<String>,
+    /// Setup values chosen automatically because none was saved.
+    pub defaults: crate::defaults::Applied,
 }
 struct LoadedAlignment {
     alignment: alignment::Alignment,
@@ -1066,6 +1068,45 @@ impl Controller {
             _ => None,
         }
     }
+    /// Expected duration of an alignment over the checked speakers, when one can start.
+    pub fn alignment_estimate(&self) -> Option<crate::duration::Estimate> {
+        let outputs = self.alignment_readiness().ok()?;
+        Some(crate::duration::alignment(
+            self.settings.sweep,
+            outputs.len(),
+        ))
+    }
+    /// Expected duration of one diagnostic pass over the checked speakers.
+    pub fn batch_estimate(&self) -> Option<crate::duration::Estimate> {
+        let outputs = self.batch_outputs().ok()?;
+        Some(crate::duration::batch(self.settings.sweep, outputs.len()))
+    }
+    /// Expected duration of one take of a single speaker.
+    pub fn take_estimate(&self) -> crate::duration::Estimate {
+        crate::duration::batch(self.settings.sweep, 1)
+    }
+    /// Time left in the running capture, from its job and latest progress.
+    pub fn remaining(&self) -> Option<Duration> {
+        let sweep = self.settings.sweep;
+        let (estimate, pass, target) = match &self.state.job {
+            Some(Job::Measure { .. }) => (crate::duration::batch(sweep, 1), 0, 0),
+            Some(Job::Batch {
+                output_ids,
+                current,
+            }) => (crate::duration::batch(sweep, output_ids.len()), 0, *current),
+            Some(Job::Alignment {
+                output_ids,
+                current,
+                pass,
+            }) => (
+                crate::duration::alignment(sweep, output_ids.len()),
+                *pass,
+                *current,
+            ),
+            _ => return None,
+        };
+        Some(estimate.remaining(pass, target, self.state.progress.as_ref()))
+    }
     pub fn batch_outputs(&self) -> Result<Vec<String>, String> {
         if self.busy() {
             return Err("Wait for the current operation to finish.".into());
@@ -1367,12 +1408,18 @@ impl Controller {
                     match result {
                         Ok(inputs) => {
                             self.state.inputs = inputs;
+                            crate::defaults::input_settings(
+                                &mut self.settings,
+                                &self.state.inputs,
+                                &mut self.state.defaults,
+                            );
                         }
                         Err(error) => {
                             self.state.inputs.clear();
                             self.state.input_error = Some(error);
                         }
                     }
+                    crate::defaults::identities(&mut self.settings, &mut self.state.defaults);
                     self.state.job = None;
                     if let Some(endpoint) = self.startup_endpoint.take() {
                         self.connect(&endpoint);
@@ -1381,19 +1428,11 @@ impl Controller {
                 Event::Discovered(endpoint, result) => {
                     match result {
                         Ok(snapshot) => {
-                            if self.settings.reference_output.is_none() {
-                                self.settings.reference_output = snapshot
-                                    .outputs
-                                    .iter()
-                                    .find(|o| {
-                                        !o.muted
-                                            && self.settings.sweep.start_hz
-                                                >= o.freq_low_hz.unwrap_or(20.0)
-                                            && self.settings.sweep.end_hz
-                                                <= o.freq_high_hz.unwrap_or(f32::MAX)
-                                    })
-                                    .map(|o| o.id.clone());
-                            }
+                            crate::defaults::reference_settings(
+                                &mut self.settings,
+                                &snapshot,
+                                &mut self.state.defaults,
+                            );
                             self.state.endpoint = Some(endpoint);
                             self.state.saved_snapshot = Some(snapshot.clone());
                             self.state.snapshot = Some(snapshot);
@@ -1469,9 +1508,7 @@ impl Drop for Controller {
         self.cancelled.store(true, Ordering::Relaxed);
     }
 }
-fn supported_format(format: &str) -> bool {
-    matches!(format, "f32" | "i16" | "i32")
-}
+use crate::defaults::supported_format;
 fn catch_job<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or_else(|_| {
         Err("The background operation stopped unexpectedly. Reconnect before retrying.".into())

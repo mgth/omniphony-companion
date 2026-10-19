@@ -65,6 +65,9 @@ pub struct CompanionApp {
     /// Last drawn alignment stage height, reserved while a new alignment is captured
     /// so the speaker cards below never move during capture.
     stage_height: f32,
+    /// The setup rail shows chosen values; these open their editors.
+    edit_microphone: bool,
+    edit_reference: bool,
 }
 
 impl CompanionApp {
@@ -152,6 +155,8 @@ impl CompanionApp {
             show_manual: false,
             open_manual: false,
             stage_height: 0.0,
+            edit_microphone: false,
+            edit_reference: false,
         }
     }
 
@@ -464,7 +469,42 @@ impl CompanionApp {
             });
         }
         let busy = self.controller.busy();
+        let automatic = self.controller.state.defaults;
+        // A missing or unavailable choice keeps the editor open until Done.
+        if self.controller.selected_input().is_none()
+            || self.controller.input_channels() == 0
+            || self.controller.settings.microphone_id.trim().is_empty()
+            || self.controller.settings.position_id.trim().is_empty()
+        {
+            self.edit_microphone = true;
+        }
+        if !self.edit_microphone
+            && let Some(input) = self.controller.selected_input()
+        {
+            let settings = &self.controller.settings;
+            let detail = format!(
+                "{} · {} Hz\n{} · {}",
+                input.channel_label(settings.input_channel),
+                settings.sample_rate,
+                settings.microphone_id,
+                settings.position_id
+            );
+            if chosen(
+                ui,
+                &input.label(),
+                &detail,
+                (automatic.device || automatic.microphone_id || automatic.position_id).then_some(
+                    "Chosen automatically: the first microphone input at its preferred rate.",
+                ),
+                !busy,
+            ) {
+                self.edit_microphone = true;
+            }
+        }
         ui.add_enabled_ui(!busy, |ui| {
+            if !self.edit_microphone {
+                return;
+            }
             let selected = self
                 .controller
                 .selected_input()
@@ -569,6 +609,18 @@ impl CompanionApp {
                 egui::TextEdit::singleline(&mut self.controller.settings.position_id)
                     .desired_width(f32::INFINITY),
             );
+            let complete = self.controller.selected_input().is_some()
+                && self.controller.input_channels() > 0
+                && !self.controller.settings.microphone_id.trim().is_empty()
+                && !self.controller.settings.position_id.trim().is_empty();
+            ui.add_space(4.0);
+            if ui
+                .add_enabled(complete, egui::Link::new("Done"))
+                .on_disabled_hover_text("Choose an input, then name the microphone and position.")
+                .clicked()
+            {
+                self.edit_microphone = false;
+            }
         });
         if let Some(error) = &self.controller.state.input_error {
             ui.label(RichText::new(error).small().color(RED));
@@ -584,7 +636,47 @@ impl CompanionApp {
         ui.add_space(23.0);
         section(ui, "02", "Timing reference");
         ui.add_space(10.0);
+        let reference = self
+            .controller
+            .settings
+            .reference_output
+            .as_deref()
+            .and_then(|id| {
+                match &self.controller.state.snapshot {
+                    // Before connecting, the saved choice is shown as saved.
+                    None => Some(id.to_owned()),
+                    Some(snapshot) => snapshot
+                        .outputs
+                        .iter()
+                        .find(|o| o.id == id && !o.muted)
+                        .map(|o| o.name.clone()),
+                }
+            });
+        if reference.is_none() {
+            self.edit_reference = true;
+        }
+        if !self.edit_reference
+            && let Some(name) = &reference
+            && chosen(
+                ui,
+                name,
+                if self.controller.state.snapshot.is_some() {
+                    "Arrivals are measured against this speaker."
+                } else {
+                    "Saved choice · connect to check it."
+                },
+                automatic
+                    .reference
+                    .then_some("Chosen automatically: the centre speaker, else the front left."),
+                !busy,
+            )
+        {
+            self.edit_reference = true;
+        }
         ui.add_enabled_ui(!busy, |ui| {
+            if !self.edit_reference {
+                return;
+            }
             let selected = self
                 .controller
                 .settings
@@ -610,6 +702,13 @@ impl CompanionApp {
             if let (Some(id), Some(snapshot)) = (&self.controller.settings.reference_output, &self.controller.state.snapshot)
                 && !snapshot.outputs.iter().any(|o| &o.id == id && !o.muted) {
                 ui.label(RichText::new("Selected reference is missing or muted. Restore it or choose another speaker.").small().color(WARM));
+            }
+            if ui
+                .add_enabled(reference.is_some(), egui::Link::new("Done"))
+                .on_disabled_hover_text("Choose an available speaker.")
+                .clicked()
+            {
+                self.edit_reference = false;
             }
         });
         ui.add_space(6.0);
@@ -724,13 +823,18 @@ impl CompanionApp {
             {
                 self.controller.cancel();
             }
+            let left = self
+                .controller
+                .remaining()
+                .map(|d| format!(" · {}", time_left(d)))
+                .unwrap_or_default();
             let text = match &self.controller.state.job {
                 Some(Job::Alignment {
                     output_ids,
                     current,
                     pass,
                 }) => format!(
-                    "Pass {} / 2 · Speaker {} / {}",
+                    "Pass {} / 2 · Speaker {} / {}{left}",
                     pass + 1,
                     current + 1,
                     output_ids.len()
@@ -738,11 +842,20 @@ impl CompanionApp {
                 Some(Job::Batch {
                     output_ids,
                     current,
-                }) => format!("Speaker {} / {}", current + 1, output_ids.len()),
+                }) => format!("Speaker {} / {}{left}", current + 1, output_ids.len()),
                 _ => self
                     .controller
                     .batch_outputs()
-                    .map(|o| format!("{} selected", o.len()))
+                    .map(|o| {
+                        format!(
+                            "{} selected{}",
+                            o.len(),
+                            self.controller
+                                .alignment_estimate()
+                                .map(|e| format!(" · {}", about(e.total)))
+                                .unwrap_or_default()
+                        )
+                    })
                     .unwrap_or_default(),
             };
             ui.add(egui::Label::new(RichText::new(text).small().color(MUTED)).truncate());
@@ -768,9 +881,15 @@ impl CompanionApp {
                     self.controller.start_batch();
                 }
                 ui.label(
-                    RichText::new("One diagnostic pass. Does not propose or apply corrections.")
-                        .small()
-                        .color(MUTED),
+                    RichText::new(format!(
+                        "{}One diagnostic pass. Does not propose or apply corrections.",
+                        self.controller
+                            .batch_estimate()
+                            .map(|e| format!("{} · ", capitalized(&about(e.total))))
+                            .unwrap_or_default()
+                    ))
+                    .small()
+                    .color(MUTED),
                 );
             });
         }
@@ -1218,9 +1337,10 @@ impl CompanionApp {
                                 self.controller.start(output.id);
                             }
                         }
-                        let button = button.on_hover_text(
-                            "One diagnostic take of this speaker. Does not change any setting.",
-                        );
+                        let button = button.on_hover_text(format!(
+                            "One diagnostic take of this speaker, {}. Does not change any setting.",
+                            about(self.controller.take_estimate().total)
+                        ));
                         if let Err(reason) = &readiness {
                             button.on_disabled_hover_text(reason);
                         }
@@ -1317,9 +1437,12 @@ impl CompanionApp {
             None => ("Preparing", 0.0),
         };
         let label = if self.controller.state.stopping {
-            "Stopping and saving…"
+            "Stopping and saving…".to_owned()
         } else {
-            phase
+            match self.controller.remaining() {
+                Some(left) => format!("{phase} · {}", time_left(left)),
+                None => phase.to_owned(),
+            }
         };
         ui.add(
             egui::ProgressBar::new(fraction)
@@ -1819,6 +1942,71 @@ fn section(ui: &mut egui::Ui, number: &str, title: &str) {
         ui.label(RichText::new(title).size(17.0).strong());
     });
 }
+/// "about 45 s", "about 2 min".
+fn about(duration: Duration) -> String {
+    let seconds = duration.as_secs_f64().ceil() as u64;
+    if seconds < 60 {
+        format!("about {seconds} s")
+    } else {
+        format!("about {} min", (seconds + 30) / 60)
+    }
+}
+/// The remaining-time hint of a running capture.
+fn time_left(duration: Duration) -> String {
+    if duration.is_zero() {
+        "finishing".into()
+    } else {
+        format!("{} left", about(duration))
+    }
+}
+fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .map(|c| c.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
+}
+
+/// A chosen setup value with a "change" link; returns whether the link was clicked.
+fn chosen(
+    ui: &mut egui::Ui,
+    value: &str,
+    detail: &str,
+    automatic: Option<&str>,
+    enabled: bool,
+) -> bool {
+    let mut change = false;
+    egui::Frame::new()
+        .fill(CARD)
+        .corner_radius(6)
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.allocate_ui_with_layout(
+                    Vec2::new(ui.available_width() - 56.0, 0.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.add(egui::Label::new(RichText::new(value).strong()).truncate())
+                            .on_hover_text(value);
+                        ui.label(RichText::new(detail).small().color(MUTED));
+                        if let Some(note) = automatic {
+                            ui.label(RichText::new("Chosen automatically").small().color(ACCENT))
+                                .on_hover_text(note);
+                        }
+                    },
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                    change = ui
+                        .add_enabled(enabled, egui::Link::new("change"))
+                        .on_disabled_hover_text("Wait for the current operation to finish.")
+                        .clicked();
+                });
+            });
+        });
+    change
+}
+
 fn caption(ui: &mut egui::Ui, text: &str) {
     ui.label(RichText::new(text).size(11.0).color(MUTED));
 }
