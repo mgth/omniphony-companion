@@ -24,7 +24,7 @@ launches use the saved index and exact view choices rather than rescanning.
 
 For each indexed take, the service also discovers its latest `analysis-*.json`.
 This includes reports produced by older versions of **Reanalyze saved passes**.
-Clicking a speaker row selects that speaker and opens the analysis for the exact
+Clicking a speaker card selects that speaker and opens the analysis for the exact
 take folder and speaker identity. A tinted background and outline mark the selection;
 rows with no measurements show an explicit empty state instead of another speaker's
 result. The single result view labels its source and alignment pass;

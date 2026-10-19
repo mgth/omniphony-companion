@@ -71,7 +71,7 @@ of source files. The report includes raw band-limited impulse samples, time axes
 band candidates, reference agreement, unresolved reasons and a bounded envelope
 representation for display. It stores no automatic correction proposal.
 
-Use **Review a saved take · no playback → Analyze saved take** in the UI or:
+Use **Review a saved take · no playback → Analyze saved take** (Lab) in the UI or:
 
 ```sh
 cargo run --locked -p companion-cli -- capture review --take sessions/example-take

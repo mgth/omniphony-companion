@@ -9,14 +9,16 @@ Use it before acquiring a new alignment session.
 1. Connect to a renderer build with the optional finite level-noise extension.
    Select the measurement interface, microphone channel and reference speaker.
    Keep microphone position and interface input gain unchanged throughout.
-2. Expand **Manual speaker levels · physical volume controls**, above the speaker
-   list. Start with the conservative default test peak (-30 dBFS).
+2. Open **Manual speaker levels · physical volume controls**, below the speaker
+   cards. It appears from the alignment chart's **Match knobs** hint (when the
+   quietest reliable speaker is more than 3 dB below the others), while a run
+   exists, or with Lab on. Start with the conservative default test peak (-30 dBFS).
 3. Choose **Play reference**. The renderer silences programme audio; the companion
    measures background, starts noise and waits two seconds for settling.
 4. When the live meter is available, choose **Use live level as reference**,
    then **Stop noise**. The reference uses the current one-second band-power
    window. It is a snapshot, not a level that follows later knob movements.
-5. Select a different speaker row, then **Play selected**. Adjust that speaker's
+5. Select a different speaker card, then **Play selected**. Adjust that speaker's
    physical volume. Negative difference means raise its volume; positive means
    lower it. Green indicates a difference within ±0.5 dB.
 6. Stop noise before selecting the next speaker. Capture a new reference if the

@@ -291,3 +291,13 @@ settings through application/restoration. Verification checks the fixed correcte
 subset. The UI reports membership and exclusion reasons explicitly. Complete
 original saved passes can update their proposal without replay or hardware writes;
 diagnostic-only reanalysis remains non-applicable.
+
+### Alignment chart view (UI phase 1)
+
+The alignment is presented as a chart instead of numbers in speaker rows: a
+Timing lane relative to the reference and a Level lane relative to the quietest
+reliable speaker, each showing what Apply changes. Compact speaker cards, one
+action bar (Apply, Original/Corrected, Confirm by re-measuring, Undo) and short
+human exclusion reasons follow. A persisted Lab switch keeps every previous
+diagnostic one click away. This phase changes presentation only; services,
+policy, persistence semantics and renderer writes are unchanged.

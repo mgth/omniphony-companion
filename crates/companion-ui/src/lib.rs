@@ -24,8 +24,21 @@ const ACCENT: Color32 = Color32::from_rgb(113, 219, 201);
 const WARM: Color32 = Color32::from_rgb(243, 194, 123);
 const RED: Color32 = Color32::from_rgb(248, 136, 139);
 
+const CARD_MIN_WIDTH: f32 = 210.0;
+const CARD_HEIGHT: f32 = 112.0;
+const CARD_GAP: f32 = 8.0;
+
 pub use companion_service::preferences::ResultPlot;
 use companion_service::preferences::ViewPreferences;
+
+/// The renderer output fields a speaker card shows.
+struct CardOutput<'a> {
+    id: &'a str,
+    name: &'a str,
+    muted: bool,
+    layout: String,
+    now: String,
+}
 
 pub struct CompanionApp {
     pub controller: Controller,
@@ -45,6 +58,13 @@ pub struct CompanionApp {
     review_path: String,
     preferences: Option<PreferenceStore>,
     preferences_error: Option<String>,
+    /// Lab shows every diagnostic; off keeps the chart, cards and one action bar.
+    pub lab: bool,
+    show_manual: bool,
+    open_manual: bool,
+    /// Last drawn alignment stage height, reserved while a new alignment is captured
+    /// so the speaker cards below never move during capture.
+    stage_height: f32,
 }
 
 impl CompanionApp {
@@ -80,6 +100,7 @@ impl CompanionApp {
         app.waveform_view.overview = prefs.view.burst_overview;
         app.waveform_view.overlay = prefs.view.burst_overlay;
         app.saved_selected = prefs.view.saved_selected;
+        app.lab = prefs.view.show_alignment;
         app.manual_noise_dbfs = if prefs.view.manual_noise_dbfs.is_finite() {
             prefs.view.manual_noise_dbfs.clamp(-60.0, -12.0)
         } else {
@@ -127,6 +148,10 @@ impl CompanionApp {
             review_path: String::new(),
             preferences: None,
             preferences_error: None,
+            lab: false,
+            show_manual: false,
+            open_manual: false,
+            stage_height: 0.0,
         }
     }
 
@@ -134,7 +159,10 @@ impl CompanionApp {
     pub fn preview(ctx: &egui::Context, controller: Controller) -> Self {
         let mut app = Self::with_controller(ctx, controller, false);
         app.preview = true;
-        ctx.style_mut(|style| style.animation_time = 0.0);
+        ctx.style_mut(|style| {
+            style.animation_time = 0.0;
+            style.scroll_animation = egui::style::ScrollAnimation::none();
+        });
         app
     }
 
@@ -238,6 +266,8 @@ impl CompanionApp {
                             },
                             WARM,
                         );
+                        ui.add_space(12.0);
+                        lab_switch(ui, &mut self.lab);
                     });
                 });
                 ui.add_space(12.0);
@@ -347,7 +377,7 @@ impl CompanionApp {
                 let panel = if has_result {
                     egui::TopBottomPanel::bottom("results_panel")
                         .resizable(true)
-                        .default_height((height * 0.65).min((height - reserved).max(140.0)))
+                        .default_height((height * 0.5).min((height - reserved).max(140.0)))
                         .height_range(140.0..=(height - reserved).max(140.0))
                 } else {
                     egui::TopBottomPanel::bottom("empty_results_panel").exact_height(75.0)
@@ -393,7 +423,7 @@ impl CompanionApp {
                 }
                 store.update_view(ViewPreferences {
                     plot: self.result_plot,
-                    show_alignment: false,
+                    show_alignment: self.lab,
                     saved_selected: self.saved_selected,
                     selected_take: self
                         .selected_result
@@ -656,54 +686,6 @@ impl CompanionApp {
     }
 
     fn speakers(&mut self, ui: &mut egui::Ui) {
-        manual_level_view::draw(
-            ui,
-            &mut self.controller,
-            self.selected_speaker.as_deref(),
-            &mut self.manual_noise_dbfs,
-        );
-        ui.add_space(10.0);
-
-        egui::CollapsingHeader::new("Review a saved take · no playback").show(ui, |ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut self.review_path)
-                    .desired_width(ui.available_width())
-                    .hint_text("Path to a saved take folder"),
-            );
-            if ui
-                .add_enabled(
-                    !self.controller.busy(),
-                    egui::Button::new("Analyze saved take"),
-                )
-                .clicked()
-            {
-                self.analyze_selected_folder(self.review_path.clone());
-            }
-            if ui
-                .add_enabled(
-                    !self.controller.busy(),
-                    egui::Button::new("Load alignment session"),
-                )
-                .clicked()
-            {
-                self.controller.load_alignment(&self.review_path);
-            }
-            ui.label(
-                RichText::new("Creates a new analysis report. The original take is preserved.")
-                    .small()
-                    .color(MUTED),
-            );
-        });
-        if matches!(self.controller.state.job, Some(Job::Review)) {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label("Analyzing recording…");
-            });
-        }
-        if let Some(error) = &self.controller.state.review_error {
-            ui.label(RichText::new(error).color(WARM));
-        }
-        ui.add_space(12.0);
         ui.horizontal(|ui| {
             ui.label(RichText::new("Speakers").size(23.0).strong()).on_hover_text("Measure individually or capture checked speakers. Choose the playback sink in Studio / Audio Output / Output device.");
             if let Some(snapshot) = &self.controller.state.snapshot {
@@ -713,16 +695,24 @@ impl CompanionApp {
         });
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            let readiness = self.controller.batch_outputs();
+            let ready = self.controller.alignment_readiness();
+            let enabled = ready.is_ok();
             if ui
                 .add_enabled(
-                    readiness.is_ok(),
-                    egui::Button::new("Measure selected speakers").min_size(Vec2::new(155.0, 30.0)),
+                    enabled,
+                    egui::Button::new(
+                        RichText::new("Align levels and delays")
+                            .strong()
+                            .color(if enabled { BG } else { MUTED }),
+                    )
+                    .fill(if enabled { ACCENT } else { PANEL })
+                    .min_size(Vec2::new(170.0, 30.0)),
                 )
-                .on_disabled_hover_text(readiness.as_ref().err().map(String::as_str).unwrap_or(""))
+                .on_hover_text("Measure every checked speaker twice, then propose gains and delays. Nothing changes until Apply.")
+                .on_disabled_hover_text(ready.as_ref().err().map(String::as_str).unwrap_or(""))
                 .clicked()
             {
-                self.controller.start_batch();
+                self.controller.start_alignment();
             }
             if ui
                 .add_enabled(
@@ -749,38 +739,41 @@ impl CompanionApp {
                     output_ids,
                     current,
                 }) => format!("Speaker {} / {}", current + 1, output_ids.len()),
-                _ => readiness
-                    .as_ref()
+                _ => self
+                    .controller
+                    .batch_outputs()
                     .map(|o| format!("{} selected", o.len()))
                     .unwrap_or_default(),
             };
             ui.add(egui::Label::new(RichText::new(text).small().color(MUTED)).truncate());
         });
         ui.label(
-            RichText::new("One pass for diagnostics. Does not propose or apply corrections.")
+            RichText::new("Measures each checked speaker twice, then charts what Apply would change. Keep the microphone and input gain fixed.")
                 .small()
                 .color(MUTED),
         );
-        ui.horizontal_wrapped(|ui| {
-            let ready = self.controller.alignment_readiness();
-            if ui
-                .add_enabled(ready.is_ok(), egui::Button::new("Align levels and delays"))
-                .on_disabled_hover_text(ready.as_ref().err().map(String::as_str).unwrap_or(""))
-                .clicked()
-            {
-                self.controller.start_alignment();
-            }
-            ui.label(
-                RichText::new("Two passes → proposal → Apply → Verify")
-                    .small()
-                    .color(MUTED),
-            );
-        });
-        ui.label(
-            RichText::new("Choose either action. Keep the microphone and input gain fixed.")
-                .small()
-                .color(MUTED),
-        );
+        if self.lab {
+            ui.horizontal_wrapped(|ui| {
+                let readiness = self.controller.batch_outputs();
+                if ui
+                    .add_enabled(
+                        readiness.is_ok(),
+                        egui::Button::new("Measure selected speakers"),
+                    )
+                    .on_disabled_hover_text(
+                        readiness.as_ref().err().map(String::as_str).unwrap_or(""),
+                    )
+                    .clicked()
+                {
+                    self.controller.start_batch();
+                }
+                ui.label(
+                    RichText::new("One diagnostic pass. Does not propose or apply corrections.")
+                        .small()
+                        .color(MUTED),
+                );
+            });
+        }
         if let Some(snapshot) = &self.controller.state.snapshot {
             let excluded: Vec<_> = snapshot
                 .outputs
@@ -798,7 +791,7 @@ impl CompanionApp {
                 .map(|o| o.name.as_str())
                 .collect();
             let summary = format!(
-                "Excluded: {} · Unavailable: {}",
+                "Unchecked: {} · Unavailable: {}",
                 if excluded.is_empty() {
                     "none".into()
                 } else {
@@ -837,28 +830,6 @@ impl CompanionApp {
             });
             ui.add_space(10.0);
         }
-        if matches!(self.controller.state.job, Some(Job::UpdateProposal)) {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label("Updating correction proposal…");
-            });
-        }
-        let mut alignment_action = None;
-        if let Some(alignment) = &self.controller.state.alignment {
-            card().show(ui, |ui| {
-                alignment_action = alignment_view::session(ui, alignment, self.controller.busy());
-            });
-            ui.add_space(10.0);
-        }
-        if let Some(action) = alignment_action {
-            if action == "reanalyze" {
-                self.controller.reanalyze_alignment();
-            } else if action == "proposal" {
-                self.controller.refresh_alignment_proposal();
-            } else {
-                self.controller.alignment_action(action);
-            }
-        }
         let outputs = self
             .controller
             .state
@@ -866,6 +837,44 @@ impl CompanionApp {
             .as_ref()
             .or(self.controller.state.saved_snapshot.as_ref())
             .map(|s| s.outputs.clone());
+        let revision = self
+            .controller
+            .state
+            .snapshot
+            .as_ref()
+            .map(|s| s.revision.clone());
+        let revision = revision.as_deref();
+        let busy = self.controller.busy();
+        let mut stage = alignment_view::StageResponse::default();
+        let mut cards: Vec<Option<alignment_view::Card>> = Vec::new();
+        let mut alignment_action = None;
+        if let Some(alignment) = &self.controller.state.alignment {
+            let summary = alignment_view::Summary::new(alignment);
+            self.stage_height = card()
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    stage = alignment_view::stage(ui, &summary, self.selected_speaker.as_deref());
+                })
+                .response
+                .rect
+                .height();
+            ui.add_space(10.0);
+            if let Some(outputs) = &outputs {
+                cards = outputs
+                    .iter()
+                    .map(|o| summary.speaker(&o.id).map(alignment_view::card))
+                    .collect();
+            }
+        } else if matches!(self.controller.state.job, Some(Job::Alignment { .. }))
+            && self.stage_height > 0.0
+        {
+            let height = self.stage_height;
+            card().show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                alignment_view::placeholder(ui, height - 28.0);
+            });
+            ui.add_space(10.0);
+        }
         if self.controller.state.snapshot.is_none()
             && self.controller.state.saved_snapshot.is_some()
         {
@@ -874,7 +883,7 @@ impl CompanionApp {
                 "Saved speaker layout · connect to refresh live settings",
             );
         }
-        match outputs {
+        match &outputs {
             None => {
                 card().show(ui, |ui| {
                     ui.set_min_width(ui.available_width());
@@ -905,271 +914,155 @@ impl CompanionApp {
                 ui.label("Omniphony reported no physical outputs. Check its speaker layout, then refresh.");
             }
             Some(outputs) => {
-                for output in outputs {
-                    let readiness = self.controller.can_measure(&output.id);
-                    let take = self.controller.display_take(&output.id).cloned();
-                    let active = self.controller.active_output() == Some(output.id.as_str());
-                    let selected = self.selected_speaker.as_deref() == Some(output.id.as_str());
-                    let mut controls = [egui::Rect::NOTHING; 2];
-                    let row = ui.scope_builder(
-                        egui::UiBuilder::new()
-                            .id_salt(("speaker_row", &output.id))
-                            .sense(egui::Sense::click()),
-                        |ui| {
-                            ui.style_mut().interaction.selectable_labels = false;
-                            card()
-                                .fill(if selected {
-                                    SELECTED_CARD
-                                } else {
-                                    CARD
-                                })
-                                .stroke(Stroke::new(
-                                    1.5_f32,
-                                    if selected {
-                                        ACCENT
-                                    } else {
-                                        Color32::TRANSPARENT
-                                    },
-                                ))
-                                .show(ui, |ui| {
-                                    ui.set_min_width(ui.available_width());
-                                    ui.horizontal(|ui| {
-                                        let mut included = !self
-                                            .controller
-                                            .excluded_outputs
-                                            .contains(&output.id)
-                                            && self.controller.output_readiness(&output.id).is_ok();
-                                        let include_response = ui.add_enabled(
-                                            !self.controller.busy() && readiness.is_ok(),
-                                            egui::Checkbox::without_text(&mut included),
-                                        ).on_hover_text("Include in whole-system capture. Uncheck unwired speakers.");
-                                        controls[0] = include_response.rect;
-                                        if include_response.changed() {
-                                            if included { self.controller.excluded_outputs.remove(&output.id); }
-                                            else { self.controller.excluded_outputs.insert(output.id.clone()); }
-                                        }
-
-                                        let (icon, _) = ui.allocate_exact_size(
-                                            Vec2::new(24.0, 44.0),
-                                            egui::Sense::hover(),
-                                        );
-                                        let ink = if output.muted { MUTED } else { ACCENT };
-                                        ui.painter().rect_stroke(
-                                            icon.shrink2(Vec2::new(6.0, 4.0)),
-                                            4.0,
-                                            Stroke::new(1.3_f32, ink),
-                                            egui::StrokeKind::Inside,
-                                        );
-                                        ui.painter().circle_stroke(
-                                            icon.center() + Vec2::new(0.0, 6.0),
-                                            5.0,
-                                            Stroke::new(1.3_f32, ink),
-                                        );
-                                        ui.painter().circle_filled(
-                                            icon.center() + Vec2::new(0.0, -8.0),
-                                            2.0,
-                                            ink,
-                                        );
-                                        let name_width = (ui.available_width() - 272.0).max(100.0);
-                                        ui.allocate_ui_with_layout(
-                                            Vec2::new(name_width, 48.0),
-                                            egui::Layout::top_down(egui::Align::Min),
-                                            |ui| {
-                                                ui.set_min_width(name_width);
-                                                ui.add(
-                                                    egui::Label::new(
-                                                        RichText::new(&output.name)
-                                                            .size(18.0)
-                                                            .strong(),
-                                                    )
-                                                    .truncate(),
-                                                )
-                                                .on_hover_text(&output.name);
-                                                let band =
-                                                    match (output.freq_low_hz, output.freq_high_hz)
-                                                    {
-                                                        (Some(lo), Some(hi)) => {
-                                                            format!("{lo:.0}–{hi:.0} Hz")
-                                                        }
-                                                        (Some(lo), None) => {
-                                                            format!("From {lo:.0} Hz")
-                                                        }
-                                                        (None, Some(hi)) => {
-                                                            format!("Up to {hi:.0} Hz")
-                                                        }
-                                                        _ => "No band restriction".into(),
-                                                    };
-                                                ui.label(
-                                                    RichText::new(format!(
-                                                        "Output {} · {band}",
-                                                        output.index + 1
-                                                    ))
-                                                    .size(12.0)
-                                                    .color(MUTED),
-                                                );
-                                            },
-                                        );
-                                        ui.allocate_ui_with_layout(
-                                            Vec2::new(72.0, 45.0),
-                                            egui::Layout::top_down(egui::Align::Min),
-                                            |ui| {
-                                                ui.set_min_width(72.0);
-                                                caption(ui, "GAIN");
-                                                ui.label(
-                                                    RichText::new(format!(
-                                                        "{:+.1} dB",
-                                                        output.gain_db
-                                                    ))
-                                                    .monospace(),
-                                                );
-                                            },
-                                        );
-                                        ui.allocate_ui_with_layout(
-                                            Vec2::new(77.0, 45.0),
-                                            egui::Layout::top_down(egui::Align::Min),
-                                            |ui| {
-                                                ui.set_min_width(77.0);
-                                                caption(ui, "DELAY");
-                                                ui.label(
-                                                    RichText::new(format!(
-                                                        "{:.2} ms",
-                                                        output.delay_ms
-                                                    ))
-                                                    .monospace(),
-                                                );
-                                            },
-                                        );
-                                        let button = ui.add_enabled(
-                                            if active {
-                                                !self.controller.state.stopping
-                                            } else {
-                                                readiness.is_ok()
-                                            },
-                                            egui::Button::new(
-                                                RichText::new(if active {
-                                                    "Stop"
-                                                } else {
-                                                    "Measure"
-                                                })
-                                                .color(if readiness.is_ok() { BG } else { MUTED }),
-                                            )
-                                            .fill(if readiness.is_ok() { ACCENT } else { PANEL })
-                                            .min_size(Vec2::new(92.0, 34.0)),
-                                        );
-                                        controls[1] = button.rect;
-                                        if button.clicked() {
-                                            if active {
-                                                self.controller.cancel();
-                                            } else {
-                                                self.controller.start(&output.id);
-                                            }
-                                        }
-                                        if let Err(reason) = &readiness {
-                                            button.on_disabled_hover_text(reason);
-                                        }
-                                    });
-                                    if let Some(alignment) = &self.controller.state.alignment
-                                        && let Some(row) =
-                                            alignment.rows.iter().find(|r| r.output_id == output.id)
-                                    {
-                                        ui.separator();
-                                        let older = alignment.settings != self.controller.settings
-                                            || self.controller.state.snapshot.as_ref().is_some_and(
-                                                |snapshot| {
-                                                    let expected = alignment
-                                                        .restored_snapshot
-                                                        .as_ref()
-                                                        .or(alignment.applied_snapshot.as_ref())
-                                                        .unwrap_or(&alignment.snapshot);
-                                                    snapshot.revision != expected.revision
-                                                },
-                                            )
-                                            || take
-                                                .as_ref()
-                                                .and_then(|t| t.outcome.as_ref().ok())
-                                                .is_some_and(|o| {
-                                                    !row.take_folders.iter().any(|p| {
-                                                        companion_service::workspace::absolute(p)
-                                                == companion_service::workspace::absolute(
-                                                    &o.directory,
-                                                )
-                                                    })
-                                                });
-                                        alignment_view::speaker(ui, alignment, row, older);
-                                    }
-                                    ui.add_space(5.0);
-                                    let (status_rect, _) = ui.allocate_exact_size(
-                                        Vec2::new(ui.available_width(), 25.0),
-                                        egui::Sense::hover(),
-                                    );
-                                    ui.scope_builder(
-                                        egui::UiBuilder::new().max_rect(status_rect).layout(
-                                            egui::Layout::left_to_right(egui::Align::Center),
-                                        ),
-                                        |ui| {
-                                            if output.muted {
-                                                badge(ui, "MUTED", WARM);
-                                            }
-                                            if self.controller.settings.reference_output.as_ref()
-                                                == Some(&output.id)
-                                            {
-                                                badge(ui, "TIMING REFERENCE", ACCENT);
-                                            }
-                                            if active {
-                                                self.row_progress(ui);
-                                            } else if let Some(take) = &take {
-                                                let (text, color) = self.measurement_status(take);
-                                                ui.add(
-                                                    egui::Label::new(
-                                                        RichText::new(text).small().color(color),
-                                                    )
-                                                    .truncate(),
-                                                );
-                                            } else if let Err(reason) = &readiness {
-                                                ui.add(
-                                                    egui::Label::new(
-                                                        RichText::new(reason).small().color(MUTED),
-                                                    )
-                                                    .truncate(),
-                                                )
-                                                .on_hover_text(reason);
-                                            } else {
-                                                ui.label(
-                                                    RichText::new("Ready for a first take")
-                                                        .small()
-                                                        .color(MUTED),
-                                                );
-                                            }
-                                        },
-                                    );
-                                });
-                        },
+                // Card positions depend only on the speaker count and width, never on
+                // capture state, so progress cannot move the grid.
+                let width = ui.available_width();
+                let columns =
+                    (((width + CARD_GAP) / (CARD_MIN_WIDTH + CARD_GAP)).floor() as usize).max(1);
+                let card_width = (width - CARD_GAP * (columns - 1) as f32) / columns as f32;
+                let origin = ui.cursor().min;
+                for (i, output) in outputs.iter().enumerate() {
+                    let rect = egui::Rect::from_min_size(
+                        origin
+                            + Vec2::new(
+                                (i % columns) as f32 * (card_width + CARD_GAP),
+                                (i / columns) as f32 * (CARD_HEIGHT + CARD_GAP),
+                            ),
+                        Vec2::new(card_width, CARD_HEIGHT),
                     );
-                    row.response.widget_info(|| {
-                        egui::WidgetInfo::selected(
-                            egui::WidgetType::SelectableLabel,
-                            true,
-                            selected,
-                            &output.name,
-                        )
-                    });
-                    let over_control = row
-                        .response
-                        .interact_pointer_pos()
-                        .is_some_and(|pos| controls.iter().any(|rect| rect.contains(pos)));
-                    if row
-                        .response
-                        .on_hover_cursor(egui::CursorIcon::PointingHand)
-                        .clicked()
-                        && !over_control
-                    {
-                        self.select_speaker(&output.id);
-                    }
-                    ui.add_space(10.0);
+                    let band = match (output.freq_low_hz, output.freq_high_hz) {
+                        (Some(lo), Some(hi)) => format!("{lo:.0}–{hi:.0} Hz"),
+                        (Some(lo), None) => format!("From {lo:.0} Hz"),
+                        (None, Some(hi)) => format!("Up to {hi:.0} Hz"),
+                        _ => "No band restriction".into(),
+                    };
+                    let output = CardOutput {
+                        id: &output.id,
+                        name: &output.name,
+                        muted: output.muted,
+                        layout: format!("Output {} · {band}", output.index + 1),
+                        now: format!(
+                            "Now: gain {:+.1} dB · delay {:.2} ms",
+                            output.gain_db, output.delay_ms
+                        ),
+                    };
+                    self.speaker_card(ui, &output, rect, cards.get(i).and_then(Option::as_ref));
                 }
+                ui.add_space(4.0);
             }
         }
-        if !self.controller.state.takes.is_empty() {
+        if let Some(alignment) = &self.controller.state.alignment {
+            ui.add_space(6.0);
+            card().show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                alignment_action = alignment_view::action_bar(
+                    ui,
+                    alignment,
+                    alignment_view::live(alignment, revision),
+                    busy,
+                    matches!(self.controller.state.job, Some(Job::UpdateProposal)),
+                );
+            });
+            if self.lab {
+                ui.add_space(10.0);
+                let summary = alignment_view::Summary::new(alignment);
+                let revision_changed =
+                    revision.is_some() && !alignment_view::live(alignment, revision);
+                let older = |row: &companion_service::alignment::Row| {
+                    alignment.settings != self.controller.settings
+                        || revision_changed
+                        || self
+                            .controller
+                            .display_take(&row.output_id)
+                            .and_then(|t| t.outcome.as_ref().ok())
+                            .is_some_and(|o| {
+                                !row.take_folders.iter().any(|p| {
+                                    companion_service::workspace::absolute(p)
+                                        == companion_service::workspace::absolute(&o.directory)
+                                })
+                            })
+                };
+                card().show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    if let Some(action) = alignment_view::lab(ui, &summary, busy, &older) {
+                        alignment_action = Some(action);
+                    }
+                });
+            }
+        }
+        if let Some(id) = stage.select {
+            self.select_speaker(&id);
+        }
+        if let Some(id) = stage.match_knobs {
+            self.show_manual = true;
+            self.open_manual = true;
+            self.select_speaker(&id);
+        }
+        if let Some(action) = alignment_action {
+            if action == "reanalyze" {
+                self.controller.reanalyze_alignment();
+            } else if action == "proposal" {
+                self.controller.refresh_alignment_proposal();
+            } else {
+                self.controller.alignment_action(action);
+            }
+        }
+        ui.add_space(10.0);
+        if self.lab || self.show_manual || self.controller.state.manual_run.is_some() {
+            let open = std::mem::take(&mut self.open_manual);
+            let header = manual_level_view::draw(
+                ui,
+                &mut self.controller,
+                self.selected_speaker.as_deref(),
+                &mut self.manual_noise_dbfs,
+                open,
+            );
+            if open {
+                header.scroll_to_me(Some(egui::Align::TOP));
+            }
+        }
+        if self.lab {
+            egui::CollapsingHeader::new("Review a saved take · no playback").show(ui, |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.review_path)
+                        .desired_width(ui.available_width())
+                        .hint_text("Path to a saved take folder"),
+                );
+                if ui
+                    .add_enabled(
+                        !self.controller.busy(),
+                        egui::Button::new("Analyze saved take"),
+                    )
+                    .clicked()
+                {
+                    self.analyze_selected_folder(self.review_path.clone());
+                }
+                if ui
+                    .add_enabled(
+                        !self.controller.busy(),
+                        egui::Button::new("Load alignment session"),
+                    )
+                    .clicked()
+                {
+                    self.controller.load_alignment(&self.review_path);
+                }
+                ui.label(
+                    RichText::new("Creates a new analysis report. The original take is preserved.")
+                        .small()
+                        .color(MUTED),
+                );
+            });
+        }
+        if matches!(self.controller.state.job, Some(Job::Review)) {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Analyzing recording…");
+            });
+        }
+        if let Some(error) = &self.controller.state.review_error {
+            ui.label(RichText::new(error).color(WARM));
+        }
+        if self.lab && !self.controller.state.takes.is_empty() {
             ui.add_space(8.0);
             egui::CollapsingHeader::new(format!(
                 "Recent takes ({})",
@@ -1192,6 +1085,198 @@ impl CompanionApp {
                     self.select_take(take);
                 }
             });
+        }
+    }
+
+    /// One fixed-size speaker card: name, quality, measured/planned values and progress.
+    fn speaker_card(
+        &mut self,
+        ui: &mut egui::Ui,
+        output: &CardOutput,
+        rect: egui::Rect,
+        text: Option<&alignment_view::Card>,
+    ) {
+        let readiness = self.controller.can_measure(output.id);
+        let take = self.controller.display_take(output.id).cloned();
+        let active = self.controller.active_output() == Some(output.id);
+        let selected = self.selected_speaker.as_deref() == Some(output.id);
+        let reference = self.controller.settings.reference_output.as_deref() == Some(output.id);
+        let mut hover = format!("{}\n{}\n{}", output.name, output.layout, output.now);
+        if let Some(text) = text {
+            hover = format!("{hover}\n\n{}", text.details);
+        }
+        let grade = text.and_then(|t| t.grade).or_else(|| {
+            take.as_ref()
+                .and_then(|t| t.outcome.as_ref().ok())
+                .map(|o| o.quality().grade())
+        });
+        let mut controls = [egui::Rect::NOTHING; 2];
+        let card = ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(rect)
+                .id_salt(("speaker_card", output.id))
+                .sense(egui::Sense::click()),
+            |ui| {
+                ui.set_min_size(rect.size());
+                ui.style_mut().interaction.selectable_labels = false;
+                ui.painter().rect(
+                    rect,
+                    8.0,
+                    if selected { SELECTED_CARD } else { CARD },
+                    Stroke::new(
+                        1.5_f32,
+                        if selected {
+                            ACCENT
+                        } else {
+                            Color32::TRANSPARENT
+                        },
+                    ),
+                    egui::StrokeKind::Inside,
+                );
+                let inner = rect.shrink2(Vec2::new(10.0, 8.0));
+                let line = |top: f32, height: f32| {
+                    egui::Rect::from_min_size(
+                        inner.min + Vec2::new(0.0, top),
+                        Vec2::new(inner.width(), height),
+                    )
+                };
+                let row =
+                    |ui: &mut egui::Ui, rect: egui::Rect, add: &mut dyn FnMut(&mut egui::Ui)| {
+                        ui.scope_builder(
+                            egui::UiBuilder::new()
+                                .max_rect(rect)
+                                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                            |ui| add(ui),
+                        );
+                    };
+                row(ui, line(0.0, 28.0), &mut |ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    let mut included = !self.controller.excluded_outputs.contains(output.id)
+                        && self.controller.output_readiness(output.id).is_ok();
+                    let include = ui
+                        .add_enabled(
+                            !self.controller.busy() && readiness.is_ok(),
+                            egui::Checkbox::without_text(&mut included),
+                        )
+                        .on_hover_text(
+                            "Include in whole-system capture. Uncheck unwired speakers.",
+                        );
+                    controls[0] = include.rect;
+                    if include.changed() {
+                        if included {
+                            self.controller.excluded_outputs.remove(output.id);
+                        } else {
+                            self.controller
+                                .excluded_outputs
+                                .insert(output.id.to_owned());
+                        }
+                    }
+                    quality_view::dot(ui, grade);
+                    let name_width =
+                        (ui.available_width() - 76.0 - if reference { 34.0 } else { 0.0 })
+                            .max(30.0);
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(name_width, 24.0),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            ui.add(
+                                egui::Label::new(RichText::new(output.name).size(15.0).strong())
+                                    .truncate(),
+                            )
+                            .on_hover_text(&hover);
+                        },
+                    );
+                    if reference {
+                        ui.label(RichText::new("REF").size(10.0).strong().color(ACCENT))
+                            .on_hover_text(
+                                "Timing reference: arrivals are measured against this speaker.",
+                            );
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let button = ui.add_enabled(
+                            if active {
+                                !self.controller.state.stopping
+                            } else {
+                                readiness.is_ok()
+                            },
+                            egui::Button::new(
+                                RichText::new(if active { "Stop" } else { "Measure" })
+                                    .color(if readiness.is_ok() { BG } else { MUTED }),
+                            )
+                            .fill(if readiness.is_ok() { ACCENT } else { PANEL })
+                            .min_size(Vec2::new(70.0, 26.0)),
+                        );
+                        controls[1] = button.rect;
+                        if button.clicked() {
+                            if active {
+                                self.controller.cancel();
+                            } else {
+                                self.controller.start(output.id);
+                            }
+                        }
+                        let button = button.on_hover_text(
+                            "One diagnostic take of this speaker. Does not change any setting.",
+                        );
+                        if let Err(reason) = &readiness {
+                            button.on_disabled_hover_text(reason);
+                        }
+                    });
+                });
+                let (measured, planned) = match text {
+                    Some(text) => (&text.measured, text.planned.as_ref()),
+                    None => (
+                        &(output.now.clone(), MUTED),
+                        Some(&(output.layout.clone(), MUTED)),
+                    ),
+                };
+                match planned {
+                    Some(planned) => {
+                        card_line(ui, line(32.0, 18.0), measured, 1);
+                        card_line(ui, line(52.0, 18.0), planned, 1);
+                    }
+                    None => card_line(ui, line(32.0, 38.0), measured, 2),
+                }
+                row(ui, line(inner.height() - 22.0, 22.0), &mut |ui| {
+                    if output.muted {
+                        badge(ui, "MUTED", WARM);
+                    }
+                    if active {
+                        self.row_progress(ui);
+                    } else if let Some(take) = &take {
+                        let (text, color) = self.measurement_status(take);
+                        ui.add(
+                            egui::Label::new(RichText::new(text).small().color(color)).truncate(),
+                        );
+                    } else if let Err(reason) = &readiness {
+                        ui.add(
+                            egui::Label::new(RichText::new(reason).small().color(MUTED)).truncate(),
+                        )
+                        .on_hover_text(reason);
+                    } else {
+                        ui.label(RichText::new("Ready for a first take").small().color(MUTED));
+                    }
+                });
+            },
+        );
+        card.response.widget_info(|| {
+            egui::WidgetInfo::selected(
+                egui::WidgetType::SelectableLabel,
+                true,
+                selected,
+                output.name,
+            )
+        });
+        let over_control = card
+            .response
+            .interact_pointer_pos()
+            .is_some_and(|pos| controls.iter().any(|rect| rect.contains(pos)));
+        if card
+            .response
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
+            && !over_control
+        {
+            self.select_speaker(output.id);
         }
     }
 
@@ -1496,7 +1581,7 @@ impl CompanionApp {
                     } else { format!("No measurement for {output} yet. Use Measure to capture it.") };
                     ui.label(RichText::new(message).color(MUTED));
             } else {
-                ui.label(RichText::new("Click a speaker row to inspect its result, or analyze a saved take.").color(MUTED));
+                ui.label(RichText::new("Click a speaker card or chart row to inspect its result.").color(MUTED));
             }
         });
     }
@@ -1506,6 +1591,7 @@ impl CompanionApp {
             return;
         };
         let mut review_requested = None;
+        let lab = self.lab;
         ui.push_id("live_result", |ui| {
                 let (status, color) = take_status(take);
                 ui.label(RichText::new(status).size(20.0).color(color).strong());
@@ -1515,23 +1601,25 @@ impl CompanionApp {
                 ui.label(RichText::new(format!("{} · {} · Channel {} · Reference: {}", take.settings.microphone_id, take.settings.position_id, take.settings.input_channel, take.settings.reference_output.as_deref().unwrap_or("—"))).small().color(MUTED));
                 match &take.outcome {
                     Ok(outcome) => {
-                        draw_quality(ui, &outcome.quality());
+                        draw_quality(ui, &outcome.quality(), lab);
                         if take.settings.device.as_deref().is_some_and(|s| s.starts_with("pipewire:monitor:")) { ui.label(RichText::new("Sink monitor · not an acoustic microphone measurement").color(WARM)); }
-                        if let Some(impulse) = &outcome.impulse { draw_impulse(ui, impulse, &mut self.result_plot, &mut self.waveform_view); }
+                        if let Some(impulse) = &outcome.impulse { draw_impulse(ui, impulse, &mut self.result_plot, &mut self.waveform_view, lab); }
                         if let Some(error) = &outcome.impulse_error { ui.label(RichText::new(error).color(WARM)); }
                         if let Some(report) = &outcome.diagnostics {
-                            egui::CollapsingHeader::new("Acquisition diagnostics").default_open(outcome.impulse.is_none()).show(ui, |ui| draw_diagnostics(ui, report));
+                            egui::CollapsingHeader::new("Acquisition diagnostics").default_open(outcome.impulse.is_none()).show(ui, |ui| draw_diagnostics(ui, report, lab));
                         }
-                        if let Some(timing) = &outcome.timing {
+                        if let Some(timing) = &outcome.timing && (lab || outcome.impulse.is_none()) {
                             ui.add_space(12.0);
                             egui::Grid::new("timing_values").spacing([32.0, 10.0]).show(ui, |ui| {
                                 if outcome.impulse.is_none() {
                                 ui.label("Relative peak delay"); ui.monospace(timing.relative_peak_delay_ms.map_or_else(|| "Unresolved".into(), |v| format!("{v:+.3} ms"))); ui.end_row();
                                 ui.label("Clock drift"); ui.monospace(timing.clock_drift_ppm.map_or_else(|| "Unresolved".into(), |v| format!("{v:+.1} ppm"))); ui.end_row();
                                 }
+                                if lab {
                                 ui.label("Speaker signal / noise (broadband)"); ui.monospace(format!("{:.1} dB", timing.signal_to_noise_db[1])); ui.end_row();
                                 ui.label("Speaker sweep RMS"); ui.monospace(format!("{:.1} dBFS", timing.sweep_rms_dbfs[1])); ui.end_row();
                                 ui.label("Background RMS"); ui.monospace(format!("{:.1} dBFS", timing.noise_rms_dbfs)); ui.end_row();
+                                }
                             });
                             if let Some(warning) = timing.relative_peak_delay_ms.and_then(calibration_core::long_delay_warning).filter(|_| outcome.impulse.is_none()) {
                                 ui.colored_label(WARM, warning);
@@ -1543,16 +1631,20 @@ impl CompanionApp {
                         }
                         if let Some(reason) = &outcome.rejection_reason { ui.label(RichText::new(reason).color(WARM)); }
                         ui.add_space(14.0);
-                        caption(ui, "Saved take");
                         let path = outcome.directory.display().to_string();
-                        ui.label(RichText::new(&path).monospace().small());
-                        if ui.button("Copy folder path").clicked() { ui.ctx().copy_text(path.clone()); }
+                        if lab {
+                            caption(ui, "Saved take");
+                            ui.label(RichText::new(&path).monospace().small());
+                            if ui.button("Copy folder path").clicked() { ui.ctx().copy_text(path.clone()); }
+                        }
                         if ui.add_enabled(!self.controller.busy(), egui::Button::new("Reanalyze this take")).clicked() { review_requested = Some(path); }
                     }
                     Err(error) => { ui.label(RichText::new(error).color(RED)); }
                 }
-                ui.add_space(14.0);
-                ui.label(RichText::new("Arrival candidates are experimental. An early peak is not proof of the direct path. Automatic gain/delay correction remains disabled.").small().color(MUTED));
+                if lab {
+                    ui.add_space(14.0);
+                    ui.label(RichText::new("Arrival candidates are experimental. An early peak is not proof of the direct path. Automatic gain/delay correction remains disabled.").small().color(MUTED));
+                }
             });
         if let Some(path) = review_requested {
             self.analyze_selected_folder(path);
@@ -1562,6 +1654,7 @@ impl CompanionApp {
         let Some(review) = self.active_review().cloned() else {
             return;
         };
+        let lab = self.lab;
         ui.push_id("saved_result", |ui| {
             let (status, color) = analysis_status(
                 &companion_service::analysis_cache::CachedAnalysis::from_review(&review),
@@ -1614,16 +1707,22 @@ impl CompanionApp {
                     review.analysis_error.as_deref(),
                 )
             });
-            draw_quality(ui, &quality);
+            draw_quality(ui, &quality, lab);
             if let Some(impulse) = &review.impulse {
-                draw_impulse(ui, impulse, &mut self.result_plot, &mut self.waveform_view);
+                draw_impulse(
+                    ui,
+                    impulse,
+                    &mut self.result_plot,
+                    &mut self.waveform_view,
+                    lab,
+                );
             }
             if let Some(error) = &review.impulse_error {
                 ui.label(RichText::new(error).color(WARM));
             }
             egui::CollapsingHeader::new("Acquisition diagnostics")
                 .default_open(review.impulse.is_none())
-                .show(ui, |ui| draw_diagnostics(ui, &review.diagnostics));
+                .show(ui, |ui| draw_diagnostics(ui, &review.diagnostics, lab));
             ui.separator();
 
             egui::CollapsingHeader::new("Original capture details").show(ui, |ui| {
@@ -1643,20 +1742,24 @@ impl CompanionApp {
                         .monospace(),
                 );
             });
-            ui.label(RichText::new("Saved analysis report").small().color(MUTED));
-            ui.label(
-                RichText::new(review.report_file.display().to_string())
-                    .small()
-                    .monospace(),
-            );
-            if ui.button("Copy analysis path").clicked() {
-                ui.ctx().copy_text(review.report_file.display().to_string());
-            }
-            ui.label(
-                RichText::new("Original files preserved · No audio played · No correction applied")
+            if lab {
+                ui.label(RichText::new("Saved analysis report").small().color(MUTED));
+                ui.label(
+                    RichText::new(review.report_file.display().to_string())
+                        .small()
+                        .monospace(),
+                );
+                if ui.button("Copy analysis path").clicked() {
+                    ui.ctx().copy_text(review.report_file.display().to_string());
+                }
+                ui.label(
+                    RichText::new(
+                        "Original files preserved · No audio played · No correction applied",
+                    )
                     .small()
                     .color(MUTED),
-            );
+                );
+            }
         });
     }
 }
@@ -1724,6 +1827,64 @@ fn badge(ui: &mut egui::Ui, text: &str, color: Color32) {
             ui.label(RichText::new(text).size(10.0).strong().color(color));
         });
 }
+/// Fixed-height card text: wraps up to `rows` lines, then ends with an ellipsis.
+fn card_line(ui: &egui::Ui, rect: egui::Rect, (text, color): &(String, Color32), rows: usize) {
+    let mut job = egui::text::LayoutJob::single_section(
+        text.clone(),
+        egui::TextFormat::simple(FontId::proportional(12.5), *color),
+    );
+    job.wrap = egui::text::TextWrapping {
+        max_width: rect.width(),
+        max_rows: rows,
+        break_anywhere: false,
+        overflow_character: Some('…'),
+    };
+    let galley = ui.painter().layout_job(job);
+    let top = rect.top() + ((rect.height() - galley.size().y) / 2.0).max(0.0);
+    ui.painter()
+        .galley(egui::pos2(rect.left(), top), galley, *color);
+}
+
+/// Persisted Lab toggle, drawn as a switch rather than a checkbox.
+fn lab_switch(ui: &mut egui::Ui, on: &mut bool) {
+    let (rect, mut response) = ui.allocate_exact_size(Vec2::new(70.0, 24.0), egui::Sense::click());
+    if response.clicked() {
+        *on = !*on;
+        response.mark_changed();
+    }
+    response
+        .widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, *on, "Lab"));
+    let track = egui::Rect::from_min_size(
+        rect.left_center() - Vec2::new(0.0, 10.0),
+        Vec2::new(36.0, 20.0),
+    );
+    let painter = ui.painter();
+    painter.rect_filled(
+        track,
+        10.0,
+        if *on {
+            ACCENT
+        } else {
+            Color32::from_rgb(42, 53, 66)
+        },
+    );
+    let knob = if *on {
+        track.right_center() - Vec2::new(10.0, 0.0)
+    } else {
+        track.left_center() + Vec2::new(10.0, 0.0)
+    };
+    painter.circle_filled(knob, 7.0, if *on { BG } else { TEXT });
+    painter.text(
+        track.right_center() + Vec2::new(8.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        "Lab",
+        FontId::proportional(14.0),
+        if *on { TEXT } else { MUTED },
+    );
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Lab shows every diagnostic: segment S/N tables, band candidates, threshold checks, saved-take review, proposal maintenance and the full caveats.");
+}
 fn card() -> egui::Frame {
     egui::Frame::new()
         .fill(CARD)
@@ -1788,7 +1949,22 @@ fn take_status(take: &Take) -> (&'static str, Color32) {
     }
 }
 
-fn draw_quality(ui: &mut egui::Ui, report: &companion_service::quality::Report) {
+fn draw_quality(ui: &mut egui::Ui, report: &companion_service::quality::Report, lab: bool) {
+    if !lab {
+        let details = [&report.acquisition, &report.timing, &report.level]
+            .iter()
+            .flat_map(|i| i.details.iter().cloned())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let grade = report.grade();
+        quality_view::badge(
+            ui,
+            Some(grade),
+            &format!("Quality: {}", grade.label()),
+            &details,
+        );
+        return;
+    }
     ui.horizontal_wrapped(|ui| {
         for (name, indicator) in [
             ("Acquisition", &report.acquisition),
@@ -1818,7 +1994,11 @@ fn draw_quality(ui: &mut egui::Ui, report: &companion_service::quality::Report) 
     });
 }
 
-fn draw_diagnostics(ui: &mut egui::Ui, report: &companion_service::review::AcquisitionDiagnostics) {
+fn draw_diagnostics(
+    ui: &mut egui::Ui,
+    report: &companion_service::review::AcquisitionDiagnostics,
+    lab: bool,
+) {
     use companion_service::review::SegmentStatus;
     ui.add_space(10.0);
     let target = report.segments.as_ref().map(|s| s[1].status);
@@ -1828,6 +2008,18 @@ fn draw_diagnostics(ui: &mut egui::Ui, report: &companion_service::review::Acqui
         _ => "Acquisition levels",
     };
     ui.label(RichText::new(title).strong());
+    if !lab {
+        for message in &report.messages {
+            ui.label(RichText::new(message).color(WARM));
+        }
+        ui.label(
+            RichText::new("Turn on Lab for segment levels and signal/noise.")
+                .small()
+                .color(MUTED),
+        );
+        ui.separator();
+        return;
+    }
     ui.label(format!(
         "Background: {:.1} dBFS · Analysis clipped samples: {}",
         report.noise_rms_dbfs, report.total_clipped_samples
@@ -1870,7 +2062,7 @@ fn draw_diagnostics(ui: &mut egui::Ui, report: &companion_service::review::Acqui
     ui.separator();
 }
 
-fn draw_arrival_summary(ui: &mut egui::Ui, report: &ImpulseReport) {
+fn draw_arrival_summary(ui: &mut egui::Ui, report: &ImpulseReport, lab: bool) {
     if let (Some(delay), Some(bound)) = (report.relative_arrival_ms, report.uncertainty_ms) {
         ui.label(
             RichText::new(format!("Arrival candidate  {delay:+.3} ms"))
@@ -1900,7 +2092,9 @@ fn draw_arrival_summary(ui: &mut egui::Ui, report: &ImpulseReport) {
             similarity * 100.0
         ));
     }
-    ui.label(RichText::new("Experimental arrival evidence; direct path and automatic correction are not validated.").small().color(MUTED));
+    if lab {
+        ui.label(RichText::new("Experimental arrival evidence; direct path and automatic correction are not validated.").small().color(MUTED));
+    }
 }
 
 fn draw_impulse(
@@ -1908,6 +2102,7 @@ fn draw_impulse(
     report: &ImpulseReport,
     plot: &mut ResultPlot,
     waveform: &mut waveform_plot::State,
+    lab: bool,
 ) {
     if let Some(warning) = report
         .relative_arrival_ms
@@ -1915,7 +2110,7 @@ fn draw_impulse(
     {
         ui.colored_label(WARM, warning);
     }
-    draw_impulse_plot(ui, report, plot, waveform);
+    draw_impulse_plot(ui, report, plot, waveform, lab);
     if report.relative_arrival_ms.is_none() {
         ui.label(
             RichText::new(
@@ -1926,7 +2121,7 @@ fn draw_impulse(
         );
     }
     egui::CollapsingHeader::new("Arrival diagnostics")
-        .show(ui, |ui| draw_arrival_summary(ui, report));
+        .show(ui, |ui| draw_arrival_summary(ui, report, lab));
 }
 
 fn draw_impulse_plot(
@@ -1934,6 +2129,7 @@ fn draw_impulse_plot(
     report: &ImpulseReport,
     plot: &mut ResultPlot,
     waveform: &mut waveform_plot::State,
+    lab: bool,
 ) {
     let id = ui.id().with("impulse_segment");
     let mut selected: usize = ui.data_mut(|d| d.get_persisted(id)).unwrap_or(1);
@@ -2074,6 +2270,9 @@ fn draw_impulse_plot(
             .small()
             .color(MUTED),
     );
+    if !lab {
+        return;
+    }
     egui::Grid::new("arrival_bands")
         .spacing([18.0, 4.0])
         .show(ui, |ui| {

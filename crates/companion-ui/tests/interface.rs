@@ -16,6 +16,8 @@ fn frame(
         egui::RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)),
             events,
+            // Long frames let egui's wheel smoothing settle within a few frames.
+            predicted_dt: 0.1,
             ..Default::default()
         },
         |ctx| app.draw(ctx),
@@ -42,19 +44,19 @@ fn labels(output: &egui::FullOutput) -> Vec<(String, Rect)> {
     }
     out
 }
+// Move first, like a real pointer: a jump and a press in one frame reads as a drag
+// and scrolls the speaker area before the click lands.
 fn click(app: &mut CompanionApp, ctx: &egui::Context, pos: Pos2, size: Vec2) {
+    frame(app, ctx, vec![Event::PointerMoved(pos)], size);
     frame(
         app,
         ctx,
-        vec![
-            Event::PointerMoved(pos),
-            Event::PointerButton {
-                pos,
-                button: PointerButton::Primary,
-                pressed: true,
-                modifiers: Default::default(),
-            },
-        ],
+        vec![Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed: true,
+            modifiers: Default::default(),
+        }],
         size,
     );
     frame(
@@ -85,7 +87,7 @@ fn scroll_results(app: &mut CompanionApp, ctx: &egui::Context, size: Vec2, delta
         ],
         size,
     );
-    for _ in 0..20 {
+    for _ in 0..8 {
         frame(app, ctx, vec![], size);
     }
 }
@@ -137,7 +139,7 @@ fn scroll_speakers(app: &mut CompanionApp, ctx: &egui::Context, size: Vec2, delt
         ],
         size,
     );
-    for _ in 0..20 {
+    for _ in 0..8 {
         frame(app, ctx, vec![], size);
     }
 }
@@ -172,7 +174,8 @@ fn find_speaker_text(
                 return *rect;
             }
         }
-        scroll_speakers(app, ctx, size, -40.0);
+        // Smaller than the shortest speaker viewport, so no label is skipped.
+        scroll_speakers(app, ctx, size, -100.0);
     }
     panic!("Speaker text not reachable by scrolling: {needle}");
 }
@@ -307,13 +310,18 @@ fn input_meter_and_capture_choices_explain_silence_without_starting_audio() {
     let size = Vec2::new(1160.0, 900.0);
     frame(&mut app, &ctx, vec![], size);
     let text = labels(&frame(&mut app, &ctx, vec![], size));
+    // The one-pass diagnostic capture is a Lab action; alignment is the main path.
+    assert!(!text.iter().any(|(t, _)| t == "Measure selected speakers"));
+    app.lab = true;
+    frame(&mut app, &ctx, vec![], size);
+    let text = labels(&frame(&mut app, &ctx, vec![], size));
     for expected in [
         "Check microphone",
         "Measure selected speakers",
         "Align levels and delays",
         "No microphone signal received",
         "Last check",
-        "Excluded: Surround right",
+        "Unchecked: Surround right",
     ] {
         assert!(
             text.iter().any(|(t, _)| t.contains(expected)),
@@ -410,6 +418,10 @@ fn restart_restores_settings_reconnects_and_never_measures_automatically() {
         text.iter()
             .any(|(t, _)| t.contains("Selected reference is missing"))
     );
+    // The header switch turns Lab on; it is a display preference saved at once.
+    let lab = text.iter().find(|(t, _)| t == "Lab").unwrap().1;
+    click(&mut app, &ctx, lab.center(), size);
+    assert!(app.lab);
     // Exit immediately after an edit, without another draw.
     app.controller.settings.position_id = "new-position".into();
     drop(app);
@@ -420,6 +432,9 @@ fn restart_restores_settings_reconnects_and_never_measures_automatically() {
         Some("Missing interface")
     );
     assert_eq!(store.preferences().review_path, "sessions/previous");
+    assert!(store.preferences().view.show_alignment, "Lab is restored");
+    let app = CompanionApp::with_preferences(&ctx, support::ready().0, store);
+    assert!(app.lab);
 }
 
 #[test]
@@ -486,6 +501,7 @@ fn captured_sweeps_with_ambiguous_arrivals_show_levels_and_withhold_timing() {
         }),
     });
     let mut app = CompanionApp::preview(&ctx, controller);
+    app.lab = true;
     let size = Vec2::new(1160.0, 800.0);
     frame(&mut app, &ctx, vec![], size);
     let output = frame(&mut app, &ctx, vec![], size);
@@ -500,7 +516,7 @@ fn captured_sweeps_with_ambiguous_arrivals_show_levels_and_withhold_timing() {
     let output = frame(&mut app, &ctx, vec![], size);
     let text = labels(&output);
     assert_eq!(text.iter().filter(|(t, _)| t == "Unresolved").count(), 2);
-    assert!(text.iter().any(|(t, _)| t == "25.0 dB"));
+    find_result_text(&mut app, &ctx, size, "25.0 dB");
     find_result_text(&mut app, &ctx, size, "More volume will not resolve this");
     assert!(!text.iter().any(|(t, _)| t.contains("Take rejected")));
     assert!(text.iter().all(|(_, rect)| rect.is_finite()));
@@ -674,13 +690,17 @@ fn rejected_target_review_explains_routing_evidence_without_fabricating_a_delay(
             click(&mut app, &ctx, details.center(), size);
         }
         find_result_text(&mut app, &ctx, size, "Original take rejected");
-        find_result_text(&mut app, &ctx, size, "Reference after");
         find_result_text(
             &mut app,
             &ctx,
             size,
             "Check the selected speaker's output route",
         );
+        // The segment table is Lab detail; the routing explanation is not.
+        find_result_text(&mut app, &ctx, size, "Turn on Lab for segment levels");
+        app.lab = true;
+        find_result_text(&mut app, &ctx, size, "Reference after");
+        app.lab = false;
         assert!(!text.iter().any(|(t, _)| t.contains("Arrival candidate  ")));
         assert!(text.iter().all(|(_, r)| r.is_finite()));
         assert_eq!(starts.load(Ordering::Relaxed), 0);
@@ -799,25 +819,60 @@ fn alignment_session_stays_above_individual_results_and_unqualified_actions_stay
             .unwrap()
             .1;
         assert!(alignment.bottom() < lower.top());
-        let details = find_speaker_text(&mut app, &ctx, size, "Alignment session details");
-        click(&mut app, &ctx, details.center(), size);
-        find_speaker_text(&mut app, &ctx, size, "Baseline pass 1 / 2: stopped");
-        find_speaker_text(&mut app, &ctx, size, "Baseline pass 2 / 2: not started");
         find_speaker_text(
             &mut app,
             &ctx,
             size,
             "Correction proposal blocked by session issues",
         );
-        let apply = find_speaker_text(&mut app, &ctx, size, "Apply gains and delays");
-        click(&mut app, &ctx, apply.center(), size);
+        find_speaker_text(&mut app, &ctx, size, "Nothing to apply.");
+        assert!(
+            !labels(&frame(&mut app, &ctx, vec![], size))
+                .iter()
+                .any(|(s, _)| s == "Alignment session details"),
+            "pass details are Lab-only"
+        );
+        app.lab = true;
+        let details = find_speaker_text(&mut app, &ctx, size, "Alignment session details");
+        click(&mut app, &ctx, details.center(), size);
+        find_speaker_text(&mut app, &ctx, size, "Baseline pass 1 / 2: stopped");
+        find_speaker_text(&mut app, &ctx, size, "Baseline pass 2 / 2: not started");
+        for action in [
+            "Apply to Omniphony",
+            "Corrected",
+            "Confirm by re-measuring",
+            "Undo",
+        ] {
+            let button = find_speaker_text(&mut app, &ctx, size, action);
+            click(&mut app, &ctx, button.center(), size);
+            assert!(!app.controller.busy(), "{action} must stay disabled");
+        }
         assert!(!app.controller.busy());
         assert_eq!(starts.load(Ordering::Relaxed), 0);
     }
 }
 
+/// The card background whose name label equals `name`. The chart paints names too,
+/// so the label must lie inside a card-sized rectangle with the card stroke.
+fn card_named(output: &egui::FullOutput, name: &str) -> Option<(Rect, bool)> {
+    let cards: Vec<_> = output
+        .shapes
+        .iter()
+        .filter_map(|shape| match &shape.shape {
+            Shape::Rect(r) if r.rect.width() > 150.0 && r.stroke.width == 1.5 => {
+                Some((r.rect, r.stroke.color != egui::Color32::TRANSPARENT))
+            }
+            _ => None,
+        })
+        .collect();
+    labels(output)
+        .into_iter()
+        .filter(|(s, _)| s == name)
+        .find_map(|(_, r)| cards.iter().copied().find(|(c, _)| c.contains(r.center())))
+}
+
 #[test]
-fn alignment_estimates_and_targets_stay_in_the_speaker_rows_while_individual_results_stay_below() {
+fn alignment_chart_and_cards_show_values_while_lab_keeps_raw_evidence_and_results_stay_below() {
     for proposal in [false, true] {
         for size in [Vec2::new(850.0, 640.0), Vec2::new(1160.0, 800.0)] {
             let ctx = egui::Context::default();
@@ -830,6 +885,48 @@ fn alignment_estimates_and_targets_stay_in_the_speaker_rows_while_individual_res
             }
             let heading =
                 find_result_text(&mut app, &ctx, size, "Front right · Measurement result");
+            // Casual view: chart lanes, the card summary and what Apply changes.
+            let mut casual = vec!["Timing", "Level", "measured · bar = spread between runs"];
+            if proposal {
+                casual.extend([
+                    "delay +1.00 ms · gain -1.0 dB",
+                    "delay unchanged · gain unchanged",
+                    "+1.0 dB → gain -1.0",
+                    "Apply to Omniphony",
+                    "Not applied yet.",
+                ]);
+            } else {
+                casual.extend(["Too noisy to trust.", "+160.0 ms", "No proposal yet"]);
+            }
+            for value in casual {
+                let rect = find_speaker_text(&mut app, &ctx, size, value);
+                assert!(
+                    rect.bottom() < heading.top(),
+                    "{value} appeared in the individual result panel"
+                );
+                assert!(
+                    rect.left() > 310.0 && rect.right() < size.x,
+                    "{value} escaped the speaker area: {rect:?}"
+                );
+            }
+            let text = labels(&frame(&mut app, &ctx, vec![], size));
+            for raw in [
+                "0.020 ms / 0.10 dB",
+                "Gain: before → target",
+                "Excluded from correction",
+            ] {
+                assert!(
+                    !text.iter().any(|(s, _)| s.contains(raw)),
+                    "{raw} is Lab detail"
+                );
+            }
+            assert!(
+                !text
+                    .iter()
+                    .any(|(s, _)| s == "Alignment" || s == "Delay and level alignment")
+            );
+            // Lab keeps every raw number the previous rows showed.
+            app.lab = true;
             for value in [
                 "+0.125 ms",
                 "-6.50 dB",
@@ -838,28 +935,8 @@ fn alignment_estimates_and_targets_stay_in_the_speaker_rows_while_individual_res
                 "Good",
             ] {
                 let rect = find_speaker_text(&mut app, &ctx, size, value);
-                assert!(
-                    rect.bottom() < heading.top(),
-                    "{value} appeared in the individual result panel"
-                );
-                assert!(
-                    rect.left() > 310.0 && rect.right() < size.x,
-                    "{value} escaped the speaker card: {rect:?}"
-                );
+                assert!(rect.bottom() < heading.top());
             }
-            let text = labels(&frame(&mut app, &ctx, vec![], size));
-            let name = text
-                .iter()
-                .find(|(s, r)| s == "Front left" && r.left() > 310.0)
-                .unwrap()
-                .1;
-            let value = text.iter().find(|(s, _)| s == "+0.125 ms").unwrap().1;
-            assert!(value.top() > name.bottom());
-            assert!(
-                !text
-                    .iter()
-                    .any(|(s, _)| s == "Alignment" || s == "Delay and level alignment")
-            );
             if proposal {
                 for value in [
                     "Gain: before → target",
@@ -878,7 +955,12 @@ fn alignment_estimates_and_targets_stay_in_the_speaker_rows_while_individual_res
                     find_speaker_text(&mut app, &ctx, size, value);
                 }
             }
-            let row_before = find_speaker_text(&mut app, &ctx, size, "Front left");
+            app.lab = false;
+            // The first card's button; its name label shares the line.
+            find_speaker_text(&mut app, &ctx, size, "Measure");
+            let before = card_named(&frame(&mut app, &ctx, vec![], size), "Front left")
+                .expect("Front left card")
+                .0;
             app.controller.state.job = Some(companion_service::controller::Job::Alignment {
                 output_ids: vec!["Front left".into(), "Front right".into()],
                 current: 0,
@@ -890,18 +972,15 @@ fn alignment_estimates_and_targets_stay_in_the_speaker_rows_while_individual_res
                 companion_service::measurement::MeasureProgress::Analyzing,
             ] {
                 app.controller.state.progress = Some(phase);
-                let text = labels(&frame(&mut app, &ctx, vec![], size));
-                let row_after = text
-                    .iter()
-                    .find(|(s, r)| s == "Front left" && r.left() > 310.0)
-                    .unwrap()
-                    .1;
+                let output = frame(&mut app, &ctx, vec![], size);
+                let after = card_named(&output, "Front left").expect("card").0;
                 assert!(
-                    (row_after.top() - row_before.top()).abs() < 0.1,
-                    "alignment row moved during capture: {row_before:?} -> {row_after:?}"
+                    (after.top() - before.top()).abs() < 0.1,
+                    "card moved during capture: {before:?} -> {after:?}"
                 );
                 assert!(
-                    text.iter()
+                    labels(&output)
+                        .iter()
                         .any(|(s, _)| s == "Front right · Measurement result")
                 );
             }
@@ -919,6 +998,65 @@ fn alignment_estimates_and_targets_stay_in_the_speaker_rows_while_individual_res
             );
             assert_eq!(starts.load(Ordering::Relaxed), 0);
         }
+    }
+}
+
+#[test]
+fn starting_a_new_alignment_keeps_cards_in_place_and_chart_rows_select_speakers() {
+    use companion_service::{controller::Job, measurement::MeasureProgress};
+    for size in [Vec2::new(850.0, 640.0), Vec2::new(1160.0, 800.0)] {
+        let ctx = egui::Context::default();
+        let (mut controller, starts) = support::ready();
+        controller.state.alignment = Some(support::room_alignment(&controller));
+        let mut app = CompanionApp::preview(&ctx, controller);
+        for _ in 0..3 {
+            frame(&mut app, &ctx, vec![], size);
+        }
+        // Human reasons, the far bracket and the knob hint, with raw text kept for Lab.
+        for value in [
+            "No sound picked up. Wired and unmuted?",
+            "Too noisy to trust.",
+            "beyond ±20 ms",
+            "+176.9 ms",
+            "Front left is 3.4 dB quieter than the others.",
+            "Match knobs",
+        ] {
+            find_speaker_text(&mut app, &ctx, size, value);
+        }
+        // Clicking a chart row selects that speaker like its card does.
+        let row = find_speaker_text(&mut app, &ctx, size, "Center");
+        click(&mut app, &ctx, row.center(), size);
+        find_result_text(&mut app, &ctx, size, "Center · Measurement result");
+        // "Match knobs" opens the physical level tool for the quietest speaker.
+        let link = find_speaker_text(&mut app, &ctx, size, "Match knobs");
+        click(&mut app, &ctx, link.center(), size);
+        find_result_text(&mut app, &ctx, size, "Front left · Measurement result");
+        find_speaker_text(&mut app, &ctx, size, "Play selected Front left");
+        find_speaker_text(&mut app, &ctx, size, "Measure");
+        let output = frame(&mut app, &ctx, vec![], size);
+        let cards: Vec<_> = ["Front left", "Front right"]
+            .iter()
+            .map(|name| card_named(&output, name).expect("card").0)
+            .collect();
+        // Starting a new alignment clears the old one; its place stays reserved.
+        app.controller.state.alignment = None;
+        app.controller.state.job = Some(Job::Alignment {
+            output_ids: vec!["Front left".into(), "Front right".into()],
+            current: 1,
+            pass: 0,
+        });
+        for phase in [MeasureProgress::OpeningInput, MeasureProgress::Analyzing] {
+            app.controller.state.progress = Some(phase);
+            let output = frame(&mut app, &ctx, vec![], size);
+            for (name, before) in ["Front left", "Front right"].iter().zip(&cards) {
+                let after = card_named(&output, name).expect("card").0;
+                assert!(
+                    (after.top() - before.top()).abs() < 0.5,
+                    "{name} moved when a new alignment started: {before:?} -> {after:?}"
+                );
+            }
+        }
+        assert_eq!(starts.load(Ordering::Relaxed), 0);
     }
 }
 
@@ -1154,6 +1292,11 @@ fn marginal_measurements_keep_graphs_and_show_separate_quality_indicators() {
     for _ in 0..3 {
         frame(&mut app, &ctx, vec![], size);
     }
+    // One weakest-grade badge by default; Lab separates the three indicators.
+    for label in ["Quality: Limited", "Frequency response"] {
+        find_result_text(&mut app, &ctx, size, label);
+    }
+    app.lab = true;
     for label in [
         "Acquisition: Limited",
         "Timing: Limited",
@@ -1460,7 +1603,7 @@ fn speaker_card(output: &egui::FullOutput, name: Rect) -> (Rect, bool) {
         .iter()
         .find_map(|shape| match &shape.shape {
             Shape::Rect(r)
-                if r.rect.width() > 300.0
+                if r.rect.width() > 150.0
                     && r.stroke.width == 1.5
                     && r.rect.contains(name.center()) =>
             {
@@ -1577,6 +1720,7 @@ fn quality_grades_draw_distinct_colored_symbols_with_readable_labels() {
         controller.state.review = Some(review);
         let ctx = egui::Context::default();
         let mut app = CompanionApp::preview(&ctx, controller);
+        app.lab = true;
         let label = find_result_text(
             &mut app,
             &ctx,
@@ -1706,6 +1850,17 @@ fn partial_alignment_names_exclusions_and_displays_only_eligible_targets() {
             size,
             "Correction proposal ready for 2 / 3 speakers · 1 excluded",
         );
+        // The short reason replaces the raw one in the chart and card.
+        find_speaker_text(
+            &mut app,
+            &ctx,
+            size,
+            "Clipped. Lower the mic gain or test level.",
+        );
+        find_speaker_text(&mut app, &ctx, size, "delay +1.00 ms · gain -1.0 dB");
+        let text = labels(&frame(&mut app, &ctx, vec![], size));
+        assert!(!text.iter().any(|(s, _)| s.contains("clipped recording")));
+        app.lab = true;
         find_speaker_text(&mut app, &ctx, size, "Center: clipped recording");
         find_speaker_text(&mut app, &ctx, size, "Gain: before → target");
         find_speaker_text(
@@ -1714,6 +1869,7 @@ fn partial_alignment_names_exclusions_and_displays_only_eligible_targets() {
             size,
             "Excluded: clipped recording · gain and delay unchanged",
         );
+        app.lab = false;
         let alignment = app.controller.state.alignment.as_mut().unwrap();
         alignment.profile = None;
         alignment.blockers.clear();
@@ -1723,6 +1879,8 @@ fn partial_alignment_names_exclusions_and_displays_only_eligible_targets() {
             size,
             "2 / 3 speakers qualify · update the proposal from saved passes",
         );
+        find_speaker_text(&mut app, &ctx, size, "Turn on Lab to update the proposal");
+        app.lab = true;
         find_speaker_text(&mut app, &ctx, size, "Update correction proposal");
         assert_eq!(starts.load(Ordering::Relaxed), 0);
     }

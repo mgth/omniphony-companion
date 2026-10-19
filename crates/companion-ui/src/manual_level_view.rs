@@ -10,10 +10,13 @@ pub fn draw(
     controller: &mut Controller,
     selected: Option<&str>,
     peak: &mut f32,
-) {
+    open: bool,
+) -> egui::Response {
     egui::CollapsingHeader::new("Manual speaker levels · physical volume controls")
         .id_salt("manual_speaker_levels")
-        .show(ui, |ui| contents(ui, controller, selected, peak));
+        .open(open.then_some(true))
+        .show(ui, |ui| contents(ui, controller, selected, peak))
+        .header_response
 }
 
 fn contents(
@@ -23,7 +26,7 @@ fn contents(
     peak: &mut f32,
 ) {
     ui.label("Match active speakers using their physical volume controls. Keep the microphone position and interface input gain unchanged.");
-    ui.label(RichText::new("1. Play the reference and save its level.  2. Select a speaker row below and play it.  3. Adjust its volume until the difference is near 0 dB.").small().color(super::MUTED));
+    ui.label(RichText::new("1. Play the reference and save its level.  2. Select a speaker card above and play it.  3. Adjust its volume until the difference is near 0 dB.").small().color(super::MUTED));
     let active = matches!(controller.state.job, Some(Job::ManualLevels { .. }));
     let context = controller.manual_context(*peak);
     let reference_id = controller.settings.reference_output.clone();

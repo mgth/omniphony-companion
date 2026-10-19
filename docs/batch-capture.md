@@ -1,7 +1,7 @@
 # Continuous whole-system capture
 
 Select an input, channel, sample rate and fixed reference speaker. Check the
-speakers that are wired and ready, then choose **Measure selected speakers**. The
+speakers that are wired and ready, turn on **Lab**, then choose **Measure selected speakers**. The
 reference must remain connected even if it is unchecked as a measurement target.
 Muted speakers and speakers whose frequency or level limits cannot accommodate
 the selected sweep are excluded. Individual **Measure** actions remain available.
@@ -12,8 +12,8 @@ includes the same 250 ms settling silence on each side of the sweep. A shared
 reference is the same recorded audio in both neighboring results; no network
 timestamp or replay stands in for an acoustic reference.
 
-Progress appears inside the active speaker row. The toolbar remains present
-throughout acquisition. Stop, including the active row's Stop button, cancels
+Progress appears inside the active speaker card. The toolbar remains present
+throughout acquisition. Stop, including the active card's Stop button, cancels
 the entire run. Keep the microphone, input gain, reference and renderer settings
 fixed until recording ends. Settings and checkbox selections save automatically
 and are restored on the next launch; startup never resumes a capture.

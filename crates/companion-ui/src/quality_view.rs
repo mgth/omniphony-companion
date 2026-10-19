@@ -90,3 +90,19 @@ fn icon(ui: &mut egui::Ui, grade: Option<Grade>, ink: Color32) {
         }
     }
 }
+
+/// One small dot for a speaker card: the weakest grade, or an outline when unrated.
+pub fn dot(ui: &mut egui::Ui, grade: Option<Grade>) {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(10.0), egui::Sense::hover());
+    let ink = color(grade);
+    match grade {
+        Some(_) => ui.painter().circle_filled(rect.center(), 4.5, ink),
+        None => ui
+            .painter()
+            .circle_stroke(rect.center(), 4.0, Stroke::new(1.2_f32, ink)),
+    };
+    response.on_hover_text(match grade {
+        Some(grade) => format!("Weakest quality: {}", grade.label()),
+        None => "Not rated".into(),
+    });
+}

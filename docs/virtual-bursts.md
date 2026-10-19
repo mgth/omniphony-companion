@@ -1,6 +1,6 @@
 # Signed waveforms and virtual tone bursts
 
-Click a speaker row or analyze a saved take. Results appear in the
+Click a speaker card or analyze a saved take (Lab). Results appear in the
 resizable panel below the speaker list, with independent scrolling. Acquisition
 details and arrival diagnostics remain expandable below the graphs. The source
 microphone, position, channel and reference stay attached to the selected result.

@@ -71,7 +71,7 @@ shared service owns reference-pair detection and classification; panels only
 display the result.
 
 Saved-take review has separate controller state. Saved analyses are indexed by
-exact take folder and measurement identity so the matching speaker row and
+exact take folder and measurement identity so the matching speaker card and
 individual result share the latest diagnostic status. Reanalysis does not change
 acquisition settings or qualify corrections by itself. It requires no live
 renderer/input. File validation, FFT work and unique report publication live in
@@ -115,13 +115,16 @@ pending; see the capture validation checklist.
 The alignment action owns two complete acquisition passes on a service worker.
 Each target keeps its own repeated evidence. The pure core qualifies repeatability
 and creates proposals; the capture crate estimates the common-band transfer level.
-Each speaker card reads its matching bounded alignment row and displays arrival,
-level, repeat spread, quality, qualification warnings and proposed absolute settings.
-The session toolbar above the cards emits Reanalyze/Apply/Verify/Restore actions;
-extended diagnostics are collapsible. The entire speaker workspace scrolls within
-its panel so session controls cannot squeeze the rows out of view. Capture progress
-stays in the active speaker row. Alignment never replaces the individual results
-in the lower panel; legacy saved tab preferences are ignored.
+The alignment chart is painted from the bounded alignment rows and profile; a
+UI-side summary derives relative values and maps raw reasons to short sentences
+without changing service data. Each fixed-size speaker card shows the weakest
+quality grade, measured values and the planned change. The action bar below the
+cards emits Apply/Verify/Restore actions; Lab adds Reanalyze/Update and the raw
+evidence. The entire speaker workspace scrolls within its panel. Card positions
+depend only on the speaker count and width; while a new alignment is captured,
+the previous chart's height stays reserved, so capture progress (inside the active
+card) never moves the grid. Alignment never replaces the individual results in
+the lower panel. The former alignment-tab preference slot now stores the Lab switch.
 
 Profile application uses the adapter's absolute, revision-checked settings command.
 The worker persists an uncertain state before mutation and confirms readback before
