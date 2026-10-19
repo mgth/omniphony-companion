@@ -3,6 +3,7 @@ name = "companion-cli"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 publish.workspace = true
 repository.workspace = true
 description = "Acoustic calibration companion and measurement control for Omniphony"

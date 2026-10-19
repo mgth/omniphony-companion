@@ -591,3 +591,7 @@ older 100 ms renderers remain usable but cannot apply a larger correction.
 The dedicated renderer change increases the actual delay rings to 250 ms.
 Measurements are retained even when an older renderer cannot apply their proposal.
 See `docs/long-latency-alignment.md` for bounds and validation.
+
+## License
+
+GPL-3.0-or-later. See [`LICENSE`](LICENSE).
