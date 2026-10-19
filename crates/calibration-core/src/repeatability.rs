@@ -1,7 +1,7 @@
 //! Qualification of independent repeated estimates; no PCM or device dependency.
 use crate::reason::{
-    ARRIVAL_REPEAT_LIMIT_MS, Blocker, ExclusionReason, FAR_ARRIVAL_MS, LEVEL_REPEAT_LIMIT_DB,
-    SnrBand,
+    ARRIVAL_REPEAT_LIMIT_MS, Blocker, ExclusionReason, FAR_ARRIVAL_MS, Interval,
+    LEVEL_REPEAT_LIMIT_DB, SnrBand,
 };
 use serde::{Deserialize, Serialize};
 
@@ -21,6 +21,9 @@ pub struct RepeatEstimate {
     /// original gain. Zero for a regular take.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub output_gain_offset_db: f64,
+    /// Which sweep of the take had `minimum_snr_db`. Absent in older sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimum_snr_interval: Option<Interval>,
 }
 fn is_zero(value: &f64) -> bool {
     *value == 0.0
@@ -50,19 +53,31 @@ pub struct QualifiedEstimate {
     pub arrival_repeat_spread_ms: f64,
     pub level_repeat_spread_db: f64,
 }
-/// Low-SNR estimates remain displayable; this minimum is only for correction.
+/// The weakest of a take's three sweeps (reference, speaker, reference): an invalid
+/// value first, otherwise the lowest.
+pub fn weakest_interval(snr_db: [f64; 3]) -> (Interval, f64) {
+    let index = (0..3)
+        .find(|&i| !snr_db[i].is_finite())
+        .or_else(|| (0..3).min_by(|&a, &b| snr_db[a].total_cmp(&snr_db[b])))
+        .unwrap_or(0);
+    (
+        Interval::of_segment(index).unwrap_or(Interval::Speaker),
+        snr_db[index],
+    )
+}
+
+/// Low-SNR estimates remain displayable; this minimum is only for correction. The
+/// excited-band S/N of each sweep of the take: reference, speaker, reference.
 pub fn qualify_acquisition(
-    minimum_band_snr_db: f64,
+    band_snr_db: [f64; 3],
     reference_rms_spread_db: f64,
 ) -> Result<(), ExclusionReason> {
-    if !(minimum_band_snr_db.is_finite()
-        && minimum_band_snr_db >= SnrBand::Acquisition.minimum_db())
-    {
+    let (interval, minimum) = weakest_interval(band_snr_db);
+    if !(minimum.is_finite() && minimum >= SnrBand::Acquisition.minimum_db()) {
         return Err(ExclusionReason::LowSnr {
             band: SnrBand::Acquisition,
-            db: minimum_band_snr_db
-                .is_finite()
-                .then_some(minimum_band_snr_db),
+            db: minimum.is_finite().then_some(minimum),
+            interval: Some(interval),
         });
     }
     if !(reference_rms_spread_db.is_finite() && (0.0..=1.0).contains(&reference_rms_spread_db)) {
@@ -111,6 +126,7 @@ pub fn qualify(repeats: &[RepeatEstimate]) -> Result<QualifiedEstimate, Exclusio
             return Err(ExclusionReason::LowSnr {
                 band: SnrBand::Level,
                 db: noise.is_finite().then_some(noise),
+                interval: r.minimum_snr_interval,
             });
         }
         arrivals.push(arrival);
@@ -148,23 +164,41 @@ mod tests {
             reasons: vec![],
             codes: vec![],
             output_gain_offset_db: 0.0,
+            minimum_snr_interval: None,
         }
     }
     #[test]
     fn acquisition_confidence_only_blocks_correction_below_its_floor() {
-        assert!(qualify_acquisition(15.0, 0.1).is_ok());
+        assert!(qualify_acquisition([15.0, 30.0, 15.0], 0.1).is_ok());
         assert_eq!(
-            qualify_acquisition(14.99, 0.1),
+            qualify_acquisition([30.0, 14.99, 30.0], 0.1),
             Err(ExclusionReason::LowSnr {
                 band: SnrBand::Acquisition,
-                db: Some(14.99)
+                db: Some(14.99),
+                interval: Some(Interval::Speaker),
+            })
+        );
+        // A disturbed reference sweep is named, not blamed on the speaker.
+        assert_eq!(
+            qualify_acquisition([28.0, 30.0, 14.4], 0.1),
+            Err(ExclusionReason::LowSnr {
+                band: SnrBand::Acquisition,
+                db: Some(14.4),
+                interval: Some(Interval::ReferenceAfter),
             })
         );
         assert_eq!(
-            qualify_acquisition(25.0, 1.01),
+            qualify_acquisition([25.0; 3], 1.01),
             Err(ExclusionReason::UnstableReference)
         );
-        assert!(qualify_acquisition(f64::NAN, 0.1).is_err());
+        assert_eq!(
+            qualify_acquisition([25.0, 25.0, f64::NAN], 0.1),
+            Err(ExclusionReason::LowSnr {
+                band: SnrBand::Acquisition,
+                db: None,
+                interval: Some(Interval::ReferenceAfter),
+            })
+        );
     }
     #[test]
     fn long_signed_delays_are_advisory_but_changes_still_fail() {
@@ -346,6 +380,7 @@ mod subset_tests {
                 reasons: vec![],
                 codes: vec![],
                 output_gain_offset_db: 0.0,
+                minimum_snr_interval: None,
             };
             2
         ]
@@ -372,7 +407,8 @@ mod subset_tests {
             selection.rows[1].as_ref().unwrap_err(),
             &ExclusionReason::LowSnr {
                 band: SnrBand::Level,
-                db: Some(18.5)
+                db: Some(18.5),
+                interval: None,
             }
         );
         assert_eq!(

@@ -36,6 +36,31 @@ impl SnrBand {
     }
 }
 
+/// One sweep of a take, which plays reference, speaker, reference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Interval {
+    ReferenceBefore,
+    Speaker,
+    ReferenceAfter,
+}
+impl Interval {
+    /// The interval of a take's segment index (0, 1 or 2).
+    pub fn of_segment(index: usize) -> Option<Self> {
+        [Self::ReferenceBefore, Self::Speaker, Self::ReferenceAfter]
+            .get(index)
+            .copied()
+    }
+    /// As written in the technical text, and read back by [`ExclusionReason::from_message`].
+    fn phrase(self) -> &'static str {
+        match self {
+            Self::ReferenceBefore => "in the reference sweep before the speaker",
+            Self::Speaker => "in the speaker's own sweep",
+            Self::ReferenceAfter => "in the reference sweep after the speaker",
+        }
+    }
+}
+
 /// How a reason should be presented.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
@@ -67,6 +92,10 @@ pub enum ExclusionReason {
         /// Absent when classified from older text that did not state the value.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         db: Option<f64>,
+        /// The sweep of the take that fell short: a disturbed reference sweep excludes a
+        /// speaker that measured cleanly. Absent in older sessions.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        interval: Option<Interval>,
     },
     /// The reference speaker's level changed within a take or between takes.
     UnstableReference,
@@ -127,6 +156,13 @@ impl ExclusionReason {
                     SnrBand::Level
                 },
                 db: number_after(&lower, "signal/noise is "),
+                interval: [
+                    Interval::ReferenceBefore,
+                    Interval::Speaker,
+                    Interval::ReferenceAfter,
+                ]
+                .into_iter()
+                .find(|i| has(i.phrase())),
             }
         } else if has("reference level") {
             Self::UnstableReference
@@ -205,6 +241,14 @@ impl ExclusionReason {
                 },
                 (db + CLIPPING_MARGIN_DB).ceil()
             ),
+            Self::LowSnr {
+                interval: Some(Interval::ReferenceBefore),
+                ..
+            } => "Reference sweep before it was too noisy. Measure again.".into(),
+            Self::LowSnr {
+                interval: Some(Interval::ReferenceAfter),
+                ..
+            } => "Reference sweep after it was too noisy. Measure again.".into(),
             Self::LowSnr { .. } => "Too noisy to trust.".into(),
             Self::UnstableReference => {
                 "Reference speaker level drifted. Keep the mic gain fixed.".into()
@@ -253,29 +297,41 @@ impl fmt::Display for ExclusionReason {
             Self::LowSnr {
                 band: SnrBand::Acquisition,
                 db,
-            } => match db {
-                Some(db) => write!(
-                    f,
-                    "excited-band acquisition signal/noise is {db:.1} dB (minimum 15 dB); diagnostic result only"
-                ),
-                None => write!(
-                    f,
-                    "excited-band acquisition signal/noise below 15 dB; diagnostic result only"
-                ),
-            },
+                interval,
+            } => {
+                let at = interval
+                    .map(|i| format!(" {}", i.phrase()))
+                    .unwrap_or_default();
+                match db {
+                    Some(db) => write!(
+                        f,
+                        "excited-band acquisition signal/noise is {db:.1} dB{at} (minimum 15 dB); diagnostic result only"
+                    ),
+                    None => write!(
+                        f,
+                        "excited-band acquisition signal/noise below 15 dB{at}; diagnostic result only"
+                    ),
+                }
+            }
             Self::LowSnr {
                 band: SnrBand::Level,
                 db,
-            } => match db {
-                Some(db) => write!(
-                    f,
-                    "integrated level-band signal/noise is {db:.1} dB (minimum 20 dB for correction)"
-                ),
-                None => write!(
-                    f,
-                    "integrated level-band signal/noise below 20 dB (minimum for correction)"
-                ),
-            },
+                interval,
+            } => {
+                let at = interval
+                    .map(|i| format!(" {}", i.phrase()))
+                    .unwrap_or_default();
+                match db {
+                    Some(db) => write!(
+                        f,
+                        "integrated level-band signal/noise is {db:.1} dB{at} (minimum 20 dB for correction)"
+                    ),
+                    None => write!(
+                        f,
+                        "integrated level-band signal/noise below 20 dB{at} (minimum for correction)"
+                    ),
+                }
+            }
             Self::UnstableReference => write!(f, "reference level changed during or between takes"),
             Self::RepeatSpread { ms, db } => {
                 let mut parts = Vec::new();
@@ -471,6 +527,7 @@ mod tests {
                 R::LowSnr {
                     band: SnrBand::Acquisition,
                     db: None,
+                    interval: None,
                 },
             ),
             (
@@ -478,6 +535,15 @@ mod tests {
                 R::LowSnr {
                     band: SnrBand::Level,
                     db: Some(18.5),
+                    interval: None,
+                },
+            ),
+            (
+                "integrated level-band signal/noise is 18.5 dB in the reference sweep after the speaker (minimum 20 dB for correction)",
+                R::LowSnr {
+                    band: SnrBand::Level,
+                    db: Some(18.5),
+                    interval: Some(Interval::ReferenceAfter),
                 },
             ),
             (
@@ -542,10 +608,27 @@ mod tests {
             R::LowSnr {
                 band: SnrBand::Acquisition,
                 db: Some(12.3),
+                interval: None,
             },
             R::LowSnr {
                 band: SnrBand::Level,
                 db: Some(18.5),
+                interval: None,
+            },
+            R::LowSnr {
+                band: SnrBand::Acquisition,
+                db: Some(14.4),
+                interval: Some(Interval::ReferenceBefore),
+            },
+            R::LowSnr {
+                band: SnrBand::Level,
+                db: Some(18.5),
+                interval: Some(Interval::ReferenceAfter),
+            },
+            R::LowSnr {
+                band: SnrBand::Level,
+                db: None,
+                interval: Some(Interval::Speaker),
             },
             R::UnstableReference,
             R::RepeatSpread { ms: 0.41, db: 0.0 },
@@ -556,9 +639,19 @@ mod tests {
             let text = code.to_string();
             let back = R::from_message(&text);
             match (&code, &back) {
-                (R::LowSnr { band, db }, R::LowSnr { band: b, db: d }) => {
-                    assert_eq!(band, b);
-                    assert!((db.unwrap() - d.unwrap()).abs() < 0.05, "{text}");
+                (
+                    R::LowSnr { band, db, interval },
+                    R::LowSnr {
+                        band: b,
+                        db: d,
+                        interval: i,
+                    },
+                ) => {
+                    assert_eq!((band, interval), (b, i), "{text}");
+                    match (db, d) {
+                        (Some(db), Some(d)) => assert!((db - d).abs() < 0.05, "{text}"),
+                        _ => assert_eq!(db, d, "{text}"),
+                    }
                 }
                 _ => assert_eq!(back, code, "{text}"),
             }
@@ -586,6 +679,21 @@ mod tests {
             R::Clipped { overdrive_db: None }.human(),
             "Clipped. Lower the mic gain or test level."
         );
+        let low = |interval| R::LowSnr {
+            band: SnrBand::Level,
+            db: Some(18.5),
+            interval,
+        };
+        assert_eq!(
+            low(Some(Interval::ReferenceAfter)).human(),
+            "Reference sweep after it was too noisy. Measure again."
+        );
+        assert_eq!(
+            low(Some(Interval::ReferenceBefore)).human(),
+            "Reference sweep before it was too noisy. Measure again."
+        );
+        assert_eq!(low(Some(Interval::Speaker)).human(), "Too noisy to trust.");
+        assert_eq!(low(None).human(), "Too noisy to trust.");
     }
 
     #[test]
@@ -595,6 +703,12 @@ mod tests {
             ExclusionReason::LowSnr {
                 band: SnrBand::Level,
                 db: None,
+                interval: None,
+            },
+            ExclusionReason::LowSnr {
+                band: SnrBand::Level,
+                db: Some(18.5),
+                interval: Some(Interval::ReferenceAfter),
             },
             ExclusionReason::NoClearArrival {
                 detail: "arrival unresolved".into(),
@@ -617,6 +731,12 @@ mod tests {
         );
         assert!(
             json.contains(r#"{"code":"low_snr","band":"level"}"#),
+            "{json}"
+        );
+        assert!(
+            json.contains(
+                r#"{"code":"low_snr","band":"level","db":18.5,"interval":"reference_after"}"#
+            ),
             "{json}"
         );
         assert_eq!(

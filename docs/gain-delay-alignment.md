@@ -137,7 +137,7 @@ simulated data and diagnostic-only reanalyses cannot be promoted by this action.
 Exclusions and blockers are typed in `calibration-core` (`calibration_core::reason`)
 and produced where they are found: the core's repeatability gates, the service's
 per-take estimate and the subset policy. Each `ExclusionReason` (no signal, missing
-timing references, clipped, low SNR with its band and value, unstable reference,
+timing references, clipped, low SNR with its band, value and interval, unstable reference,
 repeat spread in ms/dB, no clear arrival, not measured twice, cancelled, capture
 failed, session mismatch, far arrival, other) and each `Blocker` has one technical
 `Display`, shown in Lab, and one short `human()` sentence, shown in the chart and
@@ -184,7 +184,17 @@ corrects a far speaker loads with that speaker included, so it stays valid and
 restorable.
 
 
-## Clipped speakers are measured again at a lower gain
+## Low signal/noise names the sweep that fell short
+
+Each take plays three sweeps: the reference speaker, the speaker, the reference
+again. The acquisition (15 dB, excited band) and level (20 dB, 500–2000 Hz) floors
+apply to the weakest of the three, and the exclusion names it: "Reference sweep
+after it was too noisy. Measure again." for a disturbed reference, "Too noisy to
+trust." when the speaker's own sweep fell short. The technical text adds "in the
+reference sweep after the speaker" (or before, or "in the speaker's own sweep");
+sessions saved before this carry no interval and read as before.
+
+## Clipped or disturbed speakers are measured again
 
 A speaker that clips in its own interval of a pass is measured again in the same pass,
 with its output gain lowered by the estimated overdrive plus 3 dB, rounded up (for
@@ -199,12 +209,21 @@ at its own setting; `output_gain_offset_db` on each repeat records it.
 Lowering one output cannot help when the reference intervals clip too (the
 reference speaker itself, or a capture too hot overall), or when the gain would go
 below the renderer's -60 dB: those speakers keep their clipped takes and the hint to
-lower the microphone gain or test level. A retake that fails also keeps the clipped
-take. If a gain cannot be restored, the alignment is blocked with the speakers to fix.
+lower the microphone gain or test level. A retake that fails to capture also keeps
+the clipped take. If a gain cannot be restored, the alignment is blocked with the
+speakers to fix.
+
+A speaker excluded only because a reference sweep of its take fell below a floor is
+measured again in the same retake batch, at its own gain, when another take of the
+pass has clean reference sweeps: the reference passes, so the shortfall was a passing
+disturbance in the room. This does not depend on the option above and never changes
+the renderer. When every take's reference falls short, the reference itself is too
+weak or the room too noisy, and nothing is measured again. A completed retake replaces
+the first take, failed or not.
 
 Restoring gives the renderer a newer revision of the original configuration. The
 alignment keeps it as `restored_snapshot`, so **Apply** compares against the live
 state, and lists every lowered and restored state in `retake_snapshots`, so
 reanalysis accepts takes from those states only and recovers each retake's offset
 from its own snapshot. Verification never lowers a gain: it measures the applied
-state as it is.
+state as it is, and only measures a disturbed reference again.

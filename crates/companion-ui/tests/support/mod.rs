@@ -317,6 +317,7 @@ pub fn alignment(
                         reasons: vec![],
                         codes: vec![],
                         output_gain_offset_db: 0.0,
+                        minimum_snr_interval: None,
                     })
                     .collect(),
                 quality: vec![Report {
@@ -473,6 +474,7 @@ pub fn room_alignment(controller: &Controller) -> companion_service::alignment::
                         reasons: reason.map(|r| vec![r.to_owned()]).unwrap_or_default(),
                         codes: vec![],
                         output_gain_offset_db: 0.0,
+                        minimum_snr_interval: None,
                     })
                     .collect(),
                 quality: vec![Report {
@@ -565,6 +567,7 @@ pub fn late_device_alignment(
                         reasons: vec![],
                         codes: vec![],
                         output_gain_offset_db: 0.0,
+                        minimum_snr_interval: None,
                     };
                     if silent {
                         repeat.reject(ExclusionReason::MissingTimingReferences);

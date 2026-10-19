@@ -30,6 +30,9 @@ struct Rig {
     /// Outputs this much louder at the microphone; a capture that reaches full scale
     /// clips and is rejected as the measurement would.
     loud: Mutex<std::collections::BTreeMap<String, f32>>,
+    /// Outputs whose next take gets noise of this amplitude during the reference sweep
+    /// after them, once: a passing disturbance in the room.
+    disturb: Mutex<std::collections::BTreeMap<String, f32>>,
     batches: Mutex<Vec<Vec<String>>>,
 }
 impl Rig {
@@ -68,6 +71,7 @@ impl Rig {
             captures: AtomicUsize::new(0),
             rejected: Mutex::new(Default::default()),
             loud: Mutex::new(Default::default()),
+            disturb: Mutex::new(Default::default()),
             batches: Mutex::new(vec![]),
         }
     }
@@ -161,6 +165,16 @@ impl Backend for Rig {
                 let start = 24000 + source.len() * segment + delay;
                 for (j, x) in source.iter().enumerate() {
                     samples[start + j] += gain * x;
+                }
+            }
+            if let Some(noise) = self.disturb.lock().unwrap().remove(id) {
+                let padding = 12000;
+                let body = args.sweep.duration_ms as usize * 48;
+                let start = 24000 + source.len() * 2 + 144 + padding;
+                let mut seed = 7_u32;
+                for x in &mut samples[start..start + body] {
+                    seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                    *x += noise * (seed as f32 / u32::MAX as f32 - 0.5) * 2.0;
                 }
             }
             let clipped = samples.iter().any(|x| x.abs() >= 0.999);
@@ -531,6 +545,7 @@ fn reason_codes_round_trip_and_text_only_sessions_still_load() {
     let low = ExclusionReason::LowSnr {
         band: SnrBand::Level,
         db: Some(18.5),
+        interval: None,
     };
     let codes = |a: &alignment::Alignment| a.rows.iter().map(|r| r.exclusion()).collect::<Vec<_>>();
     let expected = vec![
@@ -693,8 +708,8 @@ fn a_clipped_speaker_is_measured_again_at_a_lower_gain_and_counted_back() {
     assert!(
         loud.take_folders
             .iter()
-            .all(|f| f.parent().unwrap().ends_with("pass-1-lowered-gain")
-                || f.parent().unwrap().ends_with("pass-2-lowered-gain"))
+            .all(|f| f.parent().unwrap().ends_with("pass-1-retake")
+                || f.parent().unwrap().ends_with("pass-2-retake"))
     );
     assert_eq!(outcome.retakes.len(), 2);
     assert!(outcome.retakes.iter().all(|r| r.gain_offset_db == 13.0));
@@ -731,6 +746,102 @@ fn a_clipped_speaker_is_measured_again_at_a_lower_gain_and_counted_back() {
     assert!((loud_gain - gain("Loud")).abs() < 0.001);
     let loaded = alignment::load(&a.directory).unwrap();
     assert_eq!(loaded.rows[2].repeats, a.rows[2].repeats);
+}
+
+/// L and R with the default settings, keeping the retakes.
+fn capture_pair(rig: &Rig, root: &std::path::Path) -> alignment::Outcome {
+    let mut settings = Settings {
+        device: Some("test microphone".into()),
+        reference_output: Some("L".into()),
+        output_root: root.display().to_string(),
+        ..Settings::default()
+    };
+    settings.sweep.duration_ms = 200;
+    let request = alignment::request(
+        "127.0.0.1:9000".parse().unwrap(),
+        rig.discover("127.0.0.1:9000".parse().unwrap()).unwrap(),
+        &settings,
+        "L".into(),
+        root.join("pair"),
+    )
+    .unwrap();
+    alignment::capture(
+        rig,
+        request,
+        settings,
+        vec!["L".into(), "R".into()],
+        &AtomicBool::new(false),
+        &mut |_, _, _| {},
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_disturbed_reference_sweep_is_measured_again_at_once() {
+    // Noise in the room during the reference sweep after R, in pass 1 only: R's own
+    // sweep is clean and L's take shows the reference passes.
+    let root = tempfile::tempdir().unwrap();
+    let rig = Rig::new();
+    let original = rig.snapshot.lock().unwrap().clone();
+    rig.disturb.lock().unwrap().insert("R".into(), 0.008);
+    let outcome = capture_pair(&rig, root.path());
+    let a = &outcome.alignment;
+    assert_eq!(
+        *rig.batches.lock().unwrap(),
+        [vec!["L", "R"], vec!["R"], vec!["L", "R"]]
+    );
+    let r = &a.rows[1];
+    assert!(r.qualified.is_some(), "{:?}", r.exclusion());
+    assert!(
+        r.take_folders[0]
+            .parent()
+            .unwrap()
+            .ends_with("pass-1-retake")
+    );
+    assert_eq!(r.repeats[0].output_gain_offset_db, 0.0);
+    assert_eq!(a.corrected_output_ids(), ["L", "R"]);
+    // Measured again at its own gain: the renderer was never touched.
+    assert_eq!(rig.writes.load(Ordering::Relaxed), 0);
+    assert!(a.restored_snapshot.is_none() && a.retake_snapshots.is_empty());
+    assert_eq!(*rig.snapshot.lock().unwrap(), original);
+    assert_eq!(outcome.retakes.len(), 1);
+    assert_eq!(outcome.retakes[0].revision, original.revision);
+    assert_eq!(outcome.retakes[0].gain_offset_db, 0.0);
+}
+
+#[test]
+fn a_reference_disturbed_on_every_take_is_named_and_not_measured_again() {
+    // With no take of the pass to show the reference passes, a retake would not help.
+    let root = tempfile::tempdir().unwrap();
+    let rig = Rig::new();
+    for id in ["L", "R"] {
+        rig.disturb.lock().unwrap().insert(id.into(), 0.008);
+    }
+    let a = capture_pair(&rig, root.path()).alignment;
+    assert_eq!(rig.batches.lock().unwrap().len(), 2);
+    let reason = a.rows[1].exclusion().unwrap();
+    assert!(
+        matches!(
+            reason,
+            ExclusionReason::LowSnr {
+                band: SnrBand::Level,
+                interval: Some(calibration_core::reason::Interval::ReferenceAfter),
+                ..
+            }
+        ),
+        "{reason:?}"
+    );
+    assert_eq!(
+        reason.human(),
+        "Reference sweep after it was too noisy. Measure again."
+    );
+    assert!(
+        a.rows[1]
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("in the reference sweep after the speaker")
+    );
 }
 
 #[test]
@@ -777,6 +888,7 @@ fn the_16_october_session_sets_aside_the_late_device_and_keeps_its_text_reasons(
             ExclusionReason::LowSnr {
                 band: SnrBand::Acquisition,
                 db: None,
+                interval: None,
             },
             "Too noisy to trust.",
         ),

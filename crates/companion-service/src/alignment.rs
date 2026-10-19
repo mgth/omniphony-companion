@@ -6,6 +6,7 @@ use crate::{
 };
 use calibration_core::{
     self as core, Blocker, ExclusionReason,
+    reason::Interval,
     repeatability::{QualifiedEstimate, RepeatEstimate},
 };
 use measurement_capture::{clipping, level};
@@ -165,6 +166,7 @@ fn estimate(take: &TakeOutcome, gain_offset_db: f64) -> RepeatEstimate {
         reasons: vec![],
         codes: vec![],
         output_gain_offset_db: gain_offset_db,
+        minimum_snr_interval: None,
     };
     if take.cancelled {
         result.reject(ExclusionReason::Cancelled);
@@ -193,7 +195,7 @@ fn estimate(take: &TakeOutcome, gain_offset_db: f64) -> RepeatEstimate {
             .map(|b| &b.signal_to_noise_db)
             .unwrap_or(&t.signal_to_noise_db);
         if let Err(reason) = core::repeatability::qualify_acquisition(
-            snr.iter().copied().fold(f64::INFINITY, f64::min),
+            *snr,
             (t.sweep_rms_dbfs[0] - t.sweep_rms_dbfs[2]).abs(),
         ) {
             result.reject(reason);
@@ -234,12 +236,10 @@ fn estimate(take: &TakeOutcome, gain_offset_db: f64) -> RepeatEstimate {
     match bands {
         Ok(bands) => {
             result.level_db = Some(bands[1].level_db + gain_offset_db);
-            result.minimum_snr_db = Some(
-                bands
-                    .iter()
-                    .map(|b| b.band_snr_db)
-                    .fold(f64::INFINITY, f64::min),
-            );
+            let (interval, minimum) =
+                core::repeatability::weakest_interval([0, 1, 2].map(|i| bands[i].band_snr_db));
+            result.minimum_snr_db = Some(minimum);
+            result.minimum_snr_interval = Some(interval);
             result.reference_level_db = Some((bands[0].level_db + bands[2].level_db) * 0.5);
             if (bands[0].level_db - bands[2].level_db).abs() > 0.5 {
                 result.reject(ExclusionReason::UnstableReference);
@@ -366,14 +366,16 @@ pub fn capture<B: Backend + ?Sized>(
                 row.repeats.push(estimate(take, 0.0));
                 row.quality.push(take.quality());
             }
-            if alignment.blockers.is_empty() && alignment.settings.retake_clipped {
-                retakes.extend(retake_clipped(
+            if alignment.blockers.is_empty() {
+                let lower_gain = alignment.settings.retake_clipped;
+                retakes.extend(retake(
                     backend,
                     &child,
                     &mut alignment,
                     &mut current,
                     pass,
                     &batch.takes,
+                    lower_gain,
                     cancel,
                     progress,
                 ));
@@ -397,44 +399,63 @@ pub fn capture<B: Backend + ?Sized>(
     })
 }
 
-/// Measure again the speakers whose own interval clipped by a known amount, with their
-/// output gain lowered by that overdrive plus margin, and keep those takes for this pass.
-/// The reference speaker, and speakers whose reference intervals clipped too, are left
-/// as they are: lowering one output cannot fix them. The gains are restored right after
-/// the retake; a speaker whose retake fails keeps its clipped take.
+/// Measure again, in the same pass, the speakers a retake can fix, and keep those takes:
+/// - with `lower_gain`, a speaker whose own interval clipped by a known amount, with its
+///   output gain lowered by that overdrive plus margin. Not the reference speaker, nor
+///   one whose reference intervals clipped too: lowering one output cannot fix those.
+/// - a speaker excluded only by a reference sweep below its signal/noise floor, while
+///   another take of the pass has clean reference sweeps: a passing disturbance in the
+///   room, measured again at its own gain. A reference weak on every take is left alone.
+///
+/// Lowered gains are restored right after the retake. A speaker whose retake fails to
+/// capture keeps its first take; a completed retake replaces it, failed or not.
 #[allow(clippy::too_many_arguments)]
-fn retake_clipped<B: Backend + ?Sized>(
+fn retake<B: Backend + ?Sized>(
     backend: &B,
     pass_request: &MeasureRequest,
     a: &mut Alignment,
     current: &mut Snapshot,
     pass: usize,
     batch: &[(String, TakeOutcome)],
+    lower_gain: bool,
     cancel: &AtomicBool,
     progress: &mut dyn FnMut(usize, usize, MeasureProgress),
 ) -> Vec<Retake> {
+    let clean_references: Vec<_> = batch.iter().map(|(_, t)| references_pass(t)).collect();
     let mut rows = vec![];
-    let mut lowered = vec![];
+    let mut settings = vec![];
     let mut original = vec![];
     for (index, (id, take)) in batch.iter().enumerate() {
-        let Some(segments) = take.diagnostics.as_ref().and_then(|d| d.segments.as_ref()) else {
-            continue;
-        };
-        let Some(overdrive) = segments[1].overdrive_db else {
-            continue;
-        };
         let Some(output) = current.outputs.iter().find(|o| &o.id == id) else {
             continue;
         };
-        let gain = output.gain_db - clipping::reduction_db(overdrive) as f32;
-        if *id == pass_request.reference_output
-            || segments[0].clipped_samples + segments[2].clipped_samples > 0
-            || gain < MIN_OUTPUT_GAIN_DB
-        {
-            continue;
-        }
+        let lowered = take
+            .diagnostics
+            .as_ref()
+            .and_then(|d| d.segments.as_ref())
+            .filter(|s| {
+                lower_gain
+                    && *id != pass_request.reference_output
+                    && s[0].clipped_samples + s[2].clipped_samples == 0
+            })
+            .and_then(|s| s[1].overdrive_db)
+            .map(|db| output.gain_db - clipping::reduction_db(db) as f32)
+            .filter(|gain| *gain >= MIN_OUTPUT_GAIN_DB);
+        let disturbed = a.rows[index]
+            .repeats
+            .get(pass)
+            .is_some_and(reference_shortfall)
+            && clean_references
+                .iter()
+                .enumerate()
+                .any(|(other, clean)| other != index && *clean);
+        let gain = match lowered {
+            Some(gain) => gain,
+            None if disturbed => output.gain_db,
+            None => continue,
+        };
         rows.push(index);
-        lowered.push(OutputSetting {
+        settings.push(OutputSetting {
             output_id: id.clone(),
             gain_db: gain,
             delay_ms: output.delay_ms,
@@ -445,29 +466,39 @@ fn retake_clipped<B: Backend + ?Sized>(
             delay_ms: output.delay_ms,
         });
     }
-    if lowered.is_empty() || cancel.load(Ordering::Relaxed) {
+    if rows.is_empty() || cancel.load(Ordering::Relaxed) {
         return vec![];
     }
-    let renderer = match backend.set_outputs(a.endpoint, current.clone(), lowered.clone()) {
-        Ok(renderer) => {
-            a.retake_snapshots.push(renderer.clone());
-            renderer
-        }
-        Err(error) => {
-            // Refused before any change: keep the clipped takes and carry on.
-            match backend.discover(a.endpoint) {
-                Ok(live) if omniphony_adapter::same_configuration(&live, current) => {
-                    *current = live;
-                }
-                _ => a.block(Blocker::Capture {
-                    detail: format!("Lowering the output gain of clipped speakers failed ({error}); check the renderer's output gains."),
-                }),
+    let (lowering, restoring): (Vec<_>, Vec<_>) = settings
+        .iter()
+        .zip(&original)
+        .filter(|(low, high)| low.gain_db != high.gain_db)
+        .map(|(low, high)| (low.clone(), high.clone()))
+        .unzip();
+    let renderer = if lowering.is_empty() {
+        current.clone()
+    } else {
+        match backend.set_outputs(a.endpoint, current.clone(), lowering.clone()) {
+            Ok(renderer) => {
+                a.retake_snapshots.push(renderer.clone());
+                renderer
             }
-            return vec![];
+            Err(error) => {
+                // Refused before any change: keep the first takes and carry on.
+                match backend.discover(a.endpoint) {
+                    Ok(live) if omniphony_adapter::same_configuration(&live, current) => {
+                        *current = live;
+                    }
+                    _ => a.block(Blocker::Capture {
+                        detail: format!("Lowering the output gain of clipped speakers failed ({error}); check the renderer's output gains."),
+                    }),
+                }
+                return vec![];
+            }
         }
     };
     let mut expected = current.clone();
-    for setting in &lowered {
+    for setting in &lowering {
         if let Some(output) = expected
             .outputs
             .iter_mut()
@@ -476,32 +507,35 @@ fn retake_clipped<B: Backend + ?Sized>(
             output.gain_db = setting.gain_db;
         }
     }
-    let ids: Vec<_> = lowered.iter().map(|s| s.output_id.clone()).collect();
+    let ids: Vec<_> = settings.iter().map(|s| s.output_id.clone()).collect();
     // The offsets are the requested ones: measure only if the renderer reads them back.
     let result = omniphony_adapter::same_configuration(&renderer, &expected).then(|| {
         let mut retake = pass_request.clone();
         retake.snapshot = renderer.clone();
-        retake.output = lowered[0].output_id.clone();
-        retake.out_dir = a.directory.join(format!("pass-{}-lowered-gain", pass + 1));
+        retake.output = ids[0].clone();
+        retake.out_dir = a.directory.join(format!("pass-{}-retake", pass + 1));
         backend.measure_batch(retake, ids.clone(), cancel, &mut |i, p| {
             progress(pass, rows[i.min(rows.len() - 1)], p)
         })
     });
-    match backend.set_outputs(a.endpoint, renderer.clone(), original.clone()) {
-        Ok(restored) if omniphony_adapter::same_configuration(&restored, &a.snapshot) => {
-            a.retake_snapshots.push(restored.clone());
-            *current = restored.clone();
-            a.restored_snapshot = Some(restored);
-        }
-        restored => {
-            a.block(Blocker::Capture {
-                detail: format!(
-                    "The output gain of {} was lowered for a retake and could not be restored{}; set it back before measuring again.",
-                    ids.join(", "),
-                    restored.err().map(|e| format!(" ({e})")).unwrap_or_default()
-                ),
-            });
-            return vec![];
+    if !lowering.is_empty() {
+        match backend.set_outputs(a.endpoint, renderer.clone(), restoring) {
+            Ok(restored) if omniphony_adapter::same_configuration(&restored, &a.snapshot) => {
+                a.retake_snapshots.push(restored.clone());
+                *current = restored.clone();
+                a.restored_snapshot = Some(restored);
+            }
+            restored => {
+                let lowered: Vec<_> = lowering.iter().map(|s| s.output_id.as_str()).collect();
+                a.block(Blocker::Capture {
+                    detail: format!(
+                        "The output gain of {} was lowered for a retake and could not be restored{}; set it back before measuring again.",
+                        lowered.join(", "),
+                        restored.err().map(|e| format!(" ({e})")).unwrap_or_default()
+                    ),
+                });
+                return vec![];
+            }
         }
     }
     let Some(Ok(batch)) = result else {
@@ -513,7 +547,7 @@ fn retake_clipped<B: Backend + ?Sized>(
     let mut retakes = vec![];
     // An incomplete retake returns the takes of its first speakers, in order.
     for (((&row, low), high), (id, take)) in
-        rows.iter().zip(&lowered).zip(&original).zip(batch.takes)
+        rows.iter().zip(&settings).zip(&original).zip(batch.takes)
     {
         if id != low.output_id {
             break;
@@ -531,6 +565,46 @@ fn retake_clipped<B: Backend + ?Sized>(
         });
     }
     retakes
+}
+
+/// Whether a take's only shortfall is a reference sweep below a signal/noise floor.
+fn reference_shortfall(r: &RepeatEstimate) -> bool {
+    let reference = |interval: Option<Interval>| {
+        matches!(
+            interval,
+            Some(Interval::ReferenceBefore | Interval::ReferenceAfter)
+        )
+    };
+    let noisy_reference = |c: &ExclusionReason| matches!(c, ExclusionReason::LowSnr { interval, .. } if reference(*interval));
+    let level = r
+        .minimum_snr_db
+        .is_some_and(|db| db.is_nan() || db < core::reason::SnrBand::Level.minimum_db())
+        && reference(r.minimum_snr_interval);
+    (level || r.codes.iter().any(noisy_reference)) && r.codes.iter().all(noisy_reference)
+}
+
+/// Whether both reference sweeps of a take meet the acquisition and level-band floors.
+fn references_pass(take: &TakeOutcome) -> bool {
+    use core::reason::SnrBand;
+    let acquisition = take.timing.as_ref().is_some_and(|t| {
+        let snr = t
+            .band_noise
+            .as_ref()
+            .map_or(&t.signal_to_noise_db, |b| &b.signal_to_noise_db);
+        [snr[0], snr[2]]
+            .iter()
+            .all(|db| *db >= SnrBand::Acquisition.minimum_db())
+    });
+    let level = take.impulse.as_ref().is_some_and(|ir| {
+        [0, 2].iter().all(|&i| {
+            ir.segments
+                .get(i)
+                .and_then(|s| s.spectral.as_ref())
+                .and_then(|s| level::estimate(s).ok())
+                .is_some_and(|b| b.band_snr_db >= SnrBand::Level.minimum_db())
+        })
+    });
+    acquisition && level
 }
 
 /// How far `output_id`'s gain was lowered in the renderer state a take was captured
@@ -725,6 +799,7 @@ pub fn reanalyze(original: &Alignment) -> Result<Alignment, String> {
                         reasons: vec![],
                         codes: vec![],
                         output_gain_offset_db: 0.0,
+                        minimum_snr_interval: None,
                     };
                     repeat.reject(ExclusionReason::from_message(&e));
                     row.repeats.push(repeat);
