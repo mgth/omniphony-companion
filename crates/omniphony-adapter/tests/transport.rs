@@ -34,8 +34,11 @@ fn receive(stream: &mut TcpStream) -> Request {
     serde_json::from_str(json).unwrap()
 }
 fn send(stream: &mut TcpStream, id: u64, reply: Reply) {
+    send_version(stream, VERSION, id, reply);
+}
+fn send_version(stream: &mut TcpStream, version: u32, id: u64, reply: Reply) {
     let json = serde_json::to_string(&Response {
-        version: VERSION,
+        version,
         request_id: id,
         reply,
     })
@@ -64,6 +67,9 @@ fn snapshot() -> Snapshot {
             muted: false,
             freq_low_hz: None,
             freq_high_hz: None,
+            azimuth_deg: None,
+            elevation_deg: None,
+            distance_m: None,
         }],
     }
 }
@@ -537,5 +543,113 @@ fn finite_noise_validates_identity_progress_stop_and_has_no_legacy_fallback() {
             .contains("update Omniphony")
     );
     client.end().unwrap();
+    handle.join().unwrap();
+}
+
+fn placed(azimuth: f32, elevation: f32, distance: f32) -> Snapshot {
+    let mut s = snapshot();
+    s.outputs[0].azimuth_deg = Some(azimuth);
+    s.outputs[0].elevation_deg = Some(elevation);
+    s.outputs[0].distance_m = Some(distance);
+    s
+}
+
+#[test]
+fn discovery_reads_output_positions_and_refuses_impossible_ones() {
+    for (snapshot, valid) in [
+        (placed(-30.0, 0.0, 2.5), true),
+        (placed(181.0, 0.0, 2.5), false),
+        (placed(0.0, -91.0, 2.5), false),
+        (placed(0.0, 0.0, -0.1), false),
+    ] {
+        let reply = snapshot.clone();
+        let (endpoint, handle) = server(move |mut stream| {
+            let r = receive(&mut stream);
+            assert_eq!(r.version, VERSION);
+            send(
+                &mut stream,
+                r.request_id,
+                Reply::Snapshot { snapshot: reply },
+            );
+        });
+        let mut c = Client::connect(endpoint, Duration::from_secs(1)).unwrap();
+        match c.discover() {
+            Ok(found) => {
+                assert!(valid);
+                assert_eq!(found, snapshot);
+                assert_eq!(found.outputs[0].azimuth_deg, Some(-30.0));
+            }
+            Err(Error::Protocol(message)) => {
+                assert!(!valid);
+                assert!(message.contains("invalid output"), "{message}");
+            }
+            Err(e) => panic!("{e}"),
+        }
+        handle.join().unwrap();
+    }
+}
+
+#[test]
+fn an_older_renderer_is_discovered_again_in_its_version_without_positions() {
+    let (endpoint, handle) = server(|mut stream| {
+        let r = receive(&mut stream);
+        assert_eq!(r.version, 5);
+        assert!(matches!(r.command, Command::Discover {}));
+        send_version(
+            &mut stream,
+            4,
+            r.request_id,
+            Reply::Error {
+                code: "unsupported_version".into(),
+                message: "unsupported measurement protocol version".into(),
+            },
+        );
+        let r = receive(&mut stream);
+        assert_eq!(r.version, 4);
+        assert!(matches!(r.command, Command::Discover {}));
+        send_version(
+            &mut stream,
+            4,
+            r.request_id,
+            Reply::Snapshot {
+                snapshot: snapshot(),
+            },
+        );
+        // The whole connection then stays in version 4.
+        let r = receive(&mut stream);
+        assert_eq!(r.version, 4);
+        assert!(matches!(r.command, Command::Begin { .. }));
+        send_version(&mut stream, 4, r.request_id, session(None));
+        let r = receive(&mut stream);
+        send_version(&mut stream, 4, r.request_id, Reply::Ended {});
+    });
+    let mut c = Client::connect(endpoint, Duration::from_secs(1)).unwrap();
+    assert_eq!(c.protocol_version(), 5);
+    let found = c.discover().unwrap();
+    assert_eq!(c.protocol_version(), 4);
+    assert!(found.outputs.iter().all(|o| o.azimuth_deg.is_none()));
+    c.begin(&found).unwrap();
+    c.end().unwrap();
+    handle.join().unwrap();
+}
+
+#[test]
+fn a_version_refusal_outside_the_supported_range_poisons_the_connection() {
+    let (endpoint, handle) = server(|mut stream| {
+        let r = receive(&mut stream);
+        send_version(
+            &mut stream,
+            3,
+            r.request_id,
+            Reply::Error {
+                code: "unsupported_version".into(),
+                message: "unsupported measurement protocol version".into(),
+            },
+        );
+    });
+    let mut c = Client::connect(endpoint, Duration::from_secs(1)).unwrap();
+    assert!(matches!(c.discover(), Err(Error::Protocol(_))));
+    assert_eq!(c.protocol_version(), 5);
+    assert!(c.discover().unwrap_err().to_string().contains("closed"));
     handle.join().unwrap();
 }

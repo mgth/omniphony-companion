@@ -35,6 +35,9 @@ fn fixture(root: &Path, name: &str, output: &str, accepted: bool) -> TakeReferen
                 muted: false,
                 freq_low_hz: None,
                 freq_high_hz: None,
+                azimuth_deg: None,
+                elevation_deg: None,
+                distance_m: None,
             })
             .collect(),
     };

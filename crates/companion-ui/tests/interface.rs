@@ -1885,3 +1885,190 @@ fn partial_alignment_names_exclusions_and_displays_only_eligible_targets() {
         assert_eq!(starts.load(Ordering::Relaxed), 0);
     }
 }
+
+/// Text drawn exactly as `text`, right of the setup panel.
+fn central(output: &egui::FullOutput, text: &str) -> Option<Rect> {
+    labels(output)
+        .into_iter()
+        .find(|(s, r)| s == text && r.left() > 310.0)
+        .map(|(_, r)| r)
+}
+
+/// The pulse around a chip: a chip-sized outline twice as thick as the selection's.
+fn pulse_around(output: &egui::FullOutput, chip: Rect) -> bool {
+    output.shapes.iter().any(|shape| match &shape.shape {
+        Shape::Rect(r) => {
+            r.stroke.width == 2.0 && r.rect.width() < 120.0 && r.rect.contains(chip.center())
+        }
+        _ => false,
+    })
+}
+
+#[test]
+fn room_map_sits_beside_the_cards_labels_the_reference_and_selects_speakers() {
+    let ctx = egui::Context::default();
+    let (controller, _) = support::ready();
+    let mut app = CompanionApp::preview(&ctx, controller);
+    let size = Vec2::new(1160.0, 800.0);
+    for _ in 0..3 {
+        frame(&mut app, &ctx, vec![], size);
+    }
+    let output = frame(&mut app, &ctx, vec![], size);
+    let room = central(&output, "Room").expect("room map title");
+    let (front_right, _) = card_named(&output, "Front right").expect("card");
+    assert!(room.left() > front_right.right(), "map beside the cards");
+    assert!((room.top() - front_right.top()).abs() < 40.0, "{room:?}");
+    for chip in ["FL", "FR", "Cen", "SL", "SR", "Sub", "REF", "FRONT"] {
+        assert!(central(&output, chip).is_some(), "{chip} missing");
+    }
+    // Front is up and the left is on the left; the reference label sits under its chip.
+    let fl = central(&output, "FL").unwrap();
+    let fr = central(&output, "FR").unwrap();
+    let sl = central(&output, "SL").unwrap();
+    assert!(fl.center().x < fr.center().x && fl.bottom() < sl.top());
+    assert!(
+        labels(&output).iter().any(|(s, r)| s == "REF"
+            && r.top() >= fl.bottom() - 1.0
+            && (r.center().x - fl.center().x).abs() < 20.0),
+        "REF under the reference chip"
+    );
+    // Clicking a chip selects that speaker like its card does.
+    let center = central(&output, "Cen").unwrap();
+    click(&mut app, &ctx, center.center(), size);
+    find_result_text(&mut app, &ctx, size, "Center · Measurement result");
+    let output = frame(&mut app, &ctx, vec![], size);
+    assert!(
+        card_named(&output, "Center").expect("card").1,
+        "card selected too"
+    );
+}
+
+#[test]
+fn capture_pulses_the_playing_chip_without_moving_the_map_chart_or_cards() {
+    use companion_service::{controller::Job, measurement::MeasureProgress};
+    for size in [Vec2::new(1160.0, 800.0), Vec2::new(1450.0, 1000.0)] {
+        let ctx = egui::Context::default();
+        let (mut controller, _) = support::ready();
+        controller.state.alignment = Some(support::room_alignment(&controller));
+        let mut app = CompanionApp::preview(&ctx, controller);
+        for _ in 0..3 {
+            frame(&mut app, &ctx, vec![], size);
+        }
+        // The chart comes first; bring the map beside the cards into view.
+        find_speaker_text(&mut app, &ctx, size, "top view · front is up");
+        let before = frame(&mut app, &ctx, vec![], size);
+        let watched = ["Room", "FL", "FR", "Cen", "SL", "SR", "Sub"];
+        let places: Vec<_> = watched
+            .iter()
+            .map(|t| central(&before, t).expect(t))
+            .collect();
+        let visible = [
+            "Front right",
+            "Center",
+            "Surround left",
+            "Surround right",
+            "Subwoofer",
+        ]
+        .into_iter()
+        .find_map(|name| card_named(&before, name).map(|(rect, _)| (name, rect)));
+        // Beside the cards in a 1160-point window; beside the chart in a wider one.
+        assert_eq!(visible.is_some(), size.x < 1400.0, "{size:?}");
+        let fl = central(&before, "FL").unwrap();
+        assert!(!pulse_around(&before, fl));
+        // A new alignment clears the chart and keeps its place while it captures.
+        app.controller.state.alignment = None;
+        app.controller.state.job = Some(Job::Alignment {
+            output_ids: vec!["Front left".into(), "Front right".into()],
+            current: 0,
+            pass: 0,
+        });
+        for phase in [MeasureProgress::OpeningInput, MeasureProgress::Analyzing] {
+            app.controller.state.progress = Some(phase);
+            let during = frame(&mut app, &ctx, vec![], size);
+            for (text, place) in watched.iter().zip(&places) {
+                let now = central(&during, text).expect(text);
+                assert!(
+                    (now.min - place.min).length() < 0.5,
+                    "{text} moved at {size:?}: {place:?} -> {now:?}"
+                );
+            }
+            if let Some((name, card)) = visible {
+                let now = card_named(&during, name).expect("card").0;
+                assert!((now.min - card.min).length() < 0.5, "{name} moved");
+            }
+            assert!(pulse_around(&during, fl), "the playing speaker pulses");
+            assert!(!pulse_around(&during, central(&during, "FR").unwrap()));
+        }
+    }
+}
+
+#[test]
+fn the_map_never_pushes_the_cards_down_and_needs_reported_positions() {
+    for size in [Vec2::new(850.0, 640.0), Vec2::new(1160.0, 800.0)] {
+        let first_card = |placed: bool| {
+            let ctx = egui::Context::default();
+            let (mut controller, _) = support::ready();
+            if !placed {
+                for o in &mut controller.state.snapshot.as_mut().unwrap().outputs {
+                    o.azimuth_deg = None;
+                    o.elevation_deg = None;
+                    o.distance_m = None;
+                }
+            }
+            let mut app = CompanionApp::preview(&ctx, controller);
+            for _ in 0..3 {
+                frame(&mut app, &ctx, vec![], size);
+            }
+            let output = frame(&mut app, &ctx, vec![], size);
+            (
+                card_named(&output, "Front left").expect("card").0,
+                central(&output, "Room"),
+                card_named(&output, "Center").expect("card").0,
+            )
+        };
+        let (with_map, room, _) = first_card(true);
+        let (without_map, none, center) = first_card(false);
+        assert_eq!(with_map.top(), without_map.top(), "{size:?}");
+        // An older renderer reports no positions: no map, and the cards keep the width.
+        assert!(none.is_none());
+        if size.x > 1000.0 {
+            assert!(room.is_some());
+            assert_eq!(center.top(), without_map.top(), "three cards per row");
+        } else {
+            // Too narrow for two card columns beside it: the map waits below the cards.
+            assert!(room.is_none_or(|r| r.top() > with_map.bottom()));
+        }
+    }
+    let ctx = egui::Context::default();
+    let (controller, _) = support::ready();
+    let mut app = CompanionApp::preview(&ctx, controller);
+    let size = Vec2::new(850.0, 640.0);
+    find_speaker_text(&mut app, &ctx, size, "top view · front is up");
+    // Beside the cards, the map card ends within the card grid.
+    let size = Vec2::new(1160.0, 1000.0);
+    scroll_speakers(&mut app, &ctx, size, 10000.0);
+    for _ in 0..3 {
+        frame(&mut app, &ctx, vec![], size);
+    }
+    let output = frame(&mut app, &ctx, vec![], size);
+    let room = central(&output, "Room").expect("room map title");
+    let map_card = output
+        .shapes
+        .iter()
+        .find_map(|shape| match &shape.shape {
+            Shape::Rect(r)
+                if r.rect.contains(room.center())
+                    && r.rect.width() < 300.0
+                    && r.rect.height() > 150.0 =>
+            {
+                Some(r.rect)
+            }
+            _ => None,
+        })
+        .expect("map card");
+    let last = card_named(&output, "Subwoofer").expect("card").0;
+    assert!(
+        map_card.bottom() <= last.bottom() + 0.5,
+        "{map_card:?} {last:?}"
+    );
+}

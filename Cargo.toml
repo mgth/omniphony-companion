@@ -11,7 +11,7 @@ repository = "https://github.com/mgth/omniphony-companion"
 
 [workspace.dependencies]
 omniphony-adapter = { path = "crates/omniphony-adapter" }
-omniphony-osc-contract = { git = "https://github.com/mgth/Omniphony", rev = "b744a1bedc701a16e6e845ab4063d1d58541497f", features = ["measurement"] }
+omniphony-osc-contract = { git = "https://github.com/mgth/Omniphony", rev = "1d1a3543e951172a6f11472344ca3cb7bd76979d", features = ["measurement"] }
 calibration-core = { path = "crates/calibration-core" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["float_roundtrip"] }
