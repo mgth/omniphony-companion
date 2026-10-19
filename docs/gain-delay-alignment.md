@@ -183,3 +183,28 @@ delay still applies. A session saved before this policy whose profile already
 corrects a far speaker loads with that speaker included, so it stays valid and
 restorable.
 
+
+## Clipped speakers are measured again at a lower gain
+
+A speaker that clips in its own interval of a pass is measured again in the same pass,
+with its output gain lowered by the estimated overdrive plus 3 dB, rounded up (for
+example 13 dB for a take 9.3 dB over full scale). **Measurement settings → Re-measure
+clipped speakers at a lower gain** turns this off; it is on by default. The gain goes
+through the same live output settings as **Apply**, never `config.yaml`, and is
+restored right after the retake, before the next pass. The retake replaces the
+clipped take of that pass, and its estimate adds the lowered gain back to the level
+(and to any remaining overdrive), so both passes and the proposal read the speaker
+at its own setting; `output_gain_offset_db` on each repeat records it.
+
+Lowering one output cannot help when the reference intervals clip too (the
+reference speaker itself, or a capture too hot overall), or when the gain would go
+below the renderer's -60 dB: those speakers keep their clipped takes and the hint to
+lower the microphone gain or test level. A retake that fails also keeps the clipped
+take. If a gain cannot be restored, the alignment is blocked with the speakers to fix.
+
+Restoring gives the renderer a newer revision of the original configuration. The
+alignment keeps it as `restored_snapshot`, so **Apply** compares against the live
+state, and lists every lowered and restored state in `retake_snapshots`, so
+reanalysis accepts takes from those states only and recovers each retake's offset
+from its own snapshot. Verification never lowers a gain: it measures the applied
+state as it is.

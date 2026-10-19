@@ -795,6 +795,7 @@ fn alignment_session_stays_above_individual_results_and_unqualified_actions_stay
             verification_note: None,
             application_uncertain: false,
             physical_levels_changed: false,
+            retake_snapshots: vec![],
         });
         let mut app = CompanionApp::preview(&ctx, controller);
         for _ in 0..3 {
@@ -1369,6 +1370,7 @@ fn loaded_alignment_pass_opens_its_latest_analysis_and_labels_the_original_verdi
         verification_note: None,
         application_uncertain: false,
         physical_levels_changed: false,
+        retake_snapshots: vec![],
     };
     write_json(&dir.path().join("alignment-state.json"), &alignment).unwrap();
     controller.state.takes = vec![first, second];

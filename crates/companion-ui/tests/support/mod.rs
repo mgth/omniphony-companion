@@ -316,6 +316,7 @@ pub fn alignment(
                         reference_level_db: Some(0.0),
                         reasons: vec![],
                         codes: vec![],
+                        output_gain_offset_db: 0.0,
                     })
                     .collect(),
                 quality: vec![Report {
@@ -382,6 +383,7 @@ pub fn alignment(
         verification_note: None,
         application_uncertain: false,
         physical_levels_changed: false,
+        retake_snapshots: vec![],
     }
 }
 
@@ -470,6 +472,7 @@ pub fn room_alignment(controller: &Controller) -> companion_service::alignment::
                         reference_level_db: Some(0.0),
                         reasons: reason.map(|r| vec![r.to_owned()]).unwrap_or_default(),
                         codes: vec![],
+                        output_gain_offset_db: 0.0,
                     })
                     .collect(),
                 quality: vec![Report {
@@ -528,6 +531,7 @@ pub fn room_alignment(controller: &Controller) -> companion_service::alignment::
         verification_note: None,
         application_uncertain: false,
         physical_levels_changed: false,
+        retake_snapshots: vec![],
     }
 }
 
@@ -560,6 +564,7 @@ pub fn late_device_alignment(
                         reference_level_db: (!silent).then_some(0.0),
                         reasons: vec![],
                         codes: vec![],
+                        output_gain_offset_db: 0.0,
                     };
                     if silent {
                         repeat.reject(ExclusionReason::MissingTimingReferences);
@@ -617,5 +622,6 @@ pub fn late_device_alignment(
         verification_note: None,
         application_uncertain: false,
         physical_levels_changed: false,
+        retake_snapshots: vec![],
     }
 }

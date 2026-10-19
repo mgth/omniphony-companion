@@ -771,6 +771,18 @@ impl CompanionApp {
                                 .suffix(" Hz"),
                         );
                     });
+                    ui.add_space(4.0);
+                    ui.checkbox(
+                        &mut self.controller.settings.retake_clipped,
+                        "Re-measure clipped speakers at a lower gain",
+                    );
+                    ui.label(
+                        RichText::new(
+                            "Lowers that speaker's output gain by its overdrive plus 3 dB for one more take, then restores it. Its level counts the change back.",
+                        )
+                        .small()
+                        .color(MUTED),
+                    );
                     caption(ui, "Calibration file (optional)");
                     ui.add(
                         egui::TextEdit::singleline(&mut self.controller.settings.calibration_path)
