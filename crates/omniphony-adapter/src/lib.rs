@@ -155,18 +155,28 @@ impl Client {
         result
     }
 
-    /// Discover in the current protocol version, or once in the older version
-    /// an older renderer asks for, whose snapshots carry no output positions.
-    pub fn discover(&mut self) -> Result<Snapshot> {
-        let mut reply = self.exchange(protocol::Command::Discover {});
+    /// Send in the current protocol version, or once more in the older version an
+    /// older renderer asks for when it refuses this one. Only outside a session:
+    /// a refused request changed nothing, so resending it is safe. Any first
+    /// request on a connection may meet an older renderer (applying settings
+    /// opens a connection without discovering first).
+    fn exchange_negotiated(&mut self, command: protocol::Command) -> Result<protocol::Reply> {
+        let reply = self.exchange(command.clone());
         if let Err(Error::Server { code, .. }) = &reply
             && code == "unsupported_version"
             && self.session.is_none()
             && let Some(version) = self.offered_version.take()
         {
             self.version = version;
-            reply = self.exchange(protocol::Command::Discover {});
+            return self.exchange(command);
         }
+        reply
+    }
+
+    /// Discover in the current protocol version, or once in the older version
+    /// an older renderer asks for, whose snapshots carry no output positions.
+    pub fn discover(&mut self) -> Result<Snapshot> {
+        let reply = self.exchange_negotiated(protocol::Command::Discover {});
         match reply? {
             protocol::Reply::Snapshot { snapshot } => {
                 if let Err(e) = validate_snapshot(&snapshot) {
@@ -212,7 +222,7 @@ impl Client {
             output.gain_db = setting.gain_db;
             output.delay_ms = setting.delay_ms;
         }
-        let reply = self.exchange(protocol::Command::SetOutputs {
+        let reply = self.exchange_negotiated(protocol::Command::SetOutputs {
             expected_revision: expected.revision.clone(),
             settings,
         })?;
@@ -236,7 +246,7 @@ impl Client {
         if let Some(reason) = &snapshot.unavailable_reason {
             return Err(Error::Protocol(reason.clone()));
         }
-        match self.exchange(protocol::Command::Begin {
+        match self.exchange_negotiated(protocol::Command::Begin {
             expected_revision: snapshot.revision.clone(),
         })? {
             protocol::Reply::Session {
