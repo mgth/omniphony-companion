@@ -1085,3 +1085,176 @@ fn partial_proposal_preserves_excluded_outputs_through_apply_verify_reload_and_r
     diagnostic.physical_levels_changed = true;
     assert!(alignment::refresh_proposal(&diagnostic).is_err());
 }
+
+#[test]
+fn one_speaker_is_measured_again_into_the_session_and_the_proposal_rebuilt() {
+    // R repeats badly in the first alignment, so the session has no proposal. Measured
+    // again on its own, with the room quiet, it qualifies and the proposal appears.
+    let root = tempfile::tempdir().unwrap();
+    let rig = Rig::new();
+    rig.bad_repeat.store(true, Ordering::Relaxed);
+    let mut a = acquire(&rig, root.path());
+    assert!(a.profile.is_none());
+    assert!(a.rows[1].qualified.is_none());
+    let left = a.rows[0].clone();
+    let old_right = a.rows[1].take_folders.clone();
+    rig.bad_repeat.store(false, Ordering::Relaxed);
+    let settings = a.settings.clone();
+    let mut passes = vec![];
+    let outcome = alignment::remeasure(
+        &rig,
+        &mut a,
+        "R",
+        &settings,
+        &AtomicBool::new(false),
+        &mut |pass, row, _| passes.push((pass, row)),
+    )
+    .unwrap();
+    assert_eq!(
+        *rig.batches.lock().unwrap(),
+        [vec!["L", "R"], vec!["L", "R"], vec!["R"], vec!["R"]]
+    );
+    assert!(
+        passes.contains(&(0, 1)) && passes.contains(&(1, 1)),
+        "{passes:?}"
+    );
+    // R has two fresh takes, one per pass; L keeps its own.
+    let right = &a.rows[1];
+    assert!(right.qualified.is_some(), "{:?}", right.exclusion());
+    assert_eq!(right.take_folders.len(), 2);
+    assert_ne!(right.take_folders, old_right);
+    for (pass, folder) in right.take_folders.iter().enumerate() {
+        let parent = folder
+            .parent()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            parent.starts_with(&format!("pass-{}-again-", pass + 1)),
+            "{parent}"
+        );
+        assert!(folder.join("snapshot.json").exists() || folder.exists());
+    }
+    assert_eq!(a.rows[0].take_folders, left.take_folders);
+    assert_eq!(a.rows[0].repeats, left.repeats);
+    assert_eq!(a.corrected_output_ids(), ["L", "R"]);
+    assert!(
+        a.profile.is_some() && a.blockers.is_empty(),
+        "{:?}",
+        a.blockers
+    );
+    assert_eq!(outcome.takes.len(), 2);
+    assert!(outcome.takes.iter().all(|(id, _)| id == "R"));
+    assert!(outcome.retakes.is_empty());
+    assert_eq!(outcome.alignment.rows[1].take_folders, right.take_folders);
+    // Measured at its own gain: the renderer was never touched.
+    assert_eq!(rig.writes.load(Ordering::Relaxed), 0);
+    // The session on disk is the updated one, and still applies.
+    let loaded = alignment::load(&a.directory).unwrap();
+    assert_eq!(loaded.rows[1].take_folders, right.take_folders);
+    assert_eq!(loaded.rows[1].repeats, right.repeats);
+    assert_eq!(loaded.corrected_output_ids(), ["L", "R"]);
+    alignment::apply(&rig, &mut a, false).unwrap();
+    assert_eq!(rig.writes.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn measuring_again_refuses_other_settings_an_applied_session_and_a_changed_renderer() {
+    let root = tempfile::tempdir().unwrap();
+    let rig = Rig::new();
+    let mut a = acquire(&rig, root.path());
+    let before = a.clone();
+    let settings = a.settings.clone();
+    let no_cancel = AtomicBool::new(false);
+    let mut quiet = |_, _, _| {};
+    let unknown = alignment::remeasure(&rig, &mut a, "Unused", &settings, &no_cancel, &mut quiet);
+    assert_eq!(
+        unknown.unwrap_err(),
+        "This speaker is not part of the alignment."
+    );
+    let other = Settings {
+        position_id: "another-seat".into(),
+        ..settings.clone()
+    };
+    let changed = alignment::remeasure(&rig, &mut a, "R", &other, &no_cancel, &mut quiet);
+    assert!(
+        changed.as_ref().unwrap_err().contains("settings"),
+        "{changed:?}"
+    );
+    // The renderer moved on since the session: refused before any playback.
+    let live = rig.snapshot.lock().unwrap().clone();
+    rig.snapshot.lock().unwrap().revision = "rig:edited".into();
+    let moved = alignment::remeasure(&rig, &mut a, "R", &settings, &no_cancel, &mut quiet);
+    assert!(moved.as_ref().unwrap_err().contains("changed"), "{moved:?}");
+    *rig.snapshot.lock().unwrap() = live;
+    assert_eq!(rig.batches.lock().unwrap().len(), 2);
+    assert_eq!(rows_json(&a), rows_json(&before));
+    // An applied session keeps its evidence for restoration.
+    alignment::apply(&rig, &mut a, false).unwrap();
+    let applied = alignment::remeasure(&rig, &mut a, "R", &settings, &no_cancel, &mut quiet);
+    assert!(
+        applied.as_ref().unwrap_err().contains("Restore"),
+        "{applied:?}"
+    );
+    assert_eq!(rig.batches.lock().unwrap().len(), 2);
+    // Undone, the renderer is back in the original configuration under a newer
+    // revision: that is the state the session expects now.
+    alignment::apply(&rig, &mut a, true).unwrap();
+    assert!(a.restored_snapshot.is_some());
+    alignment::remeasure(&rig, &mut a, "R", &settings, &no_cancel, &mut quiet).unwrap();
+    assert_eq!(rig.batches.lock().unwrap().len(), 4);
+    assert_ne!(a.rows[1].take_folders, before.rows[1].take_folders);
+    assert_eq!(a.rows[0].take_folders, before.rows[0].take_folders);
+    assert_eq!(a.corrected_output_ids(), ["L", "R"]);
+    assert_eq!(rig.writes.load(Ordering::Relaxed), 2);
+}
+
+#[test]
+fn a_stopped_re_measure_keeps_the_previous_takes() {
+    let root = tempfile::tempdir().unwrap();
+    let rig = Rig::new();
+    let mut a = acquire(&rig, root.path());
+    let before = a.clone();
+    let settings = a.settings.clone();
+    // Stopped before it starts: nothing is played.
+    let stopped = alignment::remeasure(
+        &rig,
+        &mut a,
+        "R",
+        &settings,
+        &AtomicBool::new(true),
+        &mut |_, _, _| {},
+    );
+    assert!(
+        stopped.as_ref().unwrap_err().contains("stopped"),
+        "{stopped:?}"
+    );
+    assert_eq!(rig.batches.lock().unwrap().len(), 2);
+    // Stopped after the first pass: that take is not kept either.
+    let cancel = AtomicBool::new(false);
+    let stopped = alignment::remeasure(&rig, &mut a, "R", &settings, &cancel, &mut |pass, _, _| {
+        if pass == 0 {
+            cancel.store(true, Ordering::Relaxed);
+        }
+    });
+    assert!(
+        stopped.as_ref().unwrap_err().contains("stopped"),
+        "{stopped:?}"
+    );
+    assert_eq!(rig.batches.lock().unwrap().len(), 3);
+    assert_eq!(rows_json(&a), rows_json(&before));
+    assert_eq!(
+        serde_json::to_value(&a.profile).unwrap(),
+        serde_json::to_value(&before.profile).unwrap()
+    );
+    let loaded = alignment::load(&a.directory).unwrap();
+    assert_eq!(rows_json(&loaded), rows_json(&before));
+    assert_eq!(rig.writes.load(Ordering::Relaxed), 0);
+}
+
+/// The rows as saved, for comparing whole sessions.
+fn rows_json(a: &alignment::Alignment) -> serde_json::Value {
+    serde_json::to_value(&a.rows).unwrap()
+}

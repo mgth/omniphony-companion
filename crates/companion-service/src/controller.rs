@@ -182,6 +182,11 @@ pub enum Job {
         current: usize,
         pass: usize,
     },
+    /// One speaker measured again into the current alignment, one take per pass.
+    Remeasure {
+        output_id: String,
+        pass: usize,
+    },
     ApplyAlignment,
     LoadAlignment,
     RestoreWorkspace,
@@ -275,6 +280,8 @@ impl LoadedAlignment {
     }
 }
 
+/// The takes of a re-measure, and its retakes at a lowered gain.
+type NewTakes = (Vec<(String, TakeOutcome)>, Vec<alignment::Retake>);
 enum Event {
     ProposalUpdated(Box<Result<alignment::Alignment, String>>),
     ManualReading(manual_level::Reading),
@@ -285,6 +292,7 @@ enum Event {
     InputChecked(Result<(), String>),
     AlignmentProgress(usize, usize, MeasureProgress),
     Aligned(Box<Result<alignment::Outcome, String>>),
+    Remeasured(Box<alignment::Alignment>, Result<NewTakes, String>),
     AlignmentUpdated(
         Box<alignment::Alignment>,
         Result<(Snapshot, Vec<(String, TakeOutcome)>), String>,
@@ -335,7 +343,12 @@ impl Controller {
     pub fn measuring(&self) -> bool {
         matches!(
             self.state.job,
-            Some(Job::Measure { .. } | Job::Batch { .. } | Job::Alignment { .. })
+            Some(
+                Job::Measure { .. }
+                    | Job::Batch { .. }
+                    | Job::Alignment { .. }
+                    | Job::Remeasure { .. }
+            )
         )
     }
     pub fn cancellable(&self) -> bool {
@@ -968,6 +981,77 @@ impl Controller {
             let _ = sender.send(Event::AlignmentUpdated(Box::new(a), result));
         });
     }
+    /// Whether `output_id` can be measured again into the current alignment now: the
+    /// session is complete and not applied, it was captured with the current settings on
+    /// the connected renderer, whose settings are still those it expects, and the speaker
+    /// is ready for a take. The error says why not.
+    pub fn can_remeasure(&self, output_id: &str) -> Result<(), String> {
+        let a = self
+            .state
+            .alignment
+            .as_ref()
+            .ok_or("Align levels and delays first.")?;
+        if !a.rows.iter().any(|r| r.output_id == output_id) {
+            return Err("This speaker is not part of the alignment.".into());
+        }
+        a.refreshable()?;
+        if self.state.endpoint != Some(a.endpoint) {
+            return Err("Connect to the renderer used for this alignment first.".into());
+        }
+        if self.settings != a.settings {
+            return Err(
+                "Restore the measurement settings this alignment was captured with before measuring into it.".into(),
+            );
+        }
+        let expected = a.restored_snapshot.as_ref().unwrap_or(&a.snapshot);
+        if self.state.snapshot.as_ref().map(|s| &s.revision) != Some(&expected.revision) {
+            return Err("Omniphony's settings changed since this alignment was measured. Refresh, then measure a new alignment.".into());
+        }
+        self.can_measure(output_id)
+    }
+    /// Measure one speaker again, one take per pass, into the current alignment. Its
+    /// repeats are replaced, the proposal rebuilt and the session saved; the other
+    /// speakers keep their takes. Stop keeps the previous takes.
+    pub fn remeasure(&mut self, output_id: &str) {
+        if let Err(error) = self.can_remeasure(output_id) {
+            self.state.error = Some(error);
+            return;
+        }
+        let Some(mut a) = self.state.alignment.clone() else {
+            return;
+        };
+        self.state.job = Some(Job::Remeasure {
+            output_id: output_id.into(),
+            pass: 0,
+        });
+        self.state.progress = Some(MeasureProgress::Preparing);
+        self.state.stopping = false;
+        self.state.error = None;
+        self.cancelled = Arc::new(AtomicBool::new(false));
+        let (backend, sender, cancel, settings, output_id) = (
+            self.backend.clone(),
+            self.sender.clone(),
+            self.cancelled.clone(),
+            self.settings.clone(),
+            output_id.to_owned(),
+        );
+        std::thread::spawn(move || {
+            let result = catch_job(|| {
+                alignment::remeasure(
+                    backend.as_ref(),
+                    &mut a,
+                    &output_id,
+                    &settings,
+                    &cancel,
+                    &mut |pass, i, p| {
+                        let _ = sender.send(Event::AlignmentProgress(pass, i, p));
+                    },
+                )
+                .map(|outcome| (outcome.takes, outcome.retakes))
+            });
+            let _ = sender.send(Event::Remeasured(Box::new(a), result));
+        });
+    }
     pub fn refresh_alignment_proposal(&mut self) {
         if self.busy() {
             return;
@@ -1060,7 +1144,7 @@ impl Controller {
     }
     pub fn active_output(&self) -> Option<&str> {
         match &self.state.job {
-            Some(Job::Measure { output_id }) => Some(output_id),
+            Some(Job::Measure { output_id } | Job::Remeasure { output_id, .. }) => Some(output_id),
             Some(Job::Batch {
                 output_ids,
                 current,
@@ -1095,6 +1179,7 @@ impl Controller {
         let sweep = self.settings.sweep;
         let (estimate, pass, target) = match &self.state.job {
             Some(Job::Measure { .. }) => (crate::duration::batch(sweep, 1), 0, 0),
+            Some(Job::Remeasure { pass, .. }) => (crate::duration::alignment(sweep, 1), *pass, 0),
             Some(Job::Batch {
                 output_ids,
                 current,
@@ -1270,16 +1355,55 @@ impl Controller {
                     self.state.stopping = false;
                 }
                 Event::AlignmentProgress(pass, index, p) => {
-                    if let Some(Job::Alignment {
-                        output_ids,
-                        current,
-                        pass: active_pass,
-                    }) = &mut self.state.job
-                    {
-                        *current = index.min(output_ids.len().saturating_sub(1));
-                        *active_pass = pass;
+                    match &mut self.state.job {
+                        Some(Job::Alignment {
+                            output_ids,
+                            current,
+                            pass: active_pass,
+                        }) => {
+                            *current = index.min(output_ids.len().saturating_sub(1));
+                            *active_pass = pass;
+                        }
+                        Some(Job::Remeasure {
+                            pass: active_pass, ..
+                        }) => *active_pass = pass,
+                        _ => {}
                     }
                     self.state.progress = Some(p);
+                }
+                Event::Remeasured(a, result) => {
+                    match result {
+                        Ok((takes, retakes)) => {
+                            let revision = a
+                                .restored_snapshot
+                                .as_ref()
+                                .unwrap_or(&a.snapshot)
+                                .revision
+                                .clone();
+                            self.append_alignment_takes(a.settings.clone(), revision, takes);
+                            for retake in retakes {
+                                self.append_alignment_takes(
+                                    a.settings.clone(),
+                                    retake.revision,
+                                    vec![(retake.output_id, retake.take)],
+                                );
+                            }
+                        }
+                        Err(e) => self.state.error = Some(e),
+                    }
+                    // A retake lowered a gain and restored it: the renderer is at the
+                    // last state the session recorded, under a newer revision.
+                    let recorded = |a: &alignment::Alignment| a.retake_snapshots.len();
+                    if self.state.alignment.as_ref().map(recorded) != Some(recorded(&a))
+                        && let Some(live) = a.retake_snapshots.last()
+                    {
+                        self.state.saved_snapshot = Some(live.clone());
+                        self.state.snapshot = Some(live.clone());
+                    }
+                    self.state.alignment = Some(*a);
+                    self.state.job = None;
+                    self.state.progress = None;
+                    self.state.stopping = false;
                 }
                 Event::Aligned(result) => {
                     match *result {

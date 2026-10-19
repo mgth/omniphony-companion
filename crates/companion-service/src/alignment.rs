@@ -429,6 +429,10 @@ fn retake<B: Backend + ?Sized>(
         let Some(output) = current.outputs.iter().find(|o| &o.id == id) else {
             continue;
         };
+        // The batch may be a subset of the rows (one speaker measured again).
+        let Some(row) = a.rows.iter().position(|r| &r.output_id == id) else {
+            continue;
+        };
         let lowered = take
             .diagnostics
             .as_ref()
@@ -441,7 +445,7 @@ fn retake<B: Backend + ?Sized>(
             .and_then(|s| s[1].overdrive_db)
             .map(|db| output.gain_db - clipping::reduction_db(db) as f32)
             .filter(|gain| *gain >= MIN_OUTPUT_GAIN_DB);
-        let disturbed = a.rows[index]
+        let disturbed = a.rows[row]
             .repeats
             .get(pass)
             .is_some_and(reference_shortfall)
@@ -454,7 +458,7 @@ fn retake<B: Backend + ?Sized>(
             None if disturbed => output.gain_db,
             None => continue,
         };
-        rows.push(index);
+        rows.push(row);
         settings.push(OutputSetting {
             output_id: id.clone(),
             gain_db: gain,
@@ -616,6 +620,140 @@ fn gain_offset(a: &Alignment, take: &Snapshot, output_id: &str) -> Option<f64> {
     }
     let gain = |s: &Snapshot| Some(s.outputs.iter().find(|o| o.id == output_id)?.gain_db);
     Some(((gain(&a.snapshot)? - gain(take)?) as f64).max(0.0))
+}
+
+/// Measure one speaker of a saved alignment again and replace its two repeats: one take
+/// per pass, in the session's reference–speaker–reference sequence, under its settings
+/// and the renderer state it expects (`restored_snapshot` after a retake, else
+/// `snapshot`). The other speakers' takes stay; the proposal is rebuilt and the session
+/// saved. A clipped take is measured again at a lower gain as in a full alignment; a
+/// disturbed reference cannot be told from a weak one with no other take in the batch.
+/// Refused, with the reason, when the session is applied, uncertain or incomplete, when
+/// `settings` differ from the session's, or when the renderer is not in that state. A
+/// stopped or failed re-measure keeps the speaker's previous takes; the renderer states
+/// it passed through for a retake are kept, so the next action still finds the renderer.
+pub fn remeasure<B: Backend + ?Sized>(
+    backend: &B,
+    a: &mut Alignment,
+    output_id: &str,
+    settings: &Settings,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(usize, usize, MeasureProgress),
+) -> Result<Outcome, String> {
+    a.refreshable()?;
+    let row = a
+        .rows
+        .iter()
+        .position(|r| r.output_id == output_id)
+        .ok_or("This speaker is not part of the alignment.")?;
+    if a.rows[row].take_folders.len() != 2 || a.rows[row].repeats.len() != 2 {
+        return Err("unexpected repeat count".into());
+    }
+    if *settings != a.settings {
+        return Err(
+            "Restore the measurement settings this alignment was captured with before measuring into it.".into(),
+        );
+    }
+    let expected = a.restored_snapshot.as_ref().unwrap_or(&a.snapshot);
+    let live = backend.discover(a.endpoint)?;
+    if live != *expected {
+        return Err("Omniphony's settings changed since this alignment was measured. Refresh, then measure a new alignment.".into());
+    }
+    let mut request = request(
+        a.endpoint,
+        live.clone(),
+        &a.settings,
+        output_id.to_owned(),
+        a.directory.clone(),
+    )?;
+    // The session's copy of the calibration file, as its own passes used it.
+    request.calibration = request
+        .calibration
+        .map(|_| a.directory.join("microphone-calibration.txt"));
+    let mut updated = a.clone();
+    let mut current = live;
+    let outputs = vec![output_id.to_owned()];
+    let stamp = stamp();
+    let mut takes = vec![];
+    let mut retakes = vec![];
+    let stopped =
+        || format!("Measuring {output_id} again was stopped; its previous takes are kept.");
+    let mut passes = || -> Result<(), String> {
+        for pass in 0..2 {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(stopped());
+            }
+            let mut child = request.clone();
+            child.snapshot = current.clone();
+            child.out_dir = a.directory.join(format!("pass-{}-again-{stamp}", pass + 1));
+            let batch =
+                backend.measure_batch(child.clone(), outputs.clone(), cancel, &mut |_, p| {
+                    progress(pass, row, p)
+                })?;
+            if batch.cancelled {
+                return Err(stopped());
+            }
+            if let Some(error) = batch.error {
+                return Err(error);
+            }
+            let Some((_, take)) = batch.takes.first().filter(|(id, _)| id == output_id) else {
+                return Err(format!("The capture produced no take for {output_id}."));
+            };
+            let r = &mut updated.rows[row];
+            r.take_folders[pass] = take.directory.clone();
+            r.repeats[pass] = estimate(take, 0.0);
+            r.quality[pass] = take.quality();
+            let lower_gain = updated.settings.retake_clipped;
+            retakes.extend(retake(
+                backend,
+                &child,
+                &mut updated,
+                &mut current,
+                pass,
+                &batch.takes,
+                lower_gain,
+                cancel,
+                progress,
+            ));
+            takes.extend(batch.takes);
+            // The session had no acquisition blocker; any now is this re-measure's.
+            let blockers: Vec<_> = updated
+                .blocker_list()
+                .into_iter()
+                .filter(|b| !b.is_derived())
+                .collect();
+            if let Some(blocker) = blockers.first() {
+                return Err(if *blocker == Blocker::Cancelled {
+                    stopped()
+                } else {
+                    blocker.to_string()
+                });
+            }
+        }
+        build_proposal(&mut updated);
+        if updated.profile.is_some() {
+            updated.validate_evidence()?;
+        }
+        save(&updated)
+    };
+    match passes() {
+        Ok(()) => {
+            *a = updated.clone();
+            Ok(Outcome {
+                alignment: updated,
+                takes,
+                retakes,
+            })
+        }
+        Err(error) => {
+            if updated.retake_snapshots.len() != a.retake_snapshots.len() {
+                a.retake_snapshots = updated.retake_snapshots;
+                a.restored_snapshot = updated.restored_snapshot;
+                save(a)?;
+            }
+            Err(error)
+        }
+    }
 }
 /// Recompute membership from all repeated evidence; never drop rejected rows
 /// from the saved report or let them influence the corrected subset's targets.

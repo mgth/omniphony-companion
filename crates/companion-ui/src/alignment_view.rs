@@ -1343,6 +1343,9 @@ pub fn lab(
             pass_summary(ui, "Verification", Some(passes), included);
         }
         for reason in &a.blockers { ui.colored_label(super::RED, reason); }
+        if a.refreshable().is_ok() {
+            ui.label("A card's Measure button can measure that one speaker again into this session: two takes replace its own, the other speakers keep theirs and the proposal is rebuilt.");
+        }
         ui.label("Targets include existing output settings. Earlier speakers receive delay; louder speakers are attenuated. Levels are relative transfer dB, not SPL.");
         ui.label("Application changes live settings only. Save in Studio after verification if you want them in Omniphony's persistent configuration.");
         ui.horizontal_wrapped(|ui| {
