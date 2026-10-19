@@ -1212,7 +1212,7 @@ fn status_line(a: &Alignment, live: bool, updating: bool) -> (String, Color32) {
             if a.included_count() >= 2 && a.blockers.is_empty() {
                 "No proposal yet. Turn on Lab to update the proposal from the saved passes."
             } else if a.set_aside_count() > 0 {
-                "Nothing to apply yet. Align to a set-aside speaker above the cards, or measure again."
+                "Nothing to apply yet. Align to a set-aside speaker in the chart above, or measure again."
             } else {
                 "Nothing to apply. At least two speakers must measure reliably."
             }

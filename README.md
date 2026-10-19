@@ -89,7 +89,7 @@ The Rust/egui desktop window lets you:
   others are aligned without them. **Align to … anyway** below the chart includes one
   (every other speaker is then delayed to match it), **Set … aside again** undoes it;
   the choice is saved in the session. See `docs/gain-delay-alignment.md`.
-- Below the chart, compact speaker cards show one quality dot (the weakest grade),
+- Above the chart, compact speaker cards show one quality dot (the weakest grade),
   the measured ms/dB and the planned delay/gain, or the one-line reason when a
   speaker is excluded. Cards keep a fixed size and place; capture progress stays
   inside the active card.
@@ -101,8 +101,8 @@ The Rust/egui desktop window lets you:
   before). The session choice refuses, with the reason, changed measurement settings
   or a renderer whose settings moved since the session. **Stop** keeps the previous
   takes.
-- See where each speaker is on the **room map**, a top view beside the cards (and
-  beside the chart in a wide window): the listener in the centre, front up, each
+- See where each speaker is on the **room map**, a top view beside the cards (below
+  them in a narrow window): the listener in the centre, front up, each
   speaker as a chip placed by its layout azimuth and distance, with the card's
   quality dot and a small triangle for speakers above or below ear level. The speaker
   being measured pulses; unchecked, muted, out-of-band, set-aside (late) and

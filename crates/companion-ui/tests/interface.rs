@@ -801,22 +801,25 @@ fn alignment_session_stays_above_individual_results_and_unqualified_actions_stay
         for _ in 0..3 {
             frame(&mut app, &ctx, vec![], size);
         }
-        let text = labels(&frame(&mut app, &ctx, vec![], size));
+        let output = frame(&mut app, &ctx, vec![], size);
+        let text = labels(&output);
         let speakers = text.iter().find(|(t, _)| t == "Speakers").unwrap().1;
-        let alignment = text
-            .iter()
-            .find(|(t, _)| t == "Alignment session")
-            .unwrap()
-            .1;
-        assert!(alignment.top() > speakers.bottom());
         assert!(text.iter().all(|(_, r)| r.is_finite()));
         assert!(
             !text
                 .iter()
                 .any(|(s, _)| s == "Alignment" || s == "Delay and level alignment")
         );
-        let lower = text
-            .iter()
+        // The speaker cards come first, the session below them, the results below both.
+        let first = card_named(&output, "Front left").expect("card").0;
+        assert!(first.top() > speakers.bottom());
+        let alignment = find_speaker_text(&mut app, &ctx, size, "Alignment session");
+        let output = frame(&mut app, &ctx, vec![], size);
+        if let Some((last, _)) = card_named(&output, "Subwoofer") {
+            assert!(last.bottom() < alignment.top(), "{last:?} {alignment:?}");
+        }
+        let lower = labels(&output)
+            .into_iter()
             .find(|(s, _)| s == "Measurement results")
             .unwrap()
             .1;
@@ -2114,7 +2117,7 @@ fn capture_pulses_the_playing_chip_without_moving_the_map_chart_or_cards() {
         for _ in 0..3 {
             frame(&mut app, &ctx, vec![], size);
         }
-        // The chart comes first; bring the map beside the cards into view.
+        // The cards and the map beside them come first, the chart below.
         find_speaker_text(&mut app, &ctx, size, "top view · front is up");
         let before = frame(&mut app, &ctx, vec![], size);
         let watched = ["Room", "FL", "FR", "Cen", "SL", "SR", "Sub"];
@@ -2131,8 +2134,8 @@ fn capture_pulses_the_playing_chip_without_moving_the_map_chart_or_cards() {
         ]
         .into_iter()
         .find_map(|name| card_named(&before, name).map(|(rect, _)| (name, rect)));
-        // Beside the cards in a 1160-point window; beside the chart in a wider one.
-        assert_eq!(visible.is_some(), size.x < 1400.0, "{size:?}");
+        // The map sits beside the cards at both widths.
+        assert!(visible.is_some(), "{size:?}");
         let fl = central(&before, "FL").unwrap();
         assert!(!pulse_around(&before, fl));
         // A new alignment clears the chart and keeps its place while it captures.
