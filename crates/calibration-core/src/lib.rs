@@ -7,10 +7,12 @@
 pub mod manual_level;
 mod model;
 mod policy;
+pub mod reason;
 pub mod repeatability;
 
 pub use model::*;
 pub use policy::*;
+pub use reason::{Blocker, ExclusionReason};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

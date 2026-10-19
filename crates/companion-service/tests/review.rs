@@ -342,8 +342,11 @@ fn whole_alignment_reanalysis_retains_originals_and_cannot_apply_a_profile() {
             quality: vec![],
             qualified: None,
             reason: None,
+            reason_code: None,
+            include_anyway: false,
         }],
         blockers: vec![],
+        blocker_codes: vec![],
         pass_reports: None,
         verification_pass_reports: None,
         session: None,
@@ -446,6 +449,10 @@ fn whole_alignment_reanalysis_retains_originals_and_cannot_apply_a_profile() {
             .unwrap()
             .contains("clipped recording")
     );
+    assert_eq!(
+        clipped_alignment.rows[0].exclusion(),
+        Some(calibration_core::ExclusionReason::Clipped)
+    );
     // Restore the synthetic fixture for the independent identity check below.
     fs::remove_dir_all(&folders[0]).unwrap();
     fs::create_dir(&folders[0]).unwrap();
@@ -465,4 +472,8 @@ fn whole_alignment_reanalysis_retains_originals_and_cannot_apply_a_profile() {
             .unwrap()
             .contains("different renderer configuration")
     );
+    assert!(matches!(
+        mismatched.rows[0].reason_code,
+        Some(calibration_core::ExclusionReason::SessionMismatch { .. })
+    ));
 }

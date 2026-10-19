@@ -242,13 +242,13 @@ pub fn measure(
                     .status()?
                     .ok_or("renderer lost measurement progress")?;
                 on_progress(MeasureProgress::Playing(progress.clone()));
-                next_status = Instant::now() + Duration::from_millis(200);
+                next_status = Instant::now() + crate::duration::STATUS_POLL;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
         on_progress(MeasureProgress::Tail);
         // Keep the lease quiet while the acoustic tail reaches the input.
-        drain_for(&mut capture, Duration::from_millis(600), cancelled)?;
+        drain_for(&mut capture, crate::duration::TAIL, cancelled)?;
         client.status()?;
         Ok(progress)
     })();

@@ -1,5 +1,9 @@
 //! Alignment presentation: a timing/level chart, one action bar and Lab-only evidence.
 //! Everything here reads `Alignment` as produced by companion-service; nothing writes it.
+use calibration_core::{
+    ExclusionReason,
+    reason::{FAR_ARRIVAL_MS, Severity},
+};
 use companion_service::{
     alignment::{Alignment, Row},
     quality::Grade,
@@ -9,8 +13,6 @@ use eframe::egui::{
     text::{LayoutJob, TextFormat, TextWrapping},
 };
 
-/// Arrivals further than this from the reference are drawn in a separate bracket.
-const FAR_MS: f64 = 20.0;
 /// The knob hint appears when the quietest reliable speaker trails all others by more.
 const KNOB_HINT_DB: f64 = 3.0;
 const ROW_HEIGHT: f32 = 22.0;
@@ -18,76 +20,13 @@ const AXIS_TOP: f32 = 18.0;
 const AXIS_BOTTOM: f32 = 18.0;
 const FAR: Color32 = Color32::from_rgb(157, 171, 255);
 
-/// A short, human explanation of a raw exclusion reason. The raw text stays in tooltips.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Reason<'a> {
-    pub text: &'static str,
-    /// Nothing usable was captured (red) rather than captured but not trusted (amber).
-    pub severe: bool,
-    pub raw: &'a str,
-}
-impl Reason<'_> {
-    pub fn color(&self) -> Color32 {
-        if self.severe { super::RED } else { super::WARM }
+/// Nothing captured (red), captured but not trusted (amber) or set aside (far blue).
+pub fn reason_color(reason: &ExclusionReason) -> Color32 {
+    match reason.severity() {
+        Severity::Severe => super::RED,
+        Severity::Warning => super::WARM,
+        Severity::SetAside => FAR,
     }
-}
-
-/// Map the service and core reason strings to one short sentence. The first match wins,
-/// so causes that make the others meaningless (no sound, clipping) are checked first.
-pub fn human_reason(raw: &str) -> Reason<'_> {
-    let raw = readable_reason(raw);
-    let lower = raw.to_ascii_lowercase();
-    let has = |needle: &str| lower.contains(needle);
-    let (text, severe) = if has("timing references were not found")
-        || has("no target sweep")
-        || has("no microphone signal")
-        || has("digital silence")
-    {
-        ("No sound picked up. Wired and unmuted?", true)
-    } else if has("clip") {
-        ("Clipped. Lower the mic gain or test level.", true)
-    } else if has("signal/noise") || has("weak target") {
-        ("Too noisy to trust.", false)
-    } else if has("reference level") {
-        (
-            "Reference speaker level drifted. Keep the mic gain fixed.",
-            false,
-        )
-    } else if has("arrival changed by") {
-        (
-            "Timing moved between runs. Keep still and measure again.",
-            false,
-        )
-    } else if has("level changed by") {
-        (
-            "Level moved between runs. Keep still and measure again.",
-            false,
-        )
-    } else if has("cancel") {
-        ("Measurement was stopped before the end.", false)
-    } else if has("two independent") || has("two qualified") || has("did not complete") {
-        ("Not measured twice. Measure again.", false)
-    } else if has("arrival")
-        || has("peak")
-        || has("impulse shapes")
-        || has("waveform alignment")
-        || has("clock ratio")
-        || has("ambiguous")
-    {
-        ("No clear arrival. Echoes or an obstacle?", false)
-    } else if has("different renderer") || has("identity differs") {
-        ("Saved take does not match this session.", false)
-    } else {
-        ("Not reliable enough to correct.", false)
-    };
-    Reason { text, severe, raw }
-}
-
-pub fn readable_reason(mut reason: &str) -> &str {
-    while let Some(trimmed) = reason.strip_prefix("invalid calibration data: ") {
-        reason = trimmed;
-    }
-    reason
 }
 
 /// Before/target absolute settings of one corrected speaker.
@@ -120,14 +59,15 @@ pub struct Speaker<'a> {
     /// Diagnostic arrival of an excluded speaker; never used for correction.
     pub diagnostic_arrival_ms: Option<f64>,
     pub change: Option<Change>,
-    pub reason: Option<Reason<'a>>,
+    /// Why this speaker gets no target: not reliable, or set aside by the policy.
+    pub reason: Option<ExclusionReason>,
 }
 
 /// One frame's view of an alignment, shared by the chart, the cards and Lab.
 pub struct Summary<'a> {
     pub alignment: &'a Alignment,
     pub speakers: Vec<Speaker<'a>>,
-    /// Index of the quietest reliable speaker and how far all others are above it.
+    /// Index of the quietest included speaker and how far all others are above it.
     pub quietest: Option<(usize, f64)>,
 }
 
@@ -137,6 +77,7 @@ impl<'a> Summary<'a> {
         let quietest_db = a
             .rows
             .iter()
+            .filter(|r| r.included())
             .filter_map(|r| r.qualified.as_ref().map(|q| q.level_db))
             .fold(f64::INFINITY, f64::min);
         let speakers: Vec<_> = a
@@ -192,19 +133,14 @@ impl<'a> Summary<'a> {
                         .flatten()
                         .filter(|v| v.is_finite()),
                     change,
-                    reason: row.qualified.is_none().then(|| {
-                        human_reason(
-                            row.reason
-                                .as_deref()
-                                .unwrap_or("Two qualified independent captures are required."),
-                        )
-                    }),
+                    reason: row.exclusion(),
                 }
             })
             .collect();
         let mut levels: Vec<_> = speakers
             .iter()
             .enumerate()
+            .filter(|(_, s)| s.reason.is_none())
             .filter_map(|(i, s)| s.level.map(|(db, _)| (i, db)))
             .collect();
         levels.sort_by(|a, b| a.1.total_cmp(&b.1));
@@ -222,8 +158,12 @@ impl<'a> Summary<'a> {
     pub fn speaker(&self, id: &str) -> Option<&Speaker<'a>> {
         self.speakers.iter().find(|s| s.id == id)
     }
+    /// Repeatable speakers, included or set aside.
     pub fn reliable(&self) -> usize {
         self.speakers.iter().filter(|s| s.arrival.is_some()).count()
+    }
+    pub fn set_aside(&self) -> usize {
+        self.speakers.iter().filter(|s| s.row.set_aside()).count()
     }
     fn reference_name(&self) -> &str {
         let id = self.alignment.settings.reference_output.as_deref();
@@ -277,17 +217,16 @@ pub fn card(sp: &Speaker) -> Card {
                 ),
                 super::TEXT,
             ),
-            Some(sp.change.map_or_else(
-                || ("No proposal yet".to_owned(), super::MUTED),
-                |c| {
-                    (
-                        format!("{} · {}", delay_change(&c), gain_change(&c)),
-                        super::ACCENT,
-                    )
-                },
-            )),
+            Some(match (&sp.reason, sp.change) {
+                (Some(reason), _) => (reason.human(), reason_color(reason)),
+                (None, Some(c)) => (
+                    format!("{} · {}", delay_change(&c), gain_change(&c)),
+                    super::ACCENT,
+                ),
+                (None, None) => ("No proposal yet".to_owned(), super::MUTED),
+            }),
         ),
-        (None, Some(reason)) => ((reason.text.to_owned(), reason.color()), None),
+        (None, Some(reason)) => ((reason.human(), reason_color(reason)), None),
         (None, None) => (("Not measured".to_owned(), super::MUTED), None),
     };
     Card {
@@ -303,21 +242,29 @@ pub fn card(sp: &Speaker) -> Card {
 pub struct StageResponse {
     pub select: Option<String>,
     pub match_knobs: Option<String>,
+    /// Align to a set-aside speaker anyway (true) or set it aside again (false).
+    pub include: Option<(String, bool)>,
 }
 
 /// Session heading, state banners, the chart and the casual hints.
-pub fn stage(ui: &mut egui::Ui, s: &Summary, selected: Option<&str>) -> StageResponse {
+pub fn stage(ui: &mut egui::Ui, s: &Summary, selected: Option<&str>, busy: bool) -> StageResponse {
     let a = s.alignment;
     let mut response = StageResponse::default();
     ui.horizontal_wrapped(|ui| {
         ui.label(RichText::new("Alignment session").size(18.0).strong());
         let excluded = s.speakers.len() - s.reliable();
+        let set_aside = s.set_aside();
         ui.label(
             RichText::new(format!(
-                "{} · Reference: {} · two passes · {} reliable, {} excluded",
+                "{} · Reference: {} · two passes · {} reliable{}, {} excluded",
                 a.settings.position_id,
                 s.reference_name(),
                 s.reliable(),
+                if set_aside > 0 {
+                    format!(" ({set_aside} set aside)")
+                } else {
+                    String::new()
+                },
                 excluded
             ))
             .small()
@@ -343,14 +290,14 @@ pub fn stage(ui: &mut egui::Ui, s: &Summary, selected: Option<&str>) -> StageRes
         ui,
         "Level",
         &format!(
-            "500–2000 Hz · dB above the quietest reliable speaker{}",
+            "500–2000 Hz · dB above the quietest aligned speaker{}",
             quietest.map(|n| format!(" ({n})")).unwrap_or_default()
         ),
     );
     if let Some(id) = level_lane(ui, s, selected) {
         response.select = Some(id);
     }
-    legend(ui);
+    legend(ui, s.set_aside() > 0);
     if let Some((index, gap)) = s.quietest.filter(|(_, gap)| *gap > KNOB_HINT_DB) {
         let name = s.speakers[index].name;
         let clicked = hint(
@@ -365,17 +312,32 @@ pub fn stage(ui: &mut egui::Ui, s: &Summary, selected: Option<&str>) -> StageRes
                     "Apply would turn the louder speakers down to match it. If {name} has a volume knob, raising it keeps more headroom."
                 ));
             },
-            Some("Match knobs"),
+            &[("Match knobs".to_owned(), None)],
+            true,
         );
-        if clicked {
+        if clicked.is_some() {
             response.match_knobs = Some(s.speakers[index].id.to_owned());
         }
     }
-    if let Some(far) = s
+    if let Some(include) = far_hint(ui, s, busy) {
+        response.include = Some(include);
+    }
+    response
+}
+
+/// Far speakers: set aside by default with a link to align to each anyway, or already
+/// included with a link to set it aside again. Any other far arrival gets the lip-sync note.
+fn far_hint(ui: &mut egui::Ui, s: &Summary, busy: bool) -> Option<(String, bool)> {
+    let choices: Vec<_> = s
         .speakers
         .iter()
-        .find(|sp| sp.arrival.is_some_and(|(ms, _)| ms.abs() > FAR_MS))
-    {
+        .filter(|sp| sp.row.set_aside() || sp.row.include_anyway)
+        .collect();
+    if choices.is_empty() {
+        let far = s
+            .speakers
+            .iter()
+            .find(|sp| sp.arrival.is_some_and(|(ms, _)| ms.abs() > FAR_ARRIVAL_MS))?;
         let ms = far.arrival.map_or(0.0, |(ms, _)| ms);
         hint(
             ui,
@@ -388,10 +350,68 @@ pub fn stage(ui: &mut egui::Ui, s: &Summary, selected: Option<&str>) -> StageRes
                 ))
                 .on_hover_text(calibration_core::long_delay_warning(ms).unwrap_or_default());
             },
-            None,
+            &[],
+            false,
         );
+        return None;
     }
-    response
+    let blocked = if busy {
+        Some("Wait for the current operation to finish.".to_owned())
+    } else {
+        s.alignment.refreshable().err()
+    };
+    let links: Vec<_> = choices
+        .iter()
+        .map(|sp| {
+            (
+                if sp.row.include_anyway {
+                    format!("Set {} aside again", sp.name)
+                } else {
+                    format!("Align to {} anyway", sp.name)
+                },
+                blocked.clone(),
+            )
+        })
+        .collect();
+    let aside: Vec<_> = choices.iter().filter(|sp| sp.row.set_aside()).collect();
+    let clicked = hint(
+        ui,
+        |ui| {
+            if let Some(first) = aside.first() {
+                let names: Vec<_> = aside.iter().map(|sp| sp.name).collect();
+                let ms = match &first.reason {
+                    Some(ExclusionReason::FarArrival { ms }) => *ms,
+                    _ => 0.0,
+                };
+                ui.label(
+                    RichText::new(format!(
+                        "Set aside: {} {} {:.0} ms {} than the others.",
+                        names.join(", "),
+                        if names.len() == 1 {
+                            "arrives"
+                        } else {
+                            "arrive"
+                        },
+                        ms.abs(),
+                        if ms > 0.0 { "later" } else { "earlier" }
+                    ))
+                    .strong()
+                    .color(FAR),
+                );
+                ui.label(if names.len() == 1 {
+                    "It keeps its settings and the others are aligned without it. Aligning to it delays every other speaker by as much, which may affect lip sync."
+                } else {
+                    "They keep their settings and the others are aligned without them. Aligning to them delays every other speaker by as much, which may affect lip sync."
+                });
+            } else {
+                ui.label("Aligned to a far speaker on request: every other speaker is delayed to match it, which may affect lip sync.");
+            }
+        },
+        &links,
+        false,
+    )?;
+    let sp = choices[clicked];
+    Some((sp.id.to_owned(), !sp.row.include_anyway))
 }
 
 /// Holds the previous chart's place while a new alignment is captured.
@@ -417,11 +437,16 @@ fn banners(ui: &mut egui::Ui, s: &Summary) {
         return;
     }
     let excluded = a.rows.iter().filter(|r| r.qualified.is_none()).count();
+    let set_aside = match a.set_aside_count() {
+        0 => String::new(),
+        n => format!(" · {n} set aside"),
+    };
+    let blockers = a.blocker_list();
     if let Some(profile) = &a.profile {
         ui.colored_label(
             super::ACCENT,
             format!(
-                "{} for {} / {} speakers · {} excluded",
+                "{} for {} / {} speakers · {} excluded{set_aside}",
                 if a.applied_snapshot.is_some() {
                     "Corrections applied"
                 } else {
@@ -432,20 +457,18 @@ fn banners(ui: &mut egui::Ui, s: &Summary) {
                 excluded
             ),
         );
-    } else if !a.blockers.is_empty() {
-        ui.colored_label(
-            super::WARM,
-            "Correction proposal blocked by session issues:",
-        );
-        for reason in &a.blockers {
-            ui.colored_label(super::WARM, readable_reason(reason));
+    } else if !blockers.is_empty() {
+        ui.colored_label(super::WARM, "Correction proposal blocked:");
+        for blocker in &blockers {
+            ui.colored_label(super::WARM, blocker.human())
+                .on_hover_text(blocker.to_string());
         }
-    } else if a.qualified_count() >= 2 {
+    } else if a.included_count() >= 2 {
         ui.colored_label(
             super::WARM,
             format!(
                 "{} / {} speakers qualify · update the proposal from saved passes",
-                a.qualified_count(),
+                a.included_count(),
                 a.rows.len()
             ),
         );
@@ -454,7 +477,7 @@ fn banners(ui: &mut egui::Ui, s: &Summary) {
             super::WARM,
             format!(
                 "{} / {} speakers qualify · at least two are needed for relative correction",
-                a.qualified_count(),
+                a.included_count(),
                 a.rows.len()
             ),
         );
@@ -630,9 +653,9 @@ fn note(painter: &egui::Painter, c: &Columns, y: f32, sp: &Speaker, text: Option
                 painter,
                 at,
                 Align2::LEFT_CENTER,
-                reason.text,
+                reason.human(),
                 FontId::proportional(11.0),
-                reason.color(),
+                reason_color(reason),
                 width,
             );
         }
@@ -675,8 +698,11 @@ fn tooltip(sp: &Speaker) -> String {
         ));
     }
     if let Some(reason) = &sp.reason {
-        lines.push(format!("{} Gain and delay stay unchanged.", reason.text));
-        lines.push(format!("Detail: {}", reason.raw));
+        lines.push(format!("{} Gain and delay stay unchanged.", reason.human()));
+        if reason.is_set_aside() {
+            lines.push("Use \"Align to it anyway\" below the chart to include it.".into());
+        }
+        lines.push(format!("Detail: {reason}"));
         if let Some(ms) = sp.diagnostic_arrival_ms {
             lines.push(format!("Diagnostic arrival {}", signed(ms, 3, "ms")));
         }
@@ -711,7 +737,7 @@ fn timing_lane(ui: &mut egui::Ui, s: &Summary, selected: Option<&str>) -> Option
         sp.arrival
             .map(|(ms, _)| ms)
             .or(sp.diagnostic_arrival_ms)
-            .is_some_and(|ms| ms.abs() > FAR_MS)
+            .is_some_and(|ms| ms.abs() > FAR_ARRIVAL_MS)
     });
     let (rect, response) = ui.allocate_exact_size(
         Vec2::new(ui.available_width(), lane_height(s.speakers.len())),
@@ -720,13 +746,13 @@ fn timing_lane(ui: &mut egui::Ui, s: &Summary, selected: Option<&str>) -> Option
     let c = Columns::new(rect, far);
     let (mut lo, mut hi) = (0.0_f64, 0.0_f64);
     for sp in &s.speakers {
-        if let Some((ms, spread)) = sp.arrival.filter(|(ms, _)| ms.abs() <= FAR_MS) {
+        if let Some((ms, spread)) = sp.arrival.filter(|(ms, _)| ms.abs() <= FAR_ARRIVAL_MS) {
             lo = lo.min(ms - spread / 2.0);
             hi = hi.max(ms + spread / 2.0);
             if let Some(target) = sp
                 .change
                 .map(|c| ms + c.delay_ms())
-                .filter(|t| t.abs() <= FAR_MS)
+                .filter(|t| t.abs() <= FAR_ARRIVAL_MS)
             {
                 lo = lo.min(target);
                 hi = hi.max(target);
@@ -789,7 +815,7 @@ fn timing_lane(ui: &mut egui::Ui, s: &Summary, selected: Option<&str>) -> Option
         painter.text(
             Pos2::new(bracket.center().x, rect.top() + 2.0),
             Align2::CENTER_TOP,
-            format!("beyond ±{FAR_MS:.0} ms"),
+            format!("beyond ±{FAR_ARRIVAL_MS:.0} ms"),
             FontId::proportional(10.0),
             FAR,
         );
@@ -798,10 +824,10 @@ fn timing_lane(ui: &mut egui::Ui, s: &Summary, selected: Option<&str>) -> Option
         let y = c.row_y(i);
         row_frame(&painter, &c, sp, i, selected == Some(sp.id));
         let ms = sp.arrival.map(|(ms, _)| ms).or(sp.diagnostic_arrival_ms);
-        if let (Some(ms), Some(bracket)) = (ms.filter(|ms| ms.abs() > FAR_MS), c.bracket) {
+        if let (Some(ms), Some(bracket)) = (ms.filter(|ms| ms.abs() > FAR_ARRIVAL_MS), c.bracket) {
             let dot = Pos2::new(bracket.left() + 12.0, y);
             match &sp.reason {
-                Some(reason) => hollow(&painter, dot, reason.color()),
+                Some(reason) => hollow(&painter, dot, reason_color(reason)),
                 None => {
                     painter.circle_filled(dot, 4.5, super::TEXT);
                 }
@@ -843,7 +869,7 @@ fn timing_lane(ui: &mut egui::Ui, s: &Summary, selected: Option<&str>) -> Option
             painter.circle_filled(Pos2::new(mx, y), 4.5, super::TEXT);
         } else if let Some(reason) = &sp.reason {
             let at = Pos2::new(ms.map_or(zero, |ms| x(ms.clamp(range.0, range.1))), y);
-            hollow(&painter, at, reason.color());
+            hollow(&painter, at, reason_color(reason));
         }
         note(&painter, &c, y, sp, sp.change.as_ref().map(delay_change));
     }
@@ -859,6 +885,8 @@ fn level_lane(ui: &mut egui::Ui, s: &Summary, selected: Option<&str>) -> Option<
     let (mut lo, mut hi) = (0.0_f64, 0.0_f64);
     for sp in &s.speakers {
         if let Some((db, spread)) = sp.level {
+            // Set-aside speakers may be quieter than the quietest aligned one.
+            lo = lo.min(db - spread / 2.0);
             hi = hi.max(db + spread / 2.0);
             if let Some(change) = &sp.change {
                 lo = lo.min(db + change.gain_db());
@@ -936,7 +964,7 @@ fn level_lane(ui: &mut egui::Ui, s: &Summary, selected: Option<&str>) -> Option<
             })
         } else {
             if let Some(reason) = &sp.reason {
-                hollow(&painter, Pos2::new(left + 6.0, y), reason.color());
+                hollow(&painter, Pos2::new(left + 6.0, y), reason_color(reason));
             }
             None
         };
@@ -945,19 +973,24 @@ fn level_lane(ui: &mut egui::Ui, s: &Summary, selected: Option<&str>) -> Option<
     lane_interaction(ui, response, &c, s)
 }
 
-fn legend(ui: &mut egui::Ui) {
+fn legend(ui: &mut egui::Ui, set_aside: bool) {
     ui.horizontal_wrapped(|ui| {
         for (kind, text) in [
             (0, "measured · bar = spread between runs"),
             (1, "after correction"),
             (2, "not reliable · unchanged"),
+            (3, "set aside · unchanged"),
         ] {
+            if kind == 3 && !set_aside {
+                continue;
+            }
             let (rect, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
             let p = ui.painter();
             match kind {
                 0 => p.circle_filled(rect.center(), 4.0, super::TEXT),
                 1 => p.circle_stroke(rect.center(), 4.0, Stroke::new(2.0_f32, super::ACCENT)),
-                _ => p.circle_stroke(rect.center(), 4.0, Stroke::new(1.8_f32, super::WARM)),
+                2 => p.circle_stroke(rect.center(), 4.0, Stroke::new(1.8_f32, super::WARM)),
+                _ => p.circle_stroke(rect.center(), 4.0, Stroke::new(1.8_f32, FAR)),
             };
             ui.label(RichText::new(text).small().color(super::MUTED));
             ui.add_space(6.0);
@@ -965,9 +998,26 @@ fn legend(ui: &mut egui::Ui) {
     });
 }
 
-/// A highlighted advice box; returns whether its optional right-hand link was clicked.
-fn hint(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui), link: Option<&str>) -> bool {
-    let mut clicked = false;
+/// A highlighted advice box with links, each with an optional reason it is disabled.
+/// A single short link may sit on the right; otherwise links go on their own row.
+/// Returns the clicked link.
+fn hint(
+    ui: &mut egui::Ui,
+    contents: impl FnOnce(&mut egui::Ui),
+    links: &[(String, Option<String>)],
+    inline: bool,
+) -> Option<usize> {
+    let inline = inline && links.len() == 1;
+    let mut clicked = None;
+    let mut link = |ui: &mut egui::Ui, index: usize| {
+        let (text, blocked) = &links[index];
+        let response = ui
+            .add_enabled(blocked.is_none(), egui::Link::new(text))
+            .on_disabled_hover_text(blocked.as_deref().unwrap_or_default());
+        if response.clicked() {
+            clicked = Some(index);
+        }
+    };
     egui::Frame::new()
         .fill(super::WARM.gamma_multiply(0.07))
         .stroke(Stroke::new(1.0_f32, super::WARM.gamma_multiply(0.3)))
@@ -976,18 +1026,26 @@ fn hint(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui), link: Option<&s
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             ui.horizontal(|ui| {
-                let link_width = if link.is_some() { 100.0 } else { 0.0 };
+                let link_width = if inline { 100.0 } else { 0.0 };
                 ui.allocate_ui_with_layout(
                     Vec2::new(ui.available_width() - link_width, 0.0),
                     egui::Layout::left_to_right(egui::Align::Min).with_main_wrap(true),
                     contents,
                 );
-                if let Some(link) = link {
+                if inline {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        clicked = ui.link(link).clicked();
+                        link(ui, 0)
                     });
                 }
             });
+            if !inline && !links.is_empty() {
+                ui.horizontal_wrapped(|ui| {
+                    for index in 0..links.len() {
+                        link(ui, index);
+                        ui.add_space(8.0);
+                    }
+                });
+            }
         });
     clicked
 }
@@ -1121,8 +1179,10 @@ fn status_line(a: &Alignment, live: bool, updating: bool) -> (String, Color32) {
     }
     if a.profile.is_none() {
         return (
-            if a.qualified_count() >= 2 && a.blockers.is_empty() {
+            if a.included_count() >= 2 && a.blockers.is_empty() {
                 "No proposal yet. Turn on Lab to update the proposal from the saved passes."
+            } else if a.set_aside_count() > 0 {
+                "Nothing to apply yet. Align to a set-aside speaker above the cards, or measure again."
             } else {
                 "Nothing to apply. At least two speakers must measure reliably."
             }
@@ -1189,24 +1249,36 @@ pub fn lab(
         .map_or(0, |p| p.target_snapshot.speakers.len());
     let excluded = a.rows.iter().filter(|r| r.qualified.is_none()).count();
     if a.profile.is_some() {
-        ui.label("Only included speakers receive targets. Excluded speaker gains and delays stay unchanged.");
+        ui.label("Only included speakers receive targets. Excluded and set-aside speaker gains and delays stay unchanged.");
     }
-    if excluded > 0 {
-        egui::CollapsingHeader::new(format!("Excluded speakers ({excluded}) · unchanged"))
+    for (title, count, rows) in [
+        (
+            "Excluded speakers",
+            excluded,
+            a.rows
+                .iter()
+                .filter(|r| r.qualified.is_none())
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "Set aside",
+            a.set_aside_count(),
+            a.rows.iter().filter(|r| r.set_aside()).collect(),
+        ),
+    ] {
+        if count == 0 {
+            continue;
+        }
+        egui::CollapsingHeader::new(format!("{title} ({count}) · unchanged"))
             .default_open(true)
             .show(ui, |ui| {
-                for row in a.rows.iter().filter(|r| r.qualified.is_none()) {
-                    ui.colored_label(
-                        super::WARM,
-                        format!(
-                            "{}: {}",
-                            row.output_id,
-                            row.reason
-                                .as_deref()
-                                .map(readable_reason)
-                                .unwrap_or("Two qualified independent captures are required.")
-                        ),
-                    );
+                for row in rows {
+                    if let Some(reason) = row.exclusion() {
+                        ui.colored_label(
+                            reason_color(&reason),
+                            format!("{}: {reason}", row.output_id),
+                        );
+                    }
                 }
             });
     }
@@ -1225,8 +1297,8 @@ pub fn lab(
             .on_hover_text("Recompute diagnostic results and quality from the original audio. Creates a separate report; no playback or correction.").clicked() {
             action = Some("reanalyze");
         }
-        if ui.add_enabled(!busy && a.profile.is_none() && a.blockers.is_empty() && !a.physical_levels_changed
-            && a.applied_snapshot.is_none() && !a.application_uncertain && a.qualified_count() >= 2,
+        if ui.add_enabled(!busy && a.profile.is_none() && a.blockers.is_empty() && a.refreshable().is_ok()
+            && a.included_count() >= 2,
             egui::Button::new("Update correction proposal"))
             .on_hover_text("Requalify the original saved passes and propose targets for eligible speakers only. No playback or settings changes.").clicked() {
             action = Some("proposal");
@@ -1322,7 +1394,9 @@ fn evidence(ui: &mut egui::Ui, a: &Alignment, row: &Row, older: bool) {
                 .strong(),
         );
         ui.label(
-            RichText::new(if row.qualified.is_some() {
+            RichText::new(if row.set_aside() {
+                "Repeatable · set aside"
+            } else if row.qualified.is_some() {
                 "Repeatable"
             } else {
                 "Excluded from correction"
@@ -1414,13 +1488,14 @@ fn evidence(ui: &mut egui::Ui, a: &Alignment, row: &Row, older: bool) {
     if let Some(warning) = arrival.and_then(calibration_core::long_delay_warning) {
         ui.colored_label(super::WARM, warning);
     }
-    if let Some(reason) = &row.reason {
+    if let Some(reason) = row.exclusion() {
         ui.colored_label(
-            super::WARM,
-            format!(
-                "Excluded: {} · gain and delay unchanged",
-                readable_reason(reason)
-            ),
+            reason_color(&reason),
+            if reason.is_set_aside() {
+                format!("Set aside: {reason}")
+            } else {
+                format!("Excluded: {reason} · gain and delay unchanged")
+            },
         );
     }
 }
@@ -1459,67 +1534,5 @@ fn pass_summary(
             ),
         };
         ui.label(format!("{label} pass {} / 2: {status}", pass + 1));
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::human_reason;
-
-    #[test]
-    fn raw_reasons_map_to_short_human_sentences_and_keep_the_raw_text() {
-        for (raw, text, severe) in [
-            (
-                "invalid calibration data: three reliable timing references were not found",
-                "No sound picked up. Wired and unmuted?",
-                true,
-            ),
-            (
-                "invalid calibration data: invalid calibration data: clipped recording",
-                "Clipped. Lower the mic gain or test level.",
-                true,
-            ),
-            (
-                "excited-band acquisition signal/noise below 15 dB; diagnostic result only",
-                "Too noisy to trust.",
-                false,
-            ),
-            (
-                "integrated level-band signal/noise is 18.5 dB (minimum 20 dB for correction)",
-                "Too noisy to trust.",
-                false,
-            ),
-            (
-                "arrival changed by 0.410 ms between repeats (limit 0.150 ms)",
-                "Timing moved between runs. Keep still and measure again.",
-                false,
-            ),
-            (
-                "level changed by 0.62 dB between repeats (limit 0.50 dB)",
-                "Level moved between runs. Keep still and measure again.",
-                false,
-            ),
-            (
-                "reference level changed between repeats",
-                "Reference speaker level drifted. Keep the mic gain fixed.",
-                false,
-            ),
-            (
-                "speaker: early peaks disagree across frequency bands or detection thresholds",
-                "No clear arrival. Echoes or an obstacle?",
-                false,
-            ),
-            (
-                "two independent complete target captures are required",
-                "Not measured twice. Measure again.",
-                false,
-            ),
-            ("something new", "Not reliable enough to correct.", false),
-        ] {
-            let reason = human_reason(raw);
-            assert_eq!((reason.text, reason.severe), (text, severe), "{raw}");
-            assert!(!reason.raw.starts_with("invalid calibration data"));
-            assert!(raw.ends_with(reason.raw));
-        }
     }
 }

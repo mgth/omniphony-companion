@@ -3,6 +3,8 @@ pub mod alignment;
 pub mod analysis_cache;
 pub mod batch;
 pub mod controller;
+pub mod defaults;
+pub mod duration;
 pub mod files;
 pub mod manual_level;
 pub mod measurement;

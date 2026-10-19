@@ -1,3 +1,4 @@
+use calibration_core::{Blocker, ExclusionReason, reason::SnrBand};
 use companion_service::{
     alignment,
     batch::BatchOutcome,
@@ -369,27 +370,73 @@ fn unstable_target_retains_level_evidence_but_cannot_make_or_apply_a_profile() {
 }
 
 #[test]
-fn stable_projector_latency_warns_and_aligns_within_advertised_capacity() {
+fn stable_projector_latency_is_set_aside_until_included_then_aligns_within_capacity() {
     let root = tempfile::tempdir().unwrap();
     let mut rig = Rig::new();
     rig.slow_output = true;
     rig.snapshot.lock().unwrap().max_delay_ms = 250.0;
-    let mut a = acquire(&rig, root.path());
-    assert!(a.profile.is_some(), "{:?} {:?}", a.rows, a.blockers);
-    assert_eq!(a.profile.as_ref().unwrap().policy.maximum_delay_ms, 250.0);
+    let a = acquire(&rig, root.path());
+    // R is repeatable but about 160 ms late: set aside by default, which leaves only L.
+    assert!(a.rows.iter().all(|r| r.qualified.is_some()));
+    assert!(a.rows[1].set_aside() && !a.rows[1].included());
+    assert!(
+        matches!(a.rows[1].exclusion(), Some(ExclusionReason::FarArrival { ms }) if (ms - 160.0).abs() < 1.0),
+        "{:?}",
+        a.rows[1].reason_code
+    );
+    assert!(
+        a.rows[1].reason.is_none(),
+        "set-aside speakers keep no failure text"
+    );
+    assert!(a.profile.is_none());
+    assert_eq!(
+        a.blocker_list(),
+        [Blocker::TooFewQualified {
+            count: 1,
+            set_aside: 1
+        }]
+    );
     assert!(
         calibration_core::long_delay_warning(a.rows[1].qualified.as_ref().unwrap().arrival_ms)
             .is_some()
     );
+    assert!(alignment::include_anyway(&a, "Unknown", true).is_err());
+    // Including it is saved and builds the proposal from the saved passes.
+    let mut a = alignment::include_anyway(&a, "R", true).unwrap();
+    assert!(a.rows[1].include_anyway && a.rows[1].included());
+    assert!(a.blockers.is_empty(), "{:?}", a.blockers);
+    assert_eq!(a.profile.as_ref().unwrap().policy.maximum_delay_ms, 250.0);
     assert!((a.targets(false).unwrap()[0].delay_ms - 160.0).abs() < 0.05);
+    assert!(alignment::load(&a.directory).unwrap().rows[1].include_anyway);
     alignment::apply(&rig, &mut a, false).unwrap();
+    assert!(
+        alignment::include_anyway(&a, "R", false).is_err(),
+        "applied proposals stay fixed"
+    );
     alignment::verify(&rig, &mut a, &AtomicBool::new(false), &mut |_, _, _| {}).unwrap();
     assert!(
         a.verification.as_ref().unwrap().passed,
         "{:?}",
         a.verification_note
     );
-    alignment::apply(&rig, &mut a, true).unwrap();
+    // A session applied by the former policy has no include flag; it stays valid and
+    // restorable because its saved profile already corrects the far speaker.
+    let file = a.directory.join("alignment-state.json");
+    let mut json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    for row in json["rows"].as_array_mut().unwrap() {
+        let row = row.as_object_mut().unwrap();
+        row.remove("include_anyway");
+        row.remove("reason_code");
+    }
+    std::fs::write(&file, serde_json::to_vec(&json).unwrap()).unwrap();
+    let mut old = alignment::load(&a.directory).unwrap();
+    assert!(old.rows[1].include_anyway);
+    alignment::apply(&rig, &mut old, true).unwrap();
+    assert!(omniphony_adapter::same_configuration(
+        &rig.snapshot.lock().unwrap(),
+        &old.snapshot
+    ));
 
     let old_root = tempfile::tempdir().unwrap();
     rig.snapshot.lock().unwrap().max_delay_ms = 100.0;
@@ -398,11 +445,197 @@ fn stable_projector_latency_warns_and_aligns_within_advertised_capacity() {
         a.rows.iter().all(|r| r.qualified.is_some()),
         "long latency remains valid evidence"
     );
+    let a = alignment::include_anyway(&a, "R", true).unwrap();
     assert!(
         a.profile.is_none(),
         "cannot exceed the older renderer's real capacity"
     );
-    assert!(!a.blockers.is_empty());
+    assert!(matches!(a.blocker_list()[..], [Blocker::Proposal { .. }]));
+    // Setting it aside again recomputes the derived blocker instead of keeping it.
+    let a = alignment::include_anyway(&a, "R", false).unwrap();
+    assert_eq!(
+        a.blocker_list(),
+        [Blocker::TooFewQualified {
+            count: 1,
+            set_aside: 1
+        }]
+    );
+}
+
+#[test]
+fn reason_codes_round_trip_and_text_only_sessions_still_load() {
+    let root = tempfile::tempdir().unwrap();
+    let rig = Rig::new();
+    let mut snapshot = rig.snapshot.lock().unwrap();
+    let mut fourth = snapshot.outputs[2].clone();
+    fourth.id = "Clipped".into();
+    fourth.name = fourth.id.clone();
+    fourth.index = 3;
+    snapshot.outputs.push(fourth);
+    drop(snapshot);
+    rig.rejected.lock().unwrap().insert(
+        "Unused".into(),
+        "integrated level-band signal/noise is 18.5 dB (minimum 20 dB for correction)".into(),
+    );
+    rig.rejected
+        .lock()
+        .unwrap()
+        .insert("Clipped".into(), "clipped recording".into());
+    let settings = Settings {
+        device: Some("test microphone".into()),
+        reference_output: Some("L".into()),
+        sweep: omniphony_adapter::Sweep {
+            duration_ms: 200,
+            ..Settings::default().sweep
+        },
+        ..Settings::default()
+    };
+    let request = alignment::request(
+        "127.0.0.1:9000".parse().unwrap(),
+        rig.discover("127.0.0.1:9000".parse().unwrap()).unwrap(),
+        &settings,
+        "L".into(),
+        root.path().join("codes"),
+    )
+    .unwrap();
+    let a = alignment::capture(
+        &rig,
+        request,
+        settings,
+        vec!["L".into(), "R".into(), "Unused".into(), "Clipped".into()],
+        &AtomicBool::new(false),
+        &mut |_, _, _| {},
+    )
+    .unwrap()
+    .alignment;
+    let low = ExclusionReason::LowSnr {
+        band: SnrBand::Level,
+        db: Some(18.5),
+    };
+    let codes = |a: &alignment::Alignment| a.rows.iter().map(|r| r.exclusion()).collect::<Vec<_>>();
+    let expected = vec![
+        None,
+        None,
+        Some(low.clone()),
+        Some(ExclusionReason::Clipped),
+    ];
+    assert_eq!(codes(&a), expected);
+    assert_eq!(a.rows[2].reason.as_deref(), Some(low.to_string().as_str()));
+    assert_eq!(a.rows[2].repeats[0].codes, std::slice::from_ref(&low));
+    assert_eq!(
+        a.rows[3].exclusion().unwrap().human(),
+        "Clipped. Lower the mic gain or test level."
+    );
+    assert!(a.profile.is_some());
+    // Codes survive the saved file exactly.
+    let loaded = alignment::load(&a.directory).unwrap();
+    assert_eq!(codes(&loaded), expected);
+    assert_eq!(loaded.rows[2].reason_code, Some(low.clone()));
+    // A session saved before reason codes carries text only: it loads, keeps its
+    // proposal and reads the same codes back from the text.
+    let file = a.directory.join("alignment-state.json");
+    let mut json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    json.as_object_mut().unwrap().remove("blocker_codes");
+    for row in json["rows"].as_array_mut().unwrap() {
+        row.as_object_mut().unwrap().remove("reason_code");
+        for repeat in row["repeats"].as_array_mut().unwrap() {
+            repeat.as_object_mut().unwrap().remove("codes");
+        }
+    }
+    let text = serde_json::to_string(&json).unwrap();
+    assert!(!text.contains("reason_code") && !text.contains("\"codes\""));
+    std::fs::write(&file, text).unwrap();
+    let old = alignment::load(&a.directory).unwrap();
+    assert!(old.rows.iter().all(|r| r.reason_code.is_none()));
+    assert_eq!(codes(&old), expected);
+    assert_eq!(old.targets(false).unwrap(), a.targets(false).unwrap());
+    // Updating the old proposal writes the codes alongside the text.
+    let updated = alignment::refresh_proposal(&old).unwrap();
+    assert_eq!(updated.rows[3].reason_code, Some(ExclusionReason::Clipped));
+    assert_eq!(updated.corrected_output_ids(), ["L", "R"]);
+    // Old text blockers are kept as they were and still block an update.
+    let mut blocked = old.clone();
+    blocked.profile = None;
+    blocked.session = None;
+    blocked.blockers.push("Alignment cancelled.".into());
+    assert_eq!(
+        blocked.blocker_list(),
+        [Blocker::Other {
+            detail: "Alignment cancelled.".into()
+        }]
+    );
+    assert!(alignment::refresh_proposal(&blocked).is_err());
+}
+
+#[test]
+fn the_16_october_session_sets_aside_the_late_device_and_keeps_its_text_reasons() {
+    // Saved before reason codes and set-aside existed (device and instance IDs replaced).
+    let root = tempfile::tempdir().unwrap();
+    std::fs::copy(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/alignment-2026-10-16.json"
+        ),
+        root.path().join("alignment-state.json"),
+    )
+    .unwrap();
+    let saved = alignment::load(root.path()).unwrap();
+    let by_id = |a: &alignment::Alignment, id: &str| {
+        a.rows.iter().find(|r| r.output_id == id).unwrap().clone()
+    };
+    for (id, code, human) in [
+        (
+            "BL",
+            ExclusionReason::MissingTimingReferences,
+            "No sound picked up. Wired and unmuted?",
+        ),
+        (
+            "TBL",
+            ExclusionReason::Clipped,
+            "Clipped. Lower the mic gain or test level.",
+        ),
+        (
+            "TBR",
+            ExclusionReason::LowSnr {
+                band: SnrBand::Acquisition,
+                db: None,
+            },
+            "Too noisy to trust.",
+        ),
+    ] {
+        let reason = by_id(&saved, id).exclusion().unwrap();
+        assert_eq!((&reason, reason.human().as_str()), (&code, human), "{id}");
+    }
+    let a = alignment::refresh_proposal(&saved).unwrap();
+    assert!(a.blockers.is_empty(), "{:?}", a.blockers);
+    assert_eq!(a.corrected_output_ids(), ["FL", "FR", "C", "BC"]);
+    for id in ["spk-12", "spk-13"] {
+        let row = by_id(&a, id);
+        assert!(row.set_aside(), "{id}: {:?}", row.reason_code);
+        let Some(ExclusionReason::FarArrival { ms }) = row.reason_code else {
+            unreachable!()
+        };
+        assert!((176.7..177.0).contains(&ms), "{id}: {ms}");
+        assert_eq!(
+            row.exclusion().unwrap().human(),
+            "Set aside: 177 ms later than the others."
+        );
+    }
+    // The four others align among themselves: nobody is delayed by 177 ms.
+    let targets = a.targets(false).unwrap();
+    assert!(targets.iter().all(|t| t.delay_ms < 7.0), "{targets:?}");
+    let bc = targets.iter().find(|t| t.output_id == "BC").unwrap();
+    assert!((bc.delay_ms - 6.31).abs() < 0.01, "{bc:?}");
+    // Aligning to the late device is an explicit, saved choice.
+    let a = alignment::include_anyway(&a, "spk-12", true).unwrap();
+    assert_eq!(a.corrected_output_ids(), ["FL", "FR", "C", "BC", "spk-12"]);
+    assert!(by_id(&a, "spk-13").set_aside());
+    let fl = a.targets(false).unwrap()[0].clone();
+    assert!((fl.delay_ms - 176.9).abs() < 0.05, "{fl:?}");
+    let reloaded = alignment::load(root.path()).unwrap();
+    assert!(by_id(&reloaded, "spk-12").include_anyway);
+    assert_eq!(reloaded.targets(false).unwrap(), a.targets(false).unwrap());
 }
 
 #[test]
@@ -532,7 +765,7 @@ fn partial_proposal_preserves_excluded_outputs_through_apply_verify_reload_and_r
         a.verification_note
             .as_ref()
             .unwrap()
-            .contains("R: invalid calibration data: clipped recording")
+            .contains("R: clipped recording")
     );
     assert_eq!(a.corrected_output_ids(), ["L", "R"]);
     let mut a = alignment::load(&a.directory).unwrap();

@@ -30,6 +30,13 @@ fn main() -> eframe::Result {
             if std::env::args().any(|a| a == "--alignment") {
                 controller.state.alignment = Some(support::room_alignment(&controller));
             }
+            if std::env::args().any(|a| a == "--late-device") {
+                // A folder that does not exist: including the speaker cannot write a session.
+                controller.state.alignment = Some(support::late_device_alignment(
+                    &controller,
+                    std::path::Path::new("synthetic-late-device-alignment"),
+                ));
+            }
             if std::env::args().any(|a| a == "--blocked-alignment") {
                 controller.state.alignment = Some(support::alignment(&controller, false));
             }

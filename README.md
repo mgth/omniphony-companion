@@ -42,6 +42,16 @@ The Rust/egui desktop window lets you:
   continuous diagnostic capture with shared reference sweeps. **Stop** cancels the complete run.
 - Restore input/channel/rate, renderer address, reference, microphone/position,
   sweep settings, recording/calibration paths and speaker checkboxes on startup.
+- On a first run, the setup rail is already filled in: the first microphone input
+  with a usable configuration at its preferred rate (48 kHz when supported), the
+  centre speaker (else the front left) as timing reference, and the names `mic-1`
+  and `main-seat`. Each value is shown as chosen, with a **change** link. A saved
+  choice is never replaced, even if that device is missing.
+- See how long a run takes before starting it ("5 selected · about 2 min" next to
+  **Align levels and delays**; Lab's diagnostic pass and each card's Measure tooltip
+  show theirs), and the time left while it runs, in the run label and the active
+  card. Estimates come from the sweep, speaker count and passes; analysis time is
+  machine dependent.
 - Resume the previous workspace: recent measurements, saved review, alignment,
   selected result/graph, burst options, window size and panel layout. Saved results
   remain viewable while the renderer is offline. See `docs/workspace-restoration.md`.
@@ -69,9 +79,16 @@ The Rust/egui desktop window lets you:
   Apply adds) and a Level lane (500–2000 Hz level relative to the quietest reliable
   speaker, with the corrected level overlaid and the gain Apply sets). Speakers that
   could not be measured reliably get a red or amber hollow marker and a short reason,
-  such as "No sound picked up. Wired and unmuted?"; the raw reason stays in the
-  tooltip. Arrivals more than 20 ms from the reference are drawn in a separate bracket
+  such as "No sound picked up. Wired and unmuted?"; the technical reason stays in the
+  tooltip. Reasons are typed codes from the service, never guessed from text.
+  Arrivals more than 20 ms from the reference are drawn in a separate bracket
   with their offset.
+- Repeatable speakers more than 20 ms from the others' median arrival (for example a
+  second output device at +177 ms) are **set aside** by default: they keep their
+  settings, are drawn in blue ("Set aside: 177 ms later than the others.") and the
+  others are aligned without them. **Align to … anyway** below the chart includes one
+  (every other speaker is then delayed to match it), **Set … aside again** undoes it;
+  the choice is saved in the session. See `docs/gain-delay-alignment.md`.
 - Below the chart, compact speaker cards show one quality dot (the weakest grade),
   the measured ms/dB and the planned delay/gain, or the one-line reason when a
   speaker is excluded. Cards keep a fixed size and place; capture progress stays
@@ -80,8 +97,8 @@ The Rust/egui desktop window lets you:
   beside the chart in a wide window): the listener in the centre, front up, each
   speaker as a chip placed by its layout azimuth and distance, with the card's
   quality dot and a small triangle for speakers above or below ear level. The speaker
-  being measured pulses, unchecked, muted, out-of-band and excluded speakers are
-  dimmed, and the timing reference is labelled REF. Clicking a chip selects that
+  being measured pulses; unchecked, muted, out-of-band, set-aside (late) and
+  excluded speakers are dimmed; and the timing reference is labelled REF. Clicking a chip selects that
   speaker like its card. Positions come from Omniphony's speaker layout (measurement
   protocol 5); they are display only, never measured evidence. A speaker whose
   distance the layout does not state sits on a dashed ring at the typical distance;
@@ -179,6 +196,7 @@ cargo run --locked -p companion-ui --example preview -- --batch-progress
 cargo run --locked -p companion-ui --example preview -- --alignment
 cargo run --locked -p companion-ui --example preview -- --alignment --lab
 cargo run --locked -p companion-ui --example preview -- --blocked-alignment
+cargo run --locked -p companion-ui --example preview -- --late-device
 cargo run --locked -p companion-ui --example preview -- --frequency-response
 cargo run --locked -p companion-ui --example preview -- --energy-arrival
 cargo run --locked -p companion-ui --example preview -- --group-delay
@@ -189,7 +207,8 @@ cargo run --locked -p companion-ui --example preview -- --tone-burst
 This fixture window is labelled **UI PREVIEW · NO AUDIO**. Its speakers and
 microphone are synthetic; clicking Measure does not open hardware or create
 recordings. `--alignment` shows the chart with an invented five-speaker alignment
-(three repeatable speakers, one silent, one noisy at a long delay); `--lab` starts
+(three repeatable speakers, one silent, one noisy at a long delay); `--late-device`
+shows a repeatable speaker 60 ms late, set aside, with its include link; `--lab` starts
 with Lab on. The synthetic room places its 5.1 speakers on the map, with surrounds
 above the ear and a floor subwoofer whose distance is not stated.
 

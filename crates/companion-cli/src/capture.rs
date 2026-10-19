@@ -82,16 +82,18 @@ pub fn run(command: Command) -> AppResult<()> {
                 println!(
                     "{}: {}",
                     row.output_id,
-                    row.qualified
-                        .as_ref()
-                        .map(|q| format!(
-                            "{:+.3} ms / {:+.2} dB; repeat spread {:.3} ms / {:.2} dB",
+                    match (&row.qualified, row.exclusion()) {
+                        (Some(q), reason) => format!(
+                            "{:+.3} ms / {:+.2} dB; repeat spread {:.3} ms / {:.2} dB{}",
                             q.arrival_ms,
                             q.level_db,
                             q.arrival_repeat_spread_ms,
-                            q.level_repeat_spread_db
-                        ))
-                        .unwrap_or_else(|| row.reason.clone().unwrap_or("Unavailable".into()))
+                            q.level_repeat_spread_db,
+                            reason.map(|r| format!("; {r}")).unwrap_or_default()
+                        ),
+                        (None, Some(reason)) => reason.to_string(),
+                        (None, None) => "Unavailable".into(),
+                    }
                 );
                 for quality in &row.quality {
                     print_quality(quality);

@@ -786,6 +786,7 @@ fn alignment_session_stays_above_individual_results_and_unqualified_actions_stay
             }]),
             verification_pass_reports: None,
             blockers: vec!["Two independent captures are required".into()],
+            blocker_codes: vec![],
             session: None,
             profile: None,
             applied_snapshot: None,
@@ -819,12 +820,7 @@ fn alignment_session_stays_above_individual_results_and_unqualified_actions_stay
             .unwrap()
             .1;
         assert!(alignment.bottom() < lower.top());
-        find_speaker_text(
-            &mut app,
-            &ctx,
-            size,
-            "Correction proposal blocked by session issues",
-        );
+        find_speaker_text(&mut app, &ctx, size, "Correction proposal blocked:");
         find_speaker_text(&mut app, &ctx, size, "Nothing to apply.");
         assert!(
             !labels(&frame(&mut app, &ctx, vec![], size))
@@ -949,7 +945,7 @@ fn alignment_chart_and_cards_show_values_while_lab_keeps_raw_evidence_and_result
             } else {
                 for value in [
                     "Excluded from correction",
-                    "Weak target signal · diagnostic estimate only",
+                    "integrated level-band signal/noise is 8.0 dB",
                     "Long delay:",
                 ] {
                     find_speaker_text(&mut app, &ctx, size, value);
@@ -1358,10 +1354,13 @@ fn loaded_alignment_pass_opens_its_latest_analysis_and_labels_the_original_verdi
             quality: vec![],
             qualified: None,
             reason: None,
+            reason_code: None,
+            include_anyway: false,
         }],
         pass_reports: None,
         verification_pass_reports: None,
         blockers: vec!["Diagnostic review only".into()],
+        blocker_codes: vec![],
         session: None,
         profile: None,
         applied_snapshot: None,
@@ -1838,6 +1837,8 @@ fn partial_alignment_names_exclusions_and_displays_only_eligible_targets() {
             reason: Some(
                 "invalid calibration data: invalid calibration data: clipped recording".into(),
             ),
+            reason_code: None,
+            include_anyway: false,
         });
         controller.state.alignment = Some(alignment);
         let mut app = CompanionApp::preview(&ctx, controller);
@@ -1884,6 +1885,148 @@ fn partial_alignment_names_exclusions_and_displays_only_eligible_targets() {
         find_speaker_text(&mut app, &ctx, size, "Update correction proposal");
         assert_eq!(starts.load(Ordering::Relaxed), 0);
     }
+}
+
+#[test]
+fn a_late_speaker_is_set_aside_with_a_reason_and_can_be_included_from_the_chart() {
+    for size in [Vec2::new(850.0, 640.0), Vec2::new(1160.0, 800.0)] {
+        let ctx = egui::Context::default();
+        let dir = tempfile::tempdir().unwrap();
+        let (mut controller, starts) = support::ready();
+        controller.state.alignment = Some(support::late_device_alignment(&controller, dir.path()));
+        let mut app = CompanionApp::preview(&ctx, controller);
+        for _ in 0..3 {
+            frame(&mut app, &ctx, vec![], size);
+        }
+        for value in [
+            "No sound picked up. Wired and unmuted?",
+            "Set aside: 60 ms later than the others.",
+            "Set aside: Surround right arrives 60 ms later than the others.",
+            "set aside · unchanged",
+            "(1 set aside)",
+        ] {
+            find_speaker_text(&mut app, &ctx, size, value);
+        }
+        app.lab = true;
+        find_speaker_text(&mut app, &ctx, size, "Set aside (1) · unchanged");
+        find_speaker_text(&mut app, &ctx, size, "Repeatable · set aside");
+        app.lab = false;
+        let link = find_speaker_text(&mut app, &ctx, size, "Align to Surround right anyway");
+        click(&mut app, &ctx, link.center(), size);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.controller.busy() {
+            frame(&mut app, &ctx, vec![], size);
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        frame(&mut app, &ctx, vec![], size);
+        assert_eq!(app.controller.state.error, None);
+        let alignment = app.controller.state.alignment.as_ref().unwrap();
+        assert!(alignment.rows[4].include_anyway && alignment.rows[4].included());
+        assert_eq!(
+            alignment.corrected_output_ids(),
+            ["Front left", "Front right", "Center", "Surround right"]
+        );
+        find_speaker_text(
+            &mut app,
+            &ctx,
+            size,
+            "Correction proposal ready for 4 / 5 speakers · 1 excluded",
+        );
+        find_speaker_text(&mut app, &ctx, size, "Set Surround right aside again");
+        assert_eq!(starts.load(Ordering::Relaxed), 0);
+    }
+}
+
+#[test]
+fn the_setup_rail_shows_chosen_values_with_a_change_link() {
+    let ctx = egui::Context::default();
+    let (mut controller, starts) = support::ready();
+    controller.settings.sample_rate = 48000;
+    controller.state.defaults.device = true;
+    controller.state.defaults.reference = true;
+    let mut app = CompanionApp::preview(&ctx, controller);
+    let size = Vec2::new(1160.0, 800.0);
+    frame(&mut app, &ctx, vec![], size);
+    let rail = |app: &mut CompanionApp| {
+        labels(&frame(app, &ctx, vec![], size))
+            .into_iter()
+            .filter(|(_, r)| r.right() <= 310.0)
+            .collect::<Vec<_>>()
+    };
+    let text = rail(&mut app);
+    for value in [
+        "Preview audio interface",
+        "1 · Mic 1 · 48000 Hz\nmic-1 · main-seat",
+        "Front left",
+        "Arrivals are measured against this speaker.",
+    ] {
+        assert!(text.iter().any(|(t, _)| t == value), "{value}: {text:?}");
+    }
+    assert_eq!(
+        text.iter()
+            .filter(|(t, _)| t == "Chosen automatically")
+            .count(),
+        2
+    );
+    assert!(!text.iter().any(|(t, _)| t == "Input channel"));
+    let changes: Vec<_> = text.iter().filter(|(t, _)| t == "change").collect();
+    assert_eq!(changes.len(), 2);
+    click(&mut app, &ctx, changes[0].1.center(), size);
+    let text = rail(&mut app);
+    assert!(text.iter().any(|(t, _)| t == "Input channel"));
+    let done = text.iter().find(|(t, _)| t == "Done").unwrap().1;
+    click(&mut app, &ctx, done.center(), size);
+    assert!(!rail(&mut app).iter().any(|(t, _)| t == "Input channel"));
+    // A choice the user made is shown without the automatic note.
+    app.controller.state.defaults = Default::default();
+    assert!(
+        !rail(&mut app)
+            .iter()
+            .any(|(t, _)| t == "Chosen automatically")
+    );
+    // A missing reference opens its chooser instead of a summary.
+    app.controller.settings.reference_output = Some("Gone".into());
+    let text = rail(&mut app);
+    assert!(
+        text.iter()
+            .any(|(t, _)| t.starts_with("Selected reference is missing"))
+    );
+    assert_eq!(starts.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn measure_actions_show_their_expected_duration_and_running_captures_the_time_left() {
+    use companion_service::{controller::Job, measurement::MeasureProgress};
+    let ctx = egui::Context::default();
+    let (controller, starts) = support::ready();
+    let mut app = CompanionApp::preview(&ctx, controller);
+    let size = Vec2::new(1160.0, 800.0);
+    frame(&mut app, &ctx, vec![], size);
+    let expected = companion_service::duration::alignment(app.controller.settings.sweep, 5);
+    let minutes = (expected.total.as_secs_f64().ceil() as u64 + 30) / 60;
+    find_speaker_text(
+        &mut app,
+        &ctx,
+        size,
+        &format!("5 selected · about {minutes} min"),
+    );
+    app.lab = true;
+    find_speaker_text(&mut app, &ctx, size, "s · One diagnostic pass.");
+    app.lab = false;
+    app.controller.state.job = Some(Job::Alignment {
+        output_ids: vec!["Front left".into(), "Front right".into()],
+        current: 1,
+        pass: 1,
+    });
+    app.controller.state.progress = Some(MeasureProgress::Tail);
+    let left = app.controller.remaining().unwrap();
+    assert!(left < expected.total && !left.is_zero(), "{left:?}");
+    find_speaker_text(&mut app, &ctx, size, "Pass 2 / 2 · Speaker 2 / 2 · about");
+    find_speaker_text(&mut app, &ctx, size, "Acoustic tail · about");
+    app.controller.state.job = None;
+    app.controller.state.progress = None;
+    assert_eq!(starts.load(Ordering::Relaxed), 0);
 }
 
 /// Text drawn exactly as `text`, right of the setup panel.
@@ -2071,4 +2214,46 @@ fn the_map_never_pushes_the_cards_down_and_needs_reported_positions() {
         map_card.bottom() <= last.bottom() + 0.5,
         "{map_card:?} {last:?}"
     );
+}
+
+/// Opacity of the text drawn exactly as `text` right of the setup panel.
+fn text_alpha(output: &egui::FullOutput, text: &str) -> Option<u8> {
+    fn find(shape: &Shape, text: &str) -> Option<u8> {
+        match shape {
+            Shape::Text(t) if t.galley.text() == text && t.pos.x > 310.0 => {
+                t.galley.job.sections.first().map(|s| s.format.color.a())
+            }
+            Shape::Vec(shapes) => shapes.iter().find_map(|s| find(s, text)),
+            _ => None,
+        }
+    }
+    output.shapes.iter().find_map(|s| find(&s.shape, text))
+}
+
+#[test]
+fn a_speaker_set_aside_by_the_policy_is_dimmed_on_the_map_until_included() {
+    let ctx = egui::Context::default();
+    let dir = tempfile::tempdir().unwrap();
+    let (mut controller, _) = support::ready();
+    controller.state.alignment = Some(support::late_device_alignment(&controller, dir.path()));
+    let mut app = CompanionApp::preview(&ctx, controller);
+    // Tall enough to show the chart, the cards and the map without scrolling.
+    let size = Vec2::new(1160.0, 1800.0);
+    for _ in 0..3 {
+        frame(&mut app, &ctx, vec![], size);
+    }
+    let output = frame(&mut app, &ctx, vec![], size);
+    let included = text_alpha(&output, "FL").expect("FL chip");
+    assert!(text_alpha(&output, "SR").expect("SR chip") < included);
+    let link = find_speaker_text(&mut app, &ctx, size, "Align to Surround right anyway");
+    click(&mut app, &ctx, link.center(), size);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while app.controller.busy() {
+        frame(&mut app, &ctx, vec![], size);
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    frame(&mut app, &ctx, vec![], size);
+    let output = frame(&mut app, &ctx, vec![], size);
+    assert_eq!(text_alpha(&output, "SR"), Some(included));
 }

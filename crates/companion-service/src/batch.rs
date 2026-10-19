@@ -150,12 +150,12 @@ pub fn measure(
                     active_target(&state).min(outputs.len() - 1),
                     MeasureProgress::Playing(state.clone()),
                 );
-                next = Instant::now() + Duration::from_millis(200);
+                next = Instant::now() + crate::duration::STATUS_POLL;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
         progress(outputs.len() - 1, MeasureProgress::Tail);
-        drain_for(&mut capture, Duration::from_millis(600), cancelled)?;
+        drain_for(&mut capture, crate::duration::TAIL, cancelled)?;
         client.status()?;
         Ok(state)
     })()
@@ -167,7 +167,8 @@ pub fn measure(
     };
     drop(client);
     let recording = capture.finish();
-    progress(outputs.len() - 1, MeasureProgress::Saving);
+    // Analysis then runs from the first speaker; report saving there too.
+    progress(0, MeasureProgress::Saving);
     save_wav(
         &args.out_dir.join("recording.wav"),
         &recording.samples,

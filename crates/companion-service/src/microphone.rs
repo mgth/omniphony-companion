@@ -155,7 +155,7 @@ pub(crate) fn before_playback(
     let start = Instant::now();
     let initial_frames = capture.frames();
     let mut next = start;
-    while start.elapsed() < Duration::from_millis(600) {
+    while start.elapsed() < crate::duration::LEAD_IN {
         check_cancelled(cancel)?;
         capture.poll();
         if Instant::now() >= next {

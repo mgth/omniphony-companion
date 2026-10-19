@@ -285,6 +285,83 @@ fn startup_refresh_retains_missing_input_channel_and_reference_without_starting_
 }
 
 #[test]
+fn a_fresh_start_chooses_input_rate_reference_and_names_but_keeps_saved_choices() {
+    let b = Arc::new(Bench::new());
+    let mut c = Controller::new(b.clone());
+    c.settings.device = None;
+    c.settings.input_channel = 2;
+    c.settings.sample_rate = 44100;
+    c.settings.reference_output = None;
+    c.settings.microphone_id.clear();
+    c.settings.position_id.clear();
+    c.initialize(Some("127.0.0.1:9000".into()));
+    settled(&mut c);
+    assert_eq!(c.settings.device.as_deref(), Some("Test interface"));
+    assert_eq!(
+        (c.settings.input_channel, c.settings.sample_rate),
+        (1, 48000)
+    );
+    assert_eq!(c.settings.reference_output.as_deref(), Some("Left"));
+    assert_eq!(
+        (
+            c.settings.microphone_id.as_str(),
+            c.settings.position_id.as_str()
+        ),
+        ("mic-1", "main-seat")
+    );
+    assert!(c.state.defaults.device && c.state.defaults.reference);
+    assert!(c.can_measure("Right").is_ok());
+    // Choices made later, or restored from settings, survive every refresh.
+    c.settings.reference_output = Some("Right".into());
+    c.settings.position_id = "sofa".into();
+    c.refresh_inputs();
+    settled(&mut c);
+    c.connect("127.0.0.1:9000");
+    settled(&mut c);
+    assert_eq!(c.settings.reference_output.as_deref(), Some("Right"));
+    assert_eq!(c.settings.position_id, "sofa");
+    let mut saved = Controller::new(b.clone());
+    saved.settings.device = Some("Test interface".into());
+    saved.settings.sample_rate = 44100;
+    saved.initialize(Some("127.0.0.1:9000".into()));
+    settled(&mut saved);
+    assert_eq!(saved.settings.sample_rate, 44100);
+    assert!(!saved.state.defaults.device);
+    assert_eq!(b.calls.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn estimates_follow_the_checked_speakers_and_the_running_job() {
+    use companion_service::duration;
+    let b = Arc::new(Bench::new());
+    let mut c = ready(b);
+    let sweep = c.settings.sweep;
+    assert_eq!(c.batch_estimate(), Some(duration::batch(sweep, 2)));
+    assert_eq!(c.alignment_estimate(), Some(duration::alignment(sweep, 2)));
+    c.excluded_outputs.insert("Left".into());
+    assert_eq!(c.batch_estimate(), Some(duration::batch(sweep, 1)));
+    assert_eq!(c.alignment_estimate(), None, "alignment needs two speakers");
+    assert_eq!(c.remaining(), None);
+    c.state.job = Some(Job::Alignment {
+        output_ids: vec!["Left".into(), "Right".into()],
+        current: 1,
+        pass: 1,
+    });
+    c.state.progress = Some(MeasureProgress::Analyzing);
+    assert_eq!(
+        c.remaining(),
+        Some(duration::alignment(sweep, 2).analysis_per_take)
+    );
+    c.state.job = Some(Job::Measure {
+        output_id: "Right".into(),
+    });
+    c.state.progress = Some(MeasureProgress::OpeningInput);
+    assert_eq!(c.remaining(), Some(c.take_estimate().total));
+    c.state.job = None;
+    c.state.progress = None;
+}
+
+#[test]
 fn batch_uses_checked_eligible_outputs_and_preserves_fixed_settings() {
     let b = Arc::new(Bench::new());
     let mut c = ready(b.clone());
@@ -456,10 +533,11 @@ fn manual_levels_are_cancellable_keep_reference_identity_and_never_capture_takes
     c.set_manual_reference(-30.0);
     assert!(c.manual_reference(-30.0).is_some());
     assert!(c.manual_reference(-29.0).is_none());
+    let seat = c.settings.position_id.clone();
     c.settings.position_id.push_str("-moved");
     assert!(!c.can_set_manual_reference(-30.0));
     assert!(c.manual_reference(-30.0).is_none());
-    c.settings.position_id = "reference-seat".into();
+    c.settings.position_id = seat;
     c.state
         .manual_run
         .as_mut()

@@ -1,0 +1,467 @@
+{
+ "schema_version": 1,
+ "endpoint": "127.0.0.1:9001",
+ "settings": {
+  "device": "test-microphone",
+  "input_channel": 1,
+  "sample_rate": 48000,
+  "microphone_id": "mic-1",
+  "position_id": "reference-seat",
+  "reference_output": "FL",
+  "calibration_path": "",
+  "output_root": "sessions",
+  "sweep": {
+   "duration_ms": 1000,
+   "peak_dbfs": -12.0,
+   "start_hz": 200.0,
+   "end_hz": 10000.0
+  }
+ },
+ "snapshot": {
+  "instance_id": "fixture-2026-10-16",
+  "revision": "fixture-2026-10-16:2",
+  "sample_rate": 48000,
+  "master_gain_db": 0.0,
+  "max_delay_ms": 250.0,
+  "outputs": [
+   {
+    "id": "FL",
+    "index": 0,
+    "name": "FL",
+    "gain_db": 0.0,
+    "delay_ms": 0.0,
+    "muted": false,
+    "freq_low_hz": 40.0,
+    "freq_high_hz": null
+   },
+   {
+    "id": "FR",
+    "index": 1,
+    "name": "FR",
+    "gain_db": 0.0,
+    "delay_ms": 0.0,
+    "muted": false,
+    "freq_low_hz": 40.0,
+    "freq_high_hz": null
+   },
+   {
+    "id": "C",
+    "index": 2,
+    "name": "C",
+    "gain_db": 0.0,
+    "delay_ms": 0.0,
+    "muted": false,
+    "freq_low_hz": 40.0,
+    "freq_high_hz": null
+   },
+   {
+    "id": "BC",
+    "index": 3,
+    "name": "BC",
+    "gain_db": 0.0,
+    "delay_ms": 0.0,
+    "muted": false,
+    "freq_low_hz": 80.0,
+    "freq_high_hz": null
+   },
+   {
+    "id": "BR",
+    "index": 4,
+    "name": "BR",
+    "gain_db": 0.0,
+    "delay_ms": 0.0,
+    "muted": false,
+    "freq_low_hz": 40.0,
+    "freq_high_hz": null
+   },
+   {
+    "id": "BL",
+    "index": 5,
+    "name": "BL",
+    "gain_db": 0.0,
+    "delay_ms": 0.0,
+    "muted": false,
+    "freq_low_hz": 40.0,
+    "freq_high_hz": null
+   },
+   {
+    "id": "TBL",
+    "index": 6,
+    "name": "TBL",
+    "gain_db": 0.0,
+    "delay_ms": 0.0,
+    "muted": false,
+    "freq_low_hz": 110.0,
+    "freq_high_hz": null
+   },
+   {
+    "id": "TBR",
+    "index": 7,
+    "name": "TBR",
+    "gain_db": 0.0,
+    "delay_ms": 0.0,
+    "muted": false,
+    "freq_low_hz": 110.0,
+    "freq_high_hz": null
+   },
+   {
+    "id": "TFL",
+    "index": 8,
+    "name": "TFL",
+    "gain_db": 0.0,
+    "delay_ms": 0.0,
+    "muted": false,
+    "freq_low_hz": 110.0,
+    "freq_high_hz": null
+   },
+   {
+    "id": "TFR",
+    "index": 9,
+    "name": "TFR",
+    "gain_db": 0.0,
+    "delay_ms": 0.0,
+    "muted": false,
+    "freq_low_hz": 110.0,
+    "freq_high_hz": null
+   },
+   {
+    "id": "SR",
+    "index": 10,
+    "name": "SR",
+    "gain_db": 0.0,
+    "delay_ms": 0.0,
+    "muted": false,
+    "freq_low_hz": 80.0,
+    "freq_high_hz": null
+   },
+   {
+    "id": "LFE",
+    "index": 11,
+    "name": "LFE",
+    "gain_db": 0.0,
+    "delay_ms": 0.0,
+    "muted": false,
+    "freq_low_hz": null,
+    "freq_high_hz": 80.0
+   },
+   {
+    "id": "spk-12",
+    "index": 12,
+    "name": "spk-12",
+    "gain_db": 0.0,
+    "delay_ms": 0.0,
+    "muted": false,
+    "freq_low_hz": 110.0,
+    "freq_high_hz": null
+   },
+   {
+    "id": "spk-13",
+    "index": 13,
+    "name": "spk-13",
+    "gain_db": 0.0,
+    "delay_ms": 0.0,
+    "muted": false,
+    "freq_low_hz": 110.0,
+    "freq_high_hz": null
+   }
+  ],
+  "unavailable_reason": null
+ },
+ "rows": [
+  {
+   "output_id": "FL",
+   "take_folders": [
+    "pass-1/take-001",
+    "pass-2/take-001"
+   ],
+   "repeats": [
+    {
+     "arrival_ms": -0.06907668389718208,
+     "level_db": -6.895136404751173,
+     "minimum_snr_db": 36.19786502370571,
+     "reference_level_db": -6.886705391045218,
+     "reasons": []
+    },
+    {
+     "arrival_ms": 0.0038359150706855816,
+     "level_db": -6.879857870551995,
+     "minimum_snr_db": 37.07833983253332,
+     "reference_level_db": -6.9011584893420705,
+     "reasons": []
+    }
+   ],
+   "qualified": {
+    "arrival_ms": -0.03262038441324825,
+    "level_db": -6.887490418895745,
+    "minimum_snr_db": 36.19786502370571,
+    "arrival_repeat_spread_ms": 0.07291259896786766,
+    "level_repeat_spread_db": 0.015278534199177685
+   },
+   "reason": null
+  },
+  {
+   "output_id": "FR",
+   "take_folders": [
+    "pass-1/take-002",
+    "pass-2/take-002"
+   ],
+   "repeats": [
+    {
+     "arrival_ms": 0.320832512911536,
+     "level_db": -4.1897675925207585,
+     "minimum_snr_db": 36.926396614948054,
+     "reference_level_db": -6.896023641652261,
+     "reasons": []
+    },
+    {
+     "arrival_ms": 0.3136978943765592,
+     "level_db": -4.229753094463058,
+     "minimum_snr_db": 37.947084672660345,
+     "reference_level_db": -6.922709931921835,
+     "reasons": []
+    }
+   ],
+   "qualified": {
+    "arrival_ms": 0.31726520364404764,
+    "level_db": -4.209714325329548,
+    "minimum_snr_db": 36.926396614948054,
+    "arrival_repeat_spread_ms": 0.007134618534976822,
+    "level_repeat_spread_db": 0.039985501942299884
+   },
+   "reason": null
+  },
+  {
+   "output_id": "C",
+   "take_folders": [
+    "pass-1/take-003",
+    "pass-2/take-003"
+   ],
+   "repeats": [
+    {
+     "arrival_ms": -0.017457498313417315,
+     "level_db": -2.9314296186744144,
+     "minimum_snr_db": 33.62375007641317,
+     "reference_level_db": -6.911029549413231,
+     "reasons": []
+    },
+    {
+     "arrival_ms": -0.022461840405009263,
+     "level_db": -2.978549559448041,
+     "minimum_snr_db": 37.947182050335954,
+     "reference_level_db": -6.89841979016314,
+     "reasons": []
+    }
+   ],
+   "qualified": {
+    "arrival_ms": -0.01995966935921329,
+    "level_db": -2.9549256843254774,
+    "minimum_snr_db": 33.62375007641317,
+    "arrival_repeat_spread_ms": 0.005004342091591948,
+    "level_repeat_spread_db": 0.04711994077362647
+   },
+   "reason": null
+  },
+  {
+   "output_id": "BC",
+   "take_folders": [
+    "pass-1/take-004",
+    "pass-2/take-004"
+   ],
+   "repeats": [
+    {
+     "arrival_ms": -5.992657159285467,
+     "level_db": -2.2115123220889865,
+     "minimum_snr_db": 33.631224351318735,
+     "reference_level_db": -6.9208871993240715,
+     "reasons": []
+    },
+    {
+     "arrival_ms": -5.996759649785817,
+     "level_db": -2.198105038502161,
+     "minimum_snr_db": 37.96501091452146,
+     "reference_level_db": -6.893964366563635,
+     "reasons": []
+    }
+   ],
+   "qualified": {
+    "arrival_ms": -5.994708404535642,
+    "level_db": -2.2048035065255487,
+    "minimum_snr_db": 33.631224351318735,
+    "arrival_repeat_spread_ms": 0.004102490500350164,
+    "level_repeat_spread_db": 0.013407283586825525
+   },
+   "reason": null
+  },
+  {
+   "output_id": "BL",
+   "take_folders": [
+    "pass-1/take-005",
+    "pass-2/take-005"
+   ],
+   "repeats": [
+    {
+     "arrival_ms": null,
+     "level_db": null,
+     "minimum_snr_db": null,
+     "reference_level_db": null,
+     "reasons": [
+      "three reliable timing references were not found",
+      "missing synchronized timing evidence",
+      "missing impulse response"
+     ]
+    },
+    {
+     "arrival_ms": null,
+     "level_db": null,
+     "minimum_snr_db": null,
+     "reference_level_db": null,
+     "reasons": [
+      "three reliable timing references were not found",
+      "missing synchronized timing evidence",
+      "missing impulse response"
+     ]
+    }
+   ],
+   "qualified": null,
+   "reason": "invalid calibration data: three reliable timing references were not found; missing synchronized timing evidence; missing impulse response"
+  },
+  {
+   "output_id": "TBL",
+   "take_folders": [
+    "pass-1/take-006",
+    "pass-2/take-006"
+   ],
+   "repeats": [
+    {
+     "arrival_ms": -4.564571166863416,
+     "level_db": -1.364097879539715,
+     "minimum_snr_db": 21.453602571483657,
+     "reference_level_db": -6.866846398741038,
+     "reasons": [
+      "clipped recording"
+     ]
+    },
+    {
+     "arrival_ms": -4.574297482921814,
+     "level_db": -1.295594116427587,
+     "minimum_snr_db": 35.75529143518326,
+     "reference_level_db": -6.910198619392846,
+     "reasons": [
+      "clipped recording"
+     ]
+    }
+   ],
+   "qualified": null,
+   "reason": "invalid calibration data: clipped recording"
+  },
+  {
+   "output_id": "TBR",
+   "take_folders": [
+    "pass-1/take-007",
+    "pass-2/take-007"
+   ],
+   "repeats": [
+    {
+     "arrival_ms": -3.843663009234807,
+     "level_db": -12.694126474560914,
+     "minimum_snr_db": 21.44696265579915,
+     "reference_level_db": -6.857015622308942,
+     "reasons": [
+      "invalid calibration data: excited-band acquisition signal/noise below 15 dB; diagnostic result only"
+     ]
+    },
+    {
+     "arrival_ms": -3.8541157804036428,
+     "level_db": -12.691593620329698,
+     "minimum_snr_db": 31.5716187560286,
+     "reference_level_db": -6.898285741624761,
+     "reasons": []
+    }
+   ],
+   "qualified": null,
+   "reason": "invalid calibration data: invalid calibration data: excited-band acquisition signal/noise below 15 dB; diagnostic result only"
+  },
+  {
+   "output_id": "spk-12",
+   "take_folders": [
+    "pass-1/take-008",
+    "pass-2/take-008"
+   ],
+   "repeats": [
+    {
+     "arrival_ms": 176.8277604086184,
+     "level_db": -5.805332524501403,
+     "minimum_snr_db": 31.391280631345012,
+     "reference_level_db": -6.901106806055299,
+     "reasons": []
+    },
+    {
+     "arrival_ms": 176.882622069099,
+     "level_db": -5.822394078642363,
+     "minimum_snr_db": 32.26537330251431,
+     "reference_level_db": -6.886154696743853,
+     "reasons": []
+    }
+   ],
+   "qualified": {
+    "arrival_ms": 176.8551912388587,
+    "level_db": -5.813854923142769,
+    "minimum_snr_db": 31.391280631345012,
+    "arrival_repeat_spread_ms": 0.05486166048061136,
+    "level_repeat_spread_db": 0.017061554140959778
+   },
+   "reason": null
+  },
+  {
+   "output_id": "spk-13",
+   "take_folders": [
+    "pass-1/take-009",
+    "pass-2/take-009"
+   ],
+   "repeats": [
+    {
+     "arrival_ms": 176.75233446512462,
+     "level_db": -5.8821017655206065,
+     "minimum_snr_db": 31.39192480263009,
+     "reference_level_db": -6.890055018393198,
+     "reasons": []
+    },
+    {
+     "arrival_ms": 176.8054832931241,
+     "level_db": -5.885295067264796,
+     "minimum_snr_db": 32.266335872385184,
+     "reference_level_db": -6.901888255429507,
+     "reasons": []
+    }
+   ],
+   "qualified": {
+    "arrival_ms": 176.77890887912434,
+    "level_db": -5.883698122894389,
+    "minimum_snr_db": 31.39192480263009,
+    "arrival_repeat_spread_ms": 0.053148827999478954,
+    "level_repeat_spread_db": 0.003193301744189192
+   },
+   "reason": null
+  }
+ ],
+ "pass_reports": [
+  {
+   "analyzed_speakers": 9,
+   "error": null
+  },
+  {
+   "analyzed_speakers": 9,
+   "error": null
+  }
+ ],
+ "verification_pass_reports": null,
+ "blockers": [],
+ "session": null,
+ "profile": null,
+ "applied_snapshot": null,
+ "restored_snapshot": null,
+ "verification_note": null,
+ "verification": null,
+ "application_uncertain": false,
+ "physical_levels_changed": false
+}
