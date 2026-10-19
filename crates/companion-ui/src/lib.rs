@@ -48,6 +48,9 @@ pub struct CompanionApp {
     pub result_plot: ResultPlot,
     waveform_view: waveform_plot::State,
     manual_noise_dbfs: f32,
+    /// Check mode for the level noise: through Omniphony's output gains. Off at
+    /// every start, so matching never begins on corrected levels.
+    noise_with_output_gain: bool,
     saved_selected: bool,
     pending_review_folder: Option<std::path::PathBuf>,
     attempted_analysis: Option<std::path::PathBuf>,
@@ -148,6 +151,7 @@ impl CompanionApp {
             result_plot: ResultPlot::default(),
             waveform_view: waveform_plot::State::default(),
             manual_noise_dbfs: -30.0,
+            noise_with_output_gain: false,
             pending_review_folder: None,
             attempted_analysis: None,
             endpoint: "127.0.0.1:9000".into(),
@@ -183,8 +187,11 @@ impl CompanionApp {
         if !self.controller.busy()
             && let Some(id) = self.pending_noise.take()
         {
-            self.controller
-                .start_manual_levels(&id, self.manual_noise_dbfs);
+            self.controller.start_manual_levels(
+                &id,
+                self.manual_noise_dbfs,
+                self.noise_with_output_gain,
+            );
         }
         if self.controller.state.workspace_ready
             && let Some(view) = self.pending_view.take()
@@ -1123,15 +1130,18 @@ impl CompanionApp {
                     || self.controller.state.manual_run.is_some()
                 {
                     ui.add_space(6.0);
+                    let mut options = self.noise_options();
                     let band = card().show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
                         manual_level_view::band(
                             ui,
                             &mut self.controller,
                             self.pending_noise.as_deref(),
-                            &mut self.manual_noise_dbfs,
+                            &mut options,
                         )
                     });
+                    self.manual_noise_dbfs = options.peak;
+                    self.noise_with_output_gain = options.with_output_gain;
                     if std::mem::take(&mut self.open_manual) {
                         band.response.scroll_to_me(None);
                     }
@@ -1589,7 +1599,7 @@ impl CompanionApp {
                             &self.controller,
                             output.id,
                             self.pending_noise.as_deref(),
-                            self.manual_noise_dbfs,
+                            self.noise_options(),
                         );
                         controls[2] = button.rect;
                         noise = action;
@@ -1752,6 +1762,13 @@ impl CompanionApp {
         }
     }
 
+    fn noise_options(&self) -> manual_level_view::Options {
+        manual_level_view::Options {
+            peak: self.manual_noise_dbfs,
+            with_output_gain: self.noise_with_output_gain,
+        }
+    }
+
     /// Play the level-matching noise on a speaker; a noise already playing elsewhere
     /// is stopped first and this one follows. The selection is left alone: opening a
     /// result below would shrink the speaker area and push the level band out of view.
@@ -1764,8 +1781,11 @@ impl CompanionApp {
             self.controller.cancel();
             self.pending_noise = Some(output_id.to_owned());
         } else {
-            self.controller
-                .start_manual_levels(output_id, self.manual_noise_dbfs);
+            self.controller.start_manual_levels(
+                output_id,
+                self.manual_noise_dbfs,
+                self.noise_with_output_gain,
+            );
         }
     }
 
@@ -2364,13 +2384,29 @@ fn card_line(ui: &egui::Ui, rect: egui::Rect, (text, color): &(String, Color32),
 
 /// Persisted Lab toggle, drawn as a switch rather than a checkbox.
 fn lab_switch(ui: &mut egui::Ui, on: &mut bool) {
-    let (rect, mut response) = ui.allocate_exact_size(Vec2::new(70.0, 24.0), egui::Sense::click());
+    switch(ui, on, "Lab")
+        .on_hover_text("Lab shows every diagnostic: segment S/N tables, band candidates, threshold checks, saved-take review, proposal maintenance and the full caveats.");
+}
+
+/// An on/off setting drawn as a switch with its label on the right.
+fn switch(ui: &mut egui::Ui, on: &mut bool, label: &str) -> egui::Response {
+    let font = FontId::proportional(14.0);
+    let text_width = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), font.clone(), TEXT)
+        .size()
+        .x;
+    let (rect, mut response) =
+        ui.allocate_exact_size(Vec2::new(44.0 + text_width, 24.0), egui::Sense::click());
     if response.clicked() {
         *on = !*on;
         response.mark_changed();
     }
-    response
-        .widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, *on, "Lab"));
+    let enabled = ui.is_enabled();
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, enabled, *on, label)
+    });
+    let dim = |c: Color32| if enabled { c } else { c.gamma_multiply(0.5) };
     let track = egui::Rect::from_min_size(
         rect.left_center() - Vec2::new(0.0, 10.0),
         Vec2::new(36.0, 20.0),
@@ -2379,28 +2415,30 @@ fn lab_switch(ui: &mut egui::Ui, on: &mut bool) {
     painter.rect_filled(
         track,
         10.0,
-        if *on {
+        dim(if *on {
             ACCENT
         } else {
             Color32::from_rgb(42, 53, 66)
-        },
+        }),
     );
     let knob = if *on {
         track.right_center() - Vec2::new(10.0, 0.0)
     } else {
         track.left_center() + Vec2::new(10.0, 0.0)
     };
-    painter.circle_filled(knob, 7.0, if *on { BG } else { TEXT });
+    painter.circle_filled(knob, 7.0, dim(if *on { BG } else { TEXT }));
     painter.text(
         track.right_center() + Vec2::new(8.0, 0.0),
         egui::Align2::LEFT_CENTER,
-        "Lab",
-        FontId::proportional(14.0),
-        if *on { TEXT } else { MUTED },
+        label,
+        font,
+        dim(if *on { TEXT } else { MUTED }),
     );
-    response
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text("Lab shows every diagnostic: segment S/N tables, band candidates, threshold checks, saved-take review, proposal maintenance and the full caveats.");
+    if enabled {
+        response.on_hover_cursor(egui::CursorIcon::PointingHand)
+    } else {
+        response
+    }
 }
 /// The alignment chart card, or its placeholder at the reserved height; returns its height.
 fn chart_card(

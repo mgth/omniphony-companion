@@ -467,15 +467,18 @@ impl Controller {
             .as_ref()
             .filter(|r| r.context == context)
     }
-    pub fn start_manual_levels(&mut self, output_id: &str, peak_dbfs: f32) {
+    /// Play the level noise on one output: without its gain by default, or with it
+    /// (`with_output_gain`) to check the corrected result.
+    pub fn start_manual_levels(&mut self, output_id: &str, peak_dbfs: f32, with_output_gain: bool) {
         if self.busy() {
             return;
         }
         let request = match self.manual_context(peak_dbfs).and_then(|context| {
-            context.output(output_id)?;
+            context.playable(output_id, with_output_gain)?;
             Ok(manual_level::Request {
                 context,
                 output_id: output_id.into(),
+                with_output_gain,
             })
         }) {
             Ok(r) => r,

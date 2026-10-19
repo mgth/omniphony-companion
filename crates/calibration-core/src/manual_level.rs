@@ -36,6 +36,21 @@ impl Level {
         (self.usable() && reference.usable())
             .then_some(self.comparison_db - reference.comparison_db)
     }
+    /// The difference as the renderer plays both speakers: each side's output
+    /// gain (its level correction) added back to the physical comparison, so
+    /// 0 dB means volume controls and correction together match the reference.
+    pub fn corrected_difference(
+        &self,
+        reference: &Self,
+        gain_db: f64,
+        reference_gain_db: f64,
+    ) -> Option<f64> {
+        if !gain_db.is_finite() || !reference_gain_db.is_finite() {
+            return None;
+        }
+        self.difference(reference)
+            .map(|d| d + gain_db - reference_gain_db)
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -64,5 +79,25 @@ mod tests {
             assert!(estimate(p, 0.0001, 0.0).is_none());
         }
         assert!(estimate(0.1, 0.0, 0.0).is_none());
+    }
+    #[test]
+    fn corrected_difference_adds_back_each_side_s_output_gain() {
+        let reference = estimate(0.0101, 0.0001, 0.0).unwrap();
+        // Physically 3 dB louder, corrected by -3 dB against an untrimmed reference.
+        let target = estimate(0.0201, 0.0001, 0.0).unwrap();
+        let raw = target.difference(&reference).unwrap();
+        assert!((raw - 3.010299957).abs() < 1e-8);
+        let corrected = target
+            .corrected_difference(&reference, -3.010299957, 0.0)
+            .unwrap();
+        assert!(corrected.abs() < 1e-8);
+        assert!(
+            (target.corrected_difference(&reference, 0.0, 2.0).unwrap() - (raw - 2.0)).abs() < 1e-8
+        );
+        assert!(
+            target
+                .corrected_difference(&reference, f64::NAN, 0.0)
+                .is_none()
+        );
     }
 }

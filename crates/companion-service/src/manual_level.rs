@@ -25,6 +25,7 @@ impl Context {
         LevelNoise {
             duration_seconds: RUN_SECONDS,
             peak_dbfs: self.peak_dbfs,
+            bypass_output_gain: false,
         }
         .validate(self.snapshot.sample_rate)?;
         if let Some(reason) = &self.snapshot.unavailable_reason {
@@ -47,7 +48,22 @@ impl Context {
                     .into(),
             );
         }
-        if self.peak_dbfs + self.snapshot.master_gain_db + output.gain_db > -6.0 {
+        Ok(output)
+    }
+    /// [`Self::output`], within the output ceiling for the noise played with the
+    /// output's gain or without it (the master gain applies either way).
+    pub fn playable(
+        &self,
+        id: &str,
+        with_output_gain: bool,
+    ) -> Result<&omniphony_adapter::protocol::Output, String> {
+        let output = self.output(id)?;
+        let gain = if with_output_gain {
+            output.gain_db
+        } else {
+            0.0
+        };
+        if self.peak_dbfs + self.snapshot.master_gain_db + gain > -6.0 {
             return Err(
                 "Lower the test level: existing digital gains exceed the output ceiling.".into(),
             );
@@ -59,6 +75,10 @@ impl Context {
 pub struct Request {
     pub context: Context,
     pub output_id: String,
+    /// Check mode: play the noise through the output's gain (Omniphony's level
+    /// correction) and compare speakers as corrected. Off, the noise skips that
+    /// gain when the renderer can, so the physical volume controls are matched.
+    pub with_output_gain: bool,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
@@ -70,6 +90,9 @@ pub enum Phase {
 #[derive(Debug, Clone)]
 pub struct Reading {
     pub phase: Phase,
+    /// Whether the renderer plays the noise through the output's gain; known once
+    /// it is connected. An older renderer always does.
+    pub output_gain_applied: Option<bool>,
     pub level: Option<Level>,
     pub remaining_seconds: u32,
     pub captured_at: Instant,
@@ -95,13 +118,13 @@ pub fn run(
     update: &mut dyn FnMut(Reading),
 ) -> AppResult<()> {
     let context = &request.context;
-    let output = context.output(&request.output_id)?;
-    let digital_trim = f64::from(context.snapshot.master_gain_db + output.gain_db);
+    let output = context.playable(&request.output_id, request.with_output_gain)?;
     if cancel.load(Ordering::Relaxed) {
         return Ok(());
     }
     update(Reading {
         phase: Phase::CheckingInput,
+        output_gain_applied: None,
         level: None,
         remaining_seconds: RUN_SECONDS,
         captured_at: Instant::now(),
@@ -110,6 +133,17 @@ pub fn run(
     if client.discover()? != context.snapshot {
         return Err("Renderer configuration changed. Reconnect before matching levels.".into());
     }
+    // The level is compared without the gains the renderer applied to the noise.
+    let bypass_output_gain = !request.with_output_gain
+        && client.protocol_version() >= omniphony_adapter::protocol::NOISE_GAINS_VERSION;
+    let digital_trim = f64::from(
+        context.snapshot.master_gain_db
+            + if bypass_output_gain {
+                0.0
+            } else {
+                output.gain_db
+            },
+    );
     let input = &context.input;
     let mut capture = Capture::start_bounded(
         &input.device,
@@ -126,7 +160,7 @@ pub fn run(
         &mut client,
         &mut capture,
         input.sample_rate,
-        digital_trim,
+        (digital_trim, bypass_output_gain),
         request,
         cancel,
         update,
@@ -139,7 +173,7 @@ fn listen(
     client: &mut Client,
     capture: &mut Capture,
     rate: u32,
-    digital_trim: f64,
+    (digital_trim, bypass_output_gain): (f64, bool),
     request: Request,
     cancel: &AtomicBool,
     update: &mut dyn FnMut(Reading),
@@ -157,6 +191,7 @@ fn listen(
             client.status()?;
             update(Reading {
                 phase: Phase::Background,
+                output_gain_applied: Some(!bypass_output_gain),
                 level: None,
                 remaining_seconds: RUN_SECONDS,
                 captured_at: Instant::now(),
@@ -173,6 +208,7 @@ fn listen(
     let signal = LevelNoise {
         duration_seconds: RUN_SECONDS,
         peak_dbfs: request.context.peak_dbfs,
+        bypass_output_gain,
     };
     client.start_noise(1, &request.output_id, signal)?;
     meter = Meter::new(rate)?;
@@ -216,6 +252,7 @@ fn listen(
                     .is_some_and(|t| t.elapsed() >= Duration::from_secs(2))
                     && meter.ready();
                 update(Reading {
+                    output_gain_applied: Some(!bypass_output_gain),
                     phase: if settled {
                         Phase::Listening
                     } else {

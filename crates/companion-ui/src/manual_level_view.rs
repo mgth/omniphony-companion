@@ -28,13 +28,23 @@ pub fn noise_output<'a>(controller: &'a Controller, pending: Option<&'a str>) ->
     }
 }
 
+/// The test options under the meter.
+#[derive(Clone, Copy)]
+pub struct Options {
+    /// Test peak, dBFS.
+    pub peak: f32,
+    /// Check mode: the noise plays through Omniphony's output gains.
+    pub with_output_gain: bool,
+}
+
 /// Whether this speaker's noise can start now, or why not.
-pub fn readiness(controller: &Controller, id: &str, peak: f32) -> Result<(), String> {
+pub fn readiness(controller: &Controller, id: &str, options: Options) -> Result<(), String> {
+    let peak = options.peak;
     if controller.busy() && !matches!(controller.state.job, Some(Job::ManualLevels { .. })) {
         return Err("Wait for the current measurement to finish.".into());
     }
     let context = controller.manual_context(peak)?;
-    context.output(id)?;
+    context.playable(id, options.with_output_gain)?;
     if id != context.reference_output && controller.manual_reference(peak).is_none() {
         return Err(format!(
             "Play noise on the reference speaker {} first and save its level.",
@@ -50,10 +60,11 @@ pub fn card_button(
     controller: &Controller,
     id: &str,
     pending: Option<&str>,
-    peak: f32,
+    options: Options,
 ) -> (egui::Response, Option<NoiseAction>) {
+    let peak = options.peak;
     let playing = noise_output(controller, pending) == Some(id);
-    let ready = readiness(controller, id, peak);
+    let ready = readiness(controller, id, options);
     let (text, enabled) = if playing {
         (RichText::new("■ Stop").color(super::RED), true)
     } else {
@@ -81,7 +92,12 @@ pub fn card_button(
             "Stop the noise on this speaker.".to_owned()
         } else {
             format!(
-                "Play 500–2000 Hz pink noise on this speaker at {peak:.0} dBFS (stops after {RUN_SECONDS} s) and compare its level with the reference below. Turn its physical volume until the difference is near 0 dB."
+                "Play 500–2000 Hz pink noise on this speaker at {peak:.0} dBFS (stops after {RUN_SECONDS} s), {}, and compare its level with the reference below. Turn its physical volume until the difference is near 0 dB.",
+                if options.with_output_gain {
+                    "through Omniphony's level correction"
+                } else {
+                    "without Omniphony's level correction"
+                }
             )
         });
     if let Err(reason) = &ready {
@@ -138,9 +154,26 @@ fn live(controller: &Controller, peak: f32) -> Live {
     };
     let delta = if fresh {
         level.and_then(|l| {
-            controller
-                .manual_reference(peak)
-                .and_then(|r| l.difference(&r.level))
+            let reference = controller.manual_reference(peak)?;
+            if run.request.with_output_gain {
+                // Check mode: compare the speakers as Omniphony plays them.
+                let gain = |id: &str| {
+                    run.request
+                        .context
+                        .snapshot
+                        .outputs
+                        .iter()
+                        .find(|o| o.id == id)
+                        .map(|o| f64::from(o.gain_db))
+                };
+                l.corrected_difference(
+                    &reference.level,
+                    gain(&run.request.output_id)?,
+                    gain(&run.request.context.reference_output)?,
+                )
+            } else {
+                l.difference(&reference.level)
+            }
         })
     } else {
         None
@@ -187,13 +220,25 @@ pub fn band(
     ui: &mut egui::Ui,
     controller: &mut Controller,
     pending: Option<&str>,
-    peak: &mut f32,
+    options: &mut Options,
 ) -> BandResponse {
     let mut response = BandResponse::default();
     let reference_id = controller.settings.reference_output.clone();
     let reference_name = reference_id.as_deref().unwrap_or("the reference speaker");
-    let target = controller.manual_reference(*peak).is_some();
-    let reading = live(controller, *peak);
+    let target = controller.manual_reference(options.peak).is_some();
+    let reading = live(controller, options.peak);
+    // How the run shown plays: check mode, and whether the renderer could skip the gain.
+    let checking = controller
+        .state
+        .manual_run
+        .as_ref()
+        .is_some_and(|r| r.request.with_output_gain);
+    let played_with_gain = controller
+        .state
+        .manual_run
+        .as_ref()
+        .and_then(|r| r.reading.as_ref())
+        .and_then(|r| r.output_gain_applied);
     let playing = noise_output(controller, pending).map(str::to_owned);
     let run = controller.state.manual_run.as_ref();
 
@@ -262,6 +307,22 @@ pub fn band(
     ui.horizontal_wrapped(|ui| {
         let color = color(reading.delta);
         match reading.delta {
+            Some(delta) if checking => {
+                ui.colored_label(
+                    color,
+                    RichText::new(format!(
+                        "{delta:+.1} dB relative to {reference_name}, after correction"
+                    ))
+                    .strong(),
+                );
+                ui.label(if delta.abs() <= MATCHED_DB {
+                    "Matched with Omniphony’s correction · within ±0.5 dB"
+                } else if delta > 0.0 {
+                    "Still louder after correction"
+                } else {
+                    "Still quieter after correction"
+                });
+            }
             Some(delta) => {
                 ui.colored_label(
                     color,
@@ -307,6 +368,12 @@ pub fn band(
             "No clear signal above background. Check that this speaker is connected and playing.",
         );
     }
+    if !checking && played_with_gain == Some(true) {
+        ui.colored_label(
+            super::WARM,
+            "This Omniphony build plays the noise through the speaker’s level correction; the meter removes it, but you hear it. Update Omniphony to hear the speakers without it.",
+        );
+    }
     if let Some(error) = run.and_then(|r| r.error.as_ref()) {
         ui.colored_label(super::RED, error);
     }
@@ -319,7 +386,7 @@ pub fn band(
 
     ui.add_space(6.0);
     ui.separator();
-    options(ui, controller, peak, reference_name);
+    option_controls(ui, controller, options, reference_name);
     response
 }
 
@@ -380,7 +447,13 @@ fn meter(ui: &mut egui::Ui, delta: Option<f64>) {
 }
 
 /// Test level and reference, under the meter.
-fn options(ui: &mut egui::Ui, controller: &mut Controller, peak: &mut f32, reference_name: &str) {
+fn option_controls(
+    ui: &mut egui::Ui,
+    controller: &mut Controller,
+    options: &mut Options,
+    reference_name: &str,
+) {
+    let peak = &mut options.peak;
     ui.scope(|ui| {
         // The rail would otherwise share the card's colour.
         ui.visuals_mut().widgets.inactive.bg_fill = super::BG;
@@ -395,6 +468,25 @@ fn options(ui: &mut egui::Ui, controller: &mut Controller, peak: &mut f32, refer
         RichText::new(format!(
             "500–2000 Hz pink noise · stops after {RUN_SECONDS} s · start quietly"
         ))
+        .small()
+        .color(super::MUTED),
+    );
+    ui.add_space(4.0);
+    ui.add_enabled_ui(!controller.busy(), |ui| {
+        super::switch(
+            ui,
+            &mut options.with_output_gain,
+            "Check with Omniphony’s level correction",
+        )
+        .on_hover_text("Off: the noise skips each speaker’s gain in Omniphony, so you match the physical volume controls alone. On: it plays through that correction and the meter compares the speakers as corrected, to check the end result.")
+        .on_disabled_hover_text("Stop the noise to change this.");
+    });
+    ui.label(
+        RichText::new(if options.with_output_gain {
+            "Playing through each speaker’s gain in Omniphony: 0 dB means knobs and correction together match."
+        } else {
+            "Playing without each speaker’s gain in Omniphony (the master volume still applies)."
+        })
         .small()
         .color(super::MUTED),
     );

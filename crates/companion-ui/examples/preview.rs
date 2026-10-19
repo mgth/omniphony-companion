@@ -83,7 +83,7 @@ fn main() -> eframe::Result {
                         level: calibration_core::manual_level::estimate(0.0101, 0.0001, 0.0)
                             .unwrap(),
                     });
-                controller.start_manual_levels("Center", -30.0);
+                controller.start_manual_levels("Center", -30.0, false);
             }
             let mut app = companion_ui::CompanionApp::preview(&cc.egui_ctx, controller);
             app.lab = std::env::args().any(|a| a == "--lab");
