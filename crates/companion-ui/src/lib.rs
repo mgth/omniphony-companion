@@ -1389,8 +1389,9 @@ impl CompanionApp {
                 .and_then(|t| t.outcome.as_ref().ok())
                 .map(|o| o.quality().grade())
         });
-        let mut controls = [egui::Rect::NOTHING; 3];
+        let mut controls = [egui::Rect::NOTHING; 4];
         let mut noise = None;
+        let mut far_choice = None;
         let card = ui.scope_builder(
             egui::UiBuilder::new()
                 .max_rect(rect)
@@ -1592,6 +1593,13 @@ impl CompanionApp {
                         );
                         controls[2] = button.rect;
                         noise = action;
+                        if let Some(included) = text.and_then(|t| t.far) {
+                            let button = self.far_button(ui, included);
+                            controls[3] = button.rect;
+                            if button.clicked() {
+                                far_choice = Some(!included);
+                            }
+                        }
                         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                             self.card_status(ui, playing, active, take.as_ref(), &readiness);
                         });
@@ -1603,6 +1611,9 @@ impl CompanionApp {
             Some(manual_level_view::NoiseAction::Start) => self.start_noise(output.id),
             Some(manual_level_view::NoiseAction::Stop) => self.stop_noise(output.id),
             None => {}
+        }
+        if let Some(include) = far_choice {
+            self.controller.include_anyway(output.id, include);
         }
         card.response.widget_info(|| {
             egui::WidgetInfo::selected(
@@ -1673,6 +1684,40 @@ impl CompanionApp {
                 .text(label)
                 .fill(ACCENT.gamma_multiply(0.45)),
         );
+    }
+
+    /// A far speaker's choice on its card: align the others to it anyway, or set it
+    /// aside again. The same choice as the link under the chart.
+    fn far_button(&self, ui: &mut egui::Ui, included: bool) -> egui::Response {
+        let blocked = if self.controller.busy() {
+            Err("Wait for the current operation to finish.".to_owned())
+        } else {
+            self.controller
+                .state
+                .alignment
+                .as_ref()
+                .map_or(Err("No alignment session.".to_owned()), |a| a.refreshable())
+        };
+        let button = ui
+            .add_enabled(
+                blocked.is_ok(),
+                egui::Button::new(
+                    RichText::new(if included { "Set aside" } else { "Align anyway" })
+                        .size(11.5)
+                        .color(if blocked.is_ok() { WARM } else { MUTED }),
+                )
+                .fill(PANEL)
+                .min_size(Vec2::new(0.0, 20.0)),
+            )
+            .on_hover_text(if included {
+                "Set this speaker aside again: it keeps its settings and the others are aligned without it."
+            } else {
+                "Align to this speaker anyway: every other speaker is delayed to match it, which may affect lip sync. The proposal is rebuilt; nothing is applied until Apply."
+            });
+        match blocked {
+            Err(reason) => button.on_disabled_hover_text(reason),
+            Ok(()) => button,
+        }
     }
 
     /// The card's bottom status: its noise reading, capture progress, last take or

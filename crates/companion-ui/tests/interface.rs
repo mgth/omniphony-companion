@@ -2032,6 +2032,56 @@ fn a_late_speaker_is_set_aside_with_a_reason_and_can_be_included_from_the_chart(
             "Correction proposal ready for 4 / 5 speakers · 1 excluded",
         );
         find_speaker_text(&mut app, &ctx, size, "Set Surround right aside again");
+
+        // The same choice sits on the speaker's card, where its reason is shown.
+        let wait = |app: &mut CompanionApp| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while app.controller.busy() {
+                frame(app, &ctx, vec![], size);
+                assert!(Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            frame(app, &ctx, vec![], size);
+        };
+        // Scrolls until the card's bottom row is in view; None when it has no such button.
+        let card_button = |app: &mut CompanionApp, text: &str| {
+            scroll_speakers(app, &ctx, size, 10000.0);
+            for _ in 0..20 {
+                let output = frame(app, &ctx, vec![], size);
+                if let Some((card, _)) = card_named(&output, "Surround right")
+                    && labels(&output)
+                        .iter()
+                        .any(|(s, r)| s == "▶ Noise" && card.contains(r.center()))
+                {
+                    return labels(&output)
+                        .into_iter()
+                        .find(|(s, r)| s == text && card.contains(r.center()))
+                        .map(|(_, r)| r);
+                }
+                scroll_speakers(app, &ctx, size, -100.0);
+            }
+            panic!("Surround right card not reachable");
+        };
+        let aside = card_button(&mut app, "Set aside").expect("Set aside on the card");
+        assert!(card_button(&mut app, "Align anyway").is_none());
+        click(&mut app, &ctx, aside.center(), size);
+        wait(&mut app);
+        let alignment = app.controller.state.alignment.as_ref().unwrap();
+        assert!(!alignment.rows[4].include_anyway && alignment.rows[4].set_aside());
+        let anyway = card_button(&mut app, "Align anyway").expect("Align anyway on the card");
+        click(&mut app, &ctx, anyway.center(), size);
+        wait(&mut app);
+        assert!(app.controller.state.alignment.as_ref().unwrap().rows[4].included());
+        // Other cards offer nothing of the kind.
+        scroll_speakers(&mut app, &ctx, size, 10000.0);
+        let output = frame(&mut app, &ctx, vec![], size);
+        let (front, _) = card_named(&output, "Front left").expect("card");
+        assert!(
+            !labels(&output)
+                .iter()
+                .any(|(s, r)| (s == "Align anyway" || s == "Set aside")
+                    && front.contains(r.center()))
+        );
         assert_eq!(starts.load(Ordering::Relaxed), 0);
     }
 }
