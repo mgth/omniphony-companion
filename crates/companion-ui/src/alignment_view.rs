@@ -5,7 +5,7 @@ use calibration_core::{
     reason::{FAR_ARRIVAL_MS, Severity},
 };
 use companion_service::{
-    alignment::{Alignment, Row},
+    alignment::{Alignment, LiveState, Row},
     quality::Grade,
 };
 use eframe::egui::{
@@ -1080,14 +1080,15 @@ fn hint(
     clicked
 }
 
-/// Whether the live renderer revision still matches the state this alignment expects.
-pub fn live(a: &Alignment, revision: Option<&str>) -> bool {
-    let expected = a
-        .applied_snapshot
-        .as_ref()
-        .or(a.restored_snapshot.as_ref())
-        .unwrap_or(&a.snapshot);
-    revision == Some(expected.revision.as_str())
+/// Whether the connected renderer is in the state this alignment records: corrected when
+/// it is applied, original otherwise. Port and process do not matter, only the
+/// installation and its settings ([`Alignment::live_state`]).
+pub fn live(a: &Alignment, state: Option<LiveState>) -> bool {
+    match state {
+        Some(LiveState::Applied) => a.applied_snapshot.is_some(),
+        Some(LiveState::Original) => a.applied_snapshot.is_none(),
+        _ => false,
+    }
 }
 
 /// Apply, Original/Corrected, Confirm and Undo with one status line.

@@ -93,6 +93,8 @@ pub struct Alignment {
     pub schema_version: u32,
     #[serde(skip)]
     pub directory: PathBuf,
+    /// The address the renderer was last reached at. Not an identity: actions use the
+    /// connected address, and the renderer is recognised by [`Alignment::live_state`].
     pub endpoint: SocketAddr,
     pub settings: Settings,
     pub snapshot: Snapshot,
@@ -524,7 +526,7 @@ fn retake<B: Backend + ?Sized>(
     });
     if !lowering.is_empty() {
         match backend.set_outputs(a.endpoint, renderer.clone(), restoring) {
-            Ok(restored) if omniphony_adapter::same_configuration(&restored, &a.snapshot) => {
+            Ok(restored) if omniphony_adapter::same_installation(&restored, &a.snapshot) => {
                 a.retake_snapshots.push(restored.clone());
                 *current = restored.clone();
                 a.restored_snapshot = Some(restored);
@@ -612,10 +614,13 @@ fn references_pass(take: &TakeOutcome) -> bool {
 }
 
 /// How far `output_id`'s gain was lowered in the renderer state a take was captured
-/// under: zero in the alignment's own state or after a retake's restoration, the
-/// retake's offset in its lowered state. None for a state the alignment did not record.
+/// under: zero in the alignment's own installation state (whichever process or port
+/// published it) or after a retake's restoration, the retake's offset in its lowered
+/// state. None for a state the alignment did not record.
 fn gain_offset(a: &Alignment, take: &Snapshot, output_id: &str) -> Option<f64> {
-    if *take != a.snapshot && !a.retake_snapshots.contains(take) {
+    if !omniphony_adapter::same_installation(take, &a.snapshot)
+        && !a.retake_snapshots.contains(take)
+    {
         return None;
     }
     let gain = |s: &Snapshot| Some(s.outputs.iter().find(|o| o.id == output_id)?.gain_db);
@@ -654,9 +659,8 @@ pub fn remeasure<B: Backend + ?Sized>(
             "Restore the measurement settings this alignment was captured with before measuring into it.".into(),
         );
     }
-    let expected = a.restored_snapshot.as_ref().unwrap_or(&a.snapshot);
     let live = backend.discover(a.endpoint)?;
-    if live != *expected {
+    if a.live_state(&live) != LiveState::Original {
         return Err("Omniphony's settings changed since this alignment was measured. Refresh, then measure a new alignment.".into());
     }
     let mut request = request(
@@ -1263,6 +1267,73 @@ impl Alignment {
     }
 }
 
+/// Where the connected renderer stands for this alignment. A renderer is recognised by
+/// its installation and settings ([`omniphony_adapter::same_installation`]), never by
+/// the address it is reached at or the identity of its process, so a session survives a
+/// new port or a restart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveState {
+    /// The installation the alignment measured, with its original gains and delays.
+    Original,
+    /// The same installation with the proposal's gains and delays.
+    Applied,
+    /// Another installation, or settings changed since: nothing to apply or undo here.
+    Other,
+}
+impl Alignment {
+    pub fn live_state(&self, live: &Snapshot) -> LiveState {
+        let applied = self
+            .profile
+            .as_ref()
+            .and_then(|_| self.expected_target().ok())
+            .is_some_and(|target| omniphony_adapter::same_installation(live, &target));
+        let original = omniphony_adapter::same_installation(live, &self.snapshot);
+        match (applied, original) {
+            // A proposal that changes nothing reads as both; the saved state decides.
+            (true, true) if self.applied_snapshot.is_some() => LiveState::Applied,
+            (_, true) => LiveState::Original,
+            (true, false) => LiveState::Applied,
+            (false, false) => LiveState::Other,
+        }
+    }
+}
+
+/// Record where the connected renderer stands: applied when it has the proposal's
+/// settings, not applied when it has the original ones, whichever process or port
+/// carries them. Saves the session when that changes what it records. A renderer with
+/// other settings, or an uncertain application, leaves the session as it is.
+pub fn reconcile(a: &mut Alignment, live: &Snapshot) -> Result<bool, String> {
+    if a.application_uncertain {
+        return Ok(false);
+    }
+    let changed = match a.live_state(live) {
+        LiveState::Applied if a.applied_snapshot.as_ref() != Some(live) => {
+            a.applied_snapshot = Some(live.clone());
+            true
+        }
+        LiveState::Original if a.applied_snapshot.is_some() => {
+            // The corrections are not in this renderer: what was verified no longer is.
+            a.applied_snapshot = None;
+            a.restored_snapshot = (live != &a.snapshot).then(|| live.clone());
+            a.verification = None;
+            a.verification_pass_reports = None;
+            a.verification_note = None;
+            true
+        }
+        LiveState::Original
+            if live != &a.snapshot && a.restored_snapshot.as_ref() != Some(live) =>
+        {
+            a.restored_snapshot = Some(live.clone());
+            true
+        }
+        _ => false,
+    };
+    if changed {
+        save(a)?;
+    }
+    Ok(changed)
+}
+
 pub fn apply<B: Backend + ?Sized>(
     backend: &B,
     alignment: &mut Alignment,
@@ -1280,29 +1351,26 @@ pub fn apply<B: Backend + ?Sized>(
     }
     let targets = alignment.targets(restore)?;
     if let Some(restored) = &alignment.restored_snapshot
-        && !omniphony_adapter::same_configuration(restored, &alignment.snapshot)
+        && !omniphony_adapter::same_installation(restored, &alignment.snapshot)
     {
         return Err("Saved restoration state differs from the original settings.".into());
     }
     if let Some(applied) = &alignment.applied_snapshot
-        && !omniphony_adapter::same_configuration(applied, &alignment.expected_target()?)
+        && !omniphony_adapter::same_installation(applied, &alignment.expected_target()?)
     {
         return Err("Saved application state differs from the proposal.".into());
     }
     let current = backend.discover(alignment.endpoint)?;
-    let expected = alignment
-        .applied_snapshot
-        .as_ref()
-        .or(alignment.restored_snapshot.as_ref())
-        .unwrap_or(&alignment.snapshot);
-    if current != *expected {
-        return Err("Renderer changed since measurement/application. Refresh and measure again; no settings were changed.".into());
-    }
-    if restore && alignment.applied_snapshot.is_none() {
-        return Ok(current);
-    }
-    if !restore && alignment.applied_snapshot.is_some() {
-        return Ok(current);
+    // Already where it was asked to go: record it, write nothing.
+    match (alignment.live_state(&current), restore) {
+        (LiveState::Other, _) => {
+            return Err("Omniphony's settings differ from both the original and the corrected settings of this alignment. No settings were changed; measure a new alignment.".into());
+        }
+        (LiveState::Original, true) | (LiveState::Applied, false) => {
+            reconcile(alignment, &current)?;
+            return Ok(current);
+        }
+        _ => {}
     }
     alignment.application_uncertain = true;
     save(alignment)?;
@@ -1312,7 +1380,7 @@ pub fn apply<B: Backend + ?Sized>(
     } else {
         alignment.expected_target()?
     };
-    if !omniphony_adapter::same_configuration(&result, &target) {
+    if !omniphony_adapter::same_installation(&result, &target) {
         return Err(
             "Renderer readback differs from requested settings; application is uncertain.".into(),
         );
@@ -1350,13 +1418,14 @@ pub fn verify<B: Backend + ?Sized>(
     a.verification_pass_reports = Some(vec![]);
     a.verification_note = Some("Verification has not completed.".into());
     save(a)?;
-    let snapshot = a
-        .applied_snapshot
-        .clone()
-        .ok_or("Apply the proposal before verification.")?;
-    if backend.discover(a.endpoint)? != snapshot {
+    if a.applied_snapshot.is_none() {
+        return Err("Apply the proposal before verification.".into());
+    }
+    let snapshot = backend.discover(a.endpoint)?;
+    if a.live_state(&snapshot) != LiveState::Applied {
         return Err("Renderer changed after application; verification refused.".into());
     }
+    a.applied_snapshot = Some(snapshot.clone());
     let outputs = a.corrected_output_ids();
     let request = request(
         a.endpoint,
@@ -1396,7 +1465,7 @@ pub fn verify<B: Backend + ?Sized>(
     let measured = measured.ok_or("missing verification evidence")?;
     let session = a.session.as_ref().ok_or("missing baseline")?;
     let profile = a.profile.as_ref().ok_or("missing profile")?;
-    if !omniphony_adapter::same_configuration(&outcome.alignment.snapshot, &a.expected_target()?) {
+    if !omniphony_adapter::same_installation(&outcome.alignment.snapshot, &a.expected_target()?) {
         return Err("Verification was not captured with the proposed state.".into());
     }
     let mut batch = measured.baseline.clone();
@@ -1499,8 +1568,8 @@ mod tests {
         };
         let mut a = a.clone();
         assert_eq!(gain_offset(&a, &a.snapshot, "R"), Some(0.0));
-        // A state the alignment did not record is another configuration, even unchanged.
-        assert_eq!(gain_offset(&a, &state("r2", -3.0), "R"), None);
+        // The same installation state under a new revision (a restart) is the same.
+        assert_eq!(gain_offset(&a, &state("r2", -3.0), "R"), Some(0.0));
         assert_eq!(gain_offset(&a, &state("r2", -16.0), "R"), None);
         a.retake_snapshots = vec![state("r2", -16.0), state("r3", -3.0)];
         assert_eq!(gain_offset(&a, &state("r2", -16.0), "R"), Some(13.0));

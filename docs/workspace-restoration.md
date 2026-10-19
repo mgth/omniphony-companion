@@ -45,7 +45,9 @@ is labeled as a previous measurement. It does not become current calibration evi
 
 Alignment reload uses the existing validation path and retains applied, verified,
 restored and uncertain-application state. Apply/Restore/Verify remain explicit,
-revision-checked actions. Restarting a renderer does not make a saved profile fresh.
+revision-checked actions. Connecting records whether the renderer has the session's
+original or corrected settings, whatever its port or process; see
+`gain-delay-alignment.md`.
 
 ## Bounds and validation
 

@@ -34,6 +34,8 @@ struct Rig {
     /// after them, once: a passing disturbance in the room.
     disturb: Mutex<std::collections::BTreeMap<String, f32>>,
     batches: Mutex<Vec<Vec<String>>>,
+    /// Addresses the renderer was written to or played through.
+    endpoints: Mutex<Vec<SocketAddr>>,
 }
 impl Rig {
     fn new() -> Self {
@@ -73,6 +75,7 @@ impl Rig {
             loud: Mutex::new(Default::default()),
             disturb: Mutex::new(Default::default()),
             batches: Mutex::new(vec![]),
+            endpoints: Mutex::new(vec![]),
         }
     }
 }
@@ -93,10 +96,11 @@ impl Backend for Rig {
     }
     fn set_outputs(
         &self,
-        _: SocketAddr,
+        endpoint: SocketAddr,
         expected: Snapshot,
         settings: Vec<OutputSetting>,
     ) -> Result<Snapshot, String> {
+        self.endpoints.lock().unwrap().push(endpoint);
         let mut state = self.snapshot.lock().unwrap();
         if *state != expected {
             return Err("stale".into());
@@ -125,6 +129,7 @@ impl Backend for Rig {
         progress: &mut dyn FnMut(usize, MeasureProgress),
     ) -> Result<BatchOutcome, String> {
         assert_eq!(*self.snapshot.lock().unwrap(), args.snapshot);
+        self.endpoints.lock().unwrap().push(args.endpoint);
         self.batches.lock().unwrap().push(outputs.clone());
         let pass = self.captures.fetch_add(1, Ordering::Relaxed);
         if self.silent_batch.load(Ordering::Relaxed) {
@@ -322,7 +327,12 @@ fn measured_pipeline_proposes_applies_verifies_reloads_and_restores_without_accu
     assert_eq!(rig.writes.load(Ordering::Relaxed), 2);
     alignment::apply(&rig, &mut loaded, false).unwrap();
     assert_eq!(rig.writes.load(Ordering::Relaxed), 3);
-    rig.snapshot.lock().unwrap().revision = "external-change".into();
+    // Someone edits another output in the renderer: restoration refuses to overwrite it.
+    {
+        let mut live = rig.snapshot.lock().unwrap();
+        live.revision = "external-change".into();
+        live.outputs[2].gain_db = -4.0;
+    }
     assert!(alignment::apply(&rig, &mut loaded, true).is_err());
     assert_eq!(rig.writes.load(Ordering::Relaxed), 3);
 }
@@ -1183,9 +1193,13 @@ fn measuring_again_refuses_other_settings_an_applied_session_and_a_changed_rende
         changed.as_ref().unwrap_err().contains("settings"),
         "{changed:?}"
     );
-    // The renderer moved on since the session: refused before any playback.
+    // The renderer's settings moved on since the session: refused before any playback.
     let live = rig.snapshot.lock().unwrap().clone();
-    rig.snapshot.lock().unwrap().revision = "rig:edited".into();
+    {
+        let mut edited = rig.snapshot.lock().unwrap();
+        edited.revision = "rig:edited".into();
+        edited.outputs[2].gain_db = -4.0;
+    }
     let moved = alignment::remeasure(&rig, &mut a, "R", &settings, &no_cancel, &mut quiet);
     assert!(moved.as_ref().unwrap_err().contains("changed"), "{moved:?}");
     *rig.snapshot.lock().unwrap() = live;
@@ -1257,4 +1271,181 @@ fn a_stopped_re_measure_keeps_the_previous_takes() {
 /// The rows as saved, for comparing whole sessions.
 fn rows_json(a: &alignment::Alignment) -> serde_json::Value {
     serde_json::to_value(&a.rows).unwrap()
+}
+
+/// The renderer restarts, as it does to change port: a new process identity and
+/// revision, with `gains` and `delays` for L and R (the same settings when `None`).
+fn restart(rig: &Rig, name: &str, settings: Option<[(f32, f32); 2]>) -> Snapshot {
+    let mut live = rig.snapshot.lock().unwrap();
+    live.instance_id = name.into();
+    live.revision = format!("{name}:0");
+    if let Some(settings) = settings {
+        for (output, (gain_db, delay_ms)) in live.outputs.iter_mut().zip(settings) {
+            output.gain_db = gain_db;
+            output.delay_ms = delay_ms;
+        }
+    }
+    live.clone()
+}
+
+#[test]
+fn a_new_port_or_a_restart_keeps_the_session_usable() {
+    let root = tempfile::tempdir().unwrap();
+    let rig = Rig::new();
+    let mut a = acquire(&rig, root.path());
+    let original = a.snapshot.clone();
+    // Restarted on another port with the same settings: still the measured installation.
+    let live = restart(&rig, "rig-on-9007", None);
+    a.endpoint = "127.0.0.1:9007".parse().unwrap();
+    assert_eq!(a.live_state(&live), alignment::LiveState::Original);
+    assert!(alignment::reconcile(&mut a, &live).unwrap());
+    assert_eq!(a.restored_snapshot.as_ref(), Some(&live));
+    assert_eq!(a.snapshot, original, "the measured baseline is kept");
+    // A speaker is measured again into it, and the proposal applies, on the new port.
+    let settings = a.settings.clone();
+    alignment::remeasure(
+        &rig,
+        &mut a,
+        "R",
+        &settings,
+        &AtomicBool::new(false),
+        &mut |_, _, _| {},
+    )
+    .unwrap();
+    alignment::apply(&rig, &mut a, false).unwrap();
+    assert_eq!(rig.writes.load(Ordering::Relaxed), 1);
+    let new_port: SocketAddr = "127.0.0.1:9007".parse().unwrap();
+    let endpoints = rig.endpoints.lock().unwrap().clone();
+    assert_eq!(endpoints[endpoints.len() - 3..], [new_port; 3]);
+    let corrected = rig.snapshot.lock().unwrap().clone();
+    let corrected = [0, 1].map(|i| (corrected.outputs[i].gain_db, corrected.outputs[i].delay_ms));
+    // Restarted again with the corrected settings saved: applied, and Undo restores.
+    let live = restart(&rig, "rig-on-9010", Some(corrected));
+    a.endpoint = "127.0.0.1:9010".parse().unwrap();
+    a.applied_snapshot = None;
+    assert_eq!(a.live_state(&live), alignment::LiveState::Applied);
+    assert!(alignment::reconcile(&mut a, &live).unwrap());
+    assert_eq!(a.applied_snapshot.as_ref(), Some(&live));
+    alignment::verify(&rig, &mut a, &AtomicBool::new(false), &mut |_, _, _| {}).unwrap();
+    assert!(
+        a.verification.as_ref().unwrap().passed,
+        "{:?}",
+        a.verification
+    );
+    alignment::apply(&rig, &mut a, true).unwrap();
+    assert_eq!(rig.writes.load(Ordering::Relaxed), 2);
+    assert_eq!(rig.snapshot.lock().unwrap().outputs, original.outputs);
+    assert_eq!(
+        *rig.endpoints.lock().unwrap().last().unwrap(),
+        "127.0.0.1:9010".parse::<SocketAddr>().unwrap()
+    );
+    // What was saved is what the next start reads.
+    let loaded = alignment::load(&a.directory).unwrap();
+    assert!(loaded.applied_snapshot.is_none());
+    assert_eq!(loaded.endpoint, a.endpoint);
+}
+
+#[test]
+fn an_alignment_applied_before_a_restart_to_the_original_settings_is_no_longer_applied() {
+    // The case of 19 October: applied on one renderer, which then stopped; another
+    // renderer, on another port, has the original settings.
+    let root = tempfile::tempdir().unwrap();
+    let rig = Rig::new();
+    let mut a = acquire(&rig, root.path());
+    alignment::apply(&rig, &mut a, false).unwrap();
+    alignment::verify(&rig, &mut a, &AtomicBool::new(false), &mut |_, _, _| {}).unwrap();
+    assert!(a.verification.is_some());
+    let live = restart(&rig, "other-workflow", Some([(0.0, 0.0); 2]));
+    assert_eq!(a.live_state(&live), alignment::LiveState::Original);
+    // Undo has nothing to do, and writes nothing.
+    let mut undone = a.clone();
+    alignment::apply(&rig, &mut undone, true).unwrap();
+    assert_eq!(rig.writes.load(Ordering::Relaxed), 1);
+    assert!(undone.applied_snapshot.is_none());
+    // Connecting records it: not applied, nothing verified, and it can be applied again.
+    assert!(alignment::reconcile(&mut a, &live).unwrap());
+    assert!(a.applied_snapshot.is_none());
+    assert!(a.verification.is_none() && a.verification_note.is_none());
+    assert!(
+        !alignment::reconcile(&mut a, &live).unwrap(),
+        "nothing left to record"
+    );
+    assert!(
+        alignment::load(&a.directory)
+            .unwrap()
+            .applied_snapshot
+            .is_none()
+    );
+    alignment::apply(&rig, &mut a, false).unwrap();
+    assert_eq!(rig.writes.load(Ordering::Relaxed), 2);
+}
+
+#[test]
+fn a_renderer_with_other_settings_is_neither_applied_nor_undone() {
+    let root = tempfile::tempdir().unwrap();
+    let rig = Rig::new();
+    let mut a = acquire(&rig, root.path());
+    alignment::apply(&rig, &mut a, false).unwrap();
+    let before = a.applied_snapshot.clone();
+    let live = restart(&rig, "elsewhere", Some([(-2.0, 0.0), (0.0, 1.0)]));
+    assert_eq!(a.live_state(&live), alignment::LiveState::Other);
+    assert!(!alignment::reconcile(&mut a, &live).unwrap());
+    assert_eq!(
+        a.applied_snapshot, before,
+        "the saved restoration context stays"
+    );
+    for restore in [true, false] {
+        let refused = alignment::apply(&rig, &mut a, restore);
+        assert!(
+            refused.as_ref().unwrap_err().contains("differ from both"),
+            "{refused:?}"
+        );
+    }
+    let settings = a.settings.clone();
+    assert!(
+        alignment::remeasure(
+            &rig,
+            &mut a,
+            "R",
+            &settings,
+            &AtomicBool::new(false),
+            &mut |_, _, _| {}
+        )
+        .is_err()
+    );
+    assert_eq!(rig.writes.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn connecting_on_another_port_records_where_the_renderer_stands() {
+    use companion_service::controller::Controller;
+    let root = tempfile::tempdir().unwrap();
+    let rig = Arc::new(Rig::new());
+    let mut a = acquire(&rig, root.path());
+    alignment::apply(&*rig, &mut a, false).unwrap();
+    restart(&rig, "other-workflow", Some([(0.0, 0.0); 2]));
+    let mut controller = Controller::new(rig.clone());
+    controller.state.alignment = Some(a);
+    controller.connect("127.0.0.1:9007");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while controller.busy() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "discovery did not finish"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        controller.poll();
+    }
+    let a = controller.state.alignment.as_ref().unwrap();
+    assert!(a.applied_snapshot.is_none(), "{:?}", controller.state.error);
+    assert_eq!(a.endpoint, "127.0.0.1:9007".parse::<SocketAddr>().unwrap());
+    assert_eq!(
+        controller.alignment_live_state(),
+        Some(alignment::LiveState::Original)
+    );
+    assert_eq!(
+        rig.writes.load(Ordering::Relaxed),
+        1,
+        "connecting writes nothing"
+    );
 }

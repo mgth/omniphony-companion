@@ -52,7 +52,7 @@ Protocol 4 `set_outputs` checks the revision while serializing live-state writer
 validates the entire request, publishes all selected gains/delays together and
 returns a new snapshot. The adapter checks all reported physical settings, including
 unchanged outputs. No save-config command is sent. Do not reconfigure topology or
-host audio during calibration; any changed revision blocks the next operation.
+host audio during calibration; a write against a changed revision is refused.
 
 Before sending a mutation, the service persists an uncertain state. A missing or
 incorrect acknowledgement cannot be presented as success or automatically retried.
@@ -72,8 +72,20 @@ does not silently change settings again.
 as application and verification progress, retaining the original plan and last
 confirmed renderer revision. Pass and verification directories contain recordings
 and original take reports. Loading a session is read-only with respect to hardware;
-no measurement or mutation occurs on startup or load. A restarted renderer has a
-new identity/revision and invalidates the saved application state.
+no measurement or mutation occurs on startup or load.
+
+A session recognises its renderer by the installation and its settings: the same
+outputs in the same order (identity, name, index, mute, band), sample rate, master
+gain, delay capacity, and gains and delays. The address it is reached at, its process
+identity (new at every start) and its revision are not part of it, so a new port or a
+restart keeps the session. Every action uses the connected address. On connecting or
+loading, the session records where that renderer stands: **applied** when it has the
+proposal's gains and delays, **not applied** when it has the original ones (a
+previous verification is then cleared). Anything else is another installation or
+changed settings: the session keeps its saved restoration context, but nothing is
+applied, undone or measured into it there, and a new alignment may start. Writes
+still check the live revision, so an edit made between discovery and the write is
+refused.
 
 Workers own acquisition, analysis, persistence and network requests. The UI only
 submits actions and draws the result: an alignment chart (Timing lane: arrival

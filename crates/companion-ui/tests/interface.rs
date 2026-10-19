@@ -2394,3 +2394,40 @@ fn a_card_measures_its_speaker_again_into_the_alignment_or_takes_one_diagnostic_
         assert_eq!(starts.load(Ordering::Relaxed), 2);
     }
 }
+
+#[test]
+fn an_alignment_applied_to_another_renderer_does_not_block_a_new_one() {
+    let size = Vec2::new(1160.0, 800.0);
+    let ctx = egui::Context::default();
+    let (mut controller, starts) = support::ready();
+    let mut alignment = support::alignment(&controller, true);
+    // Saved as applied, but this renderer has the original settings: nothing to undo.
+    alignment.applied_snapshot = controller.state.snapshot.clone();
+    controller.state.alignment = Some(alignment);
+    assert_eq!(
+        controller.alignment_live_state(),
+        Some(companion_service::alignment::LiveState::Original)
+    );
+    assert!(controller.alignment_readiness().is_ok());
+    // Another installation, or settings changed since: nothing to undo here either.
+    controller.state.snapshot.as_mut().unwrap().outputs[0].gain_db -= 3.0;
+    assert_eq!(
+        controller.alignment_live_state(),
+        Some(companion_service::alignment::LiveState::Other)
+    );
+    assert!(controller.alignment_readiness().is_ok());
+    let mut app = CompanionApp::preview(&ctx, controller);
+    let align = find_speaker_text(&mut app, &ctx, size, "Align levels and delays");
+    click(&mut app, &ctx, align.center(), size);
+    assert!(
+        !app.controller
+            .state
+            .error
+            .as_deref()
+            .is_some_and(|e| e.starts_with("Restore the active alignment")),
+        "{:?}",
+        app.controller.state.error
+    );
+    finish_worker(&mut app, &ctx, size);
+    assert_eq!(starts.load(Ordering::Relaxed), 0);
+}

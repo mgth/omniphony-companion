@@ -300,7 +300,11 @@ enum Event {
     AlignmentLoaded(Box<Result<LoadedAlignment, String>>),
     Reviewed(Box<Result<SavedReview, String>>),
     Inputs(Result<Vec<InputDevice>, String>),
-    Discovered(SocketAddr, Result<Snapshot, String>),
+    Discovered(
+        SocketAddr,
+        Result<Snapshot, String>,
+        Option<Box<Result<alignment::Alignment, String>>>,
+    ),
     Progress(MeasureProgress),
     Measured(Box<Take>),
     BatchProgress(usize, MeasureProgress),
@@ -665,9 +669,19 @@ impl Controller {
         self.state.job = Some(Job::Discover);
         let backend = self.backend.clone();
         let sender = self.sender.clone();
+        let alignment = self.state.alignment.clone();
         std::thread::spawn(move || {
             let result = catch_job(|| backend.discover(endpoint));
-            let _ = sender.send(Event::Discovered(endpoint, result));
+            // Whichever port or process it is, record whether this renderer has the
+            // alignment's original or corrected settings.
+            let reconciled = match (&result, alignment) {
+                (Ok(live), Some(mut a)) => Some(Box::new(catch_job(|| {
+                    a.endpoint = endpoint;
+                    alignment::reconcile(&mut a, live).map(|_| a)
+                }))),
+                _ => None,
+            };
+            let _ = sender.send(Event::Discovered(endpoint, result, reconciled));
         });
     }
     pub fn input_channels(&self) -> u16 {
@@ -837,6 +851,26 @@ impl Controller {
             })));
         });
     }
+    /// Where the connected renderer stands for the current alignment, if both exist.
+    pub fn alignment_live_state(&self) -> Option<alignment::LiveState> {
+        Some(
+            self.state
+                .alignment
+                .as_ref()?
+                .live_state(self.state.snapshot.as_ref()?),
+        )
+    }
+    /// Whether the current alignment's corrections must be undone before another
+    /// baseline: only while this renderer has them, or after an uncertain application.
+    /// An alignment applied to another installation or under other settings has nothing
+    /// to undo here; it keeps its saved original settings on disk.
+    fn active_alignment_blocks(&self) -> bool {
+        self.state.alignment.as_ref().is_some_and(|a| {
+            a.application_uncertain
+                || a.applied_snapshot.is_some()
+                    && self.alignment_live_state() == Some(alignment::LiveState::Applied)
+        })
+    }
     pub fn alignment_readiness(&self) -> Result<Vec<String>, String> {
         let outputs = self.batch_outputs()?;
         if outputs.len() < 2 {
@@ -851,12 +885,7 @@ impl Controller {
                     .into(),
             );
         }
-        if self
-            .state
-            .alignment
-            .as_ref()
-            .is_some_and(|a| a.applied_snapshot.is_some() || a.application_uncertain)
-        {
+        if self.active_alignment_blocks() {
             return Err("Restore the active alignment before starting another baseline.".into());
         }
         Ok(outputs)
@@ -926,11 +955,11 @@ impl Controller {
         let Some(mut a) = self.state.alignment.clone() else {
             return;
         };
-        if self.state.endpoint != Some(a.endpoint) {
-            self.state.error =
-                Some("Connect to the renderer used for this alignment first.".into());
+        let Some(endpoint) = self.state.endpoint else {
+            self.state.error = Some("Connect to Omniphony first.".into());
             return;
-        }
+        };
+        a.endpoint = endpoint;
         if action != "restore" && self.settings != a.settings {
             self.state.error=Some("Restore the original measurement settings before applying or verifying this alignment.".into());
             return;
@@ -994,23 +1023,28 @@ impl Controller {
         if !a.rows.iter().any(|r| r.output_id == output_id) {
             return Err("This speaker is not part of the alignment.".into());
         }
-        if a.applied_snapshot.is_some() || a.application_uncertain {
+        if self.state.endpoint.is_none() {
+            return Err("Connect to Omniphony first.".into());
+        }
+        let live = self
+            .alignment_live_state()
+            .ok_or("Connect to Omniphony first.")?;
+        if live == alignment::LiveState::Other {
+            return Err("Omniphony's settings changed since this alignment was measured. Refresh, then measure a new alignment.".into());
+        }
+        if live == alignment::LiveState::Applied
+            || a.applied_snapshot.is_some()
+            || a.application_uncertain
+        {
             return Err(
                 "Undo the applied alignment first: a speaker is measured again under the original settings.".into(),
             );
         }
         a.refreshable()?;
-        if self.state.endpoint != Some(a.endpoint) {
-            return Err("Connect to the renderer used for this alignment first.".into());
-        }
         if self.settings != a.settings {
             return Err(
                 "Restore the measurement settings this alignment was captured with before measuring into it.".into(),
             );
-        }
-        let expected = a.restored_snapshot.as_ref().unwrap_or(&a.snapshot);
-        if self.state.snapshot.as_ref().map(|s| &s.revision) != Some(&expected.revision) {
-            return Err("Omniphony's settings changed since this alignment was measured. Refresh, then measure a new alignment.".into());
         }
         self.can_measure(output_id)
     }
@@ -1025,6 +1059,7 @@ impl Controller {
         let Some(mut a) = self.state.alignment.clone() else {
             return;
         };
+        a.endpoint = self.state.endpoint.expect("checked by can_remeasure");
         self.state.job = Some(Job::Remeasure {
             output_id: output_id.into(),
             pass: 0,
@@ -1111,12 +1146,7 @@ impl Controller {
         if self.busy() {
             return;
         }
-        if self
-            .state
-            .alignment
-            .as_ref()
-            .is_some_and(|a| a.applied_snapshot.is_some() || a.application_uncertain)
-        {
+        if self.active_alignment_blocks() {
             self.state.error = Some("Restore the current alignment before loading another.".into());
             return;
         }
@@ -1124,8 +1154,16 @@ impl Controller {
         self.state.error = None;
         let path = PathBuf::from(directory.trim());
         let sender = self.sender.clone();
+        let live = self.state.endpoint.zip(self.state.snapshot.clone());
         std::thread::spawn(move || {
-            let result = catch_job(|| alignment::load(&path).and_then(LoadedAlignment::read));
+            let result = catch_job(|| {
+                let mut a = alignment::load(&path)?;
+                if let Some((endpoint, live)) = &live {
+                    a.endpoint = *endpoint;
+                    alignment::reconcile(&mut a, live)?;
+                }
+                LoadedAlignment::read(a)
+            });
             let _ = sender.send(Event::AlignmentLoaded(Box::new(result)));
         });
     }
@@ -1573,7 +1611,12 @@ impl Controller {
                         self.connect(&endpoint);
                     }
                 }
-                Event::Discovered(endpoint, result) => {
+                Event::Discovered(endpoint, result, reconciled) => {
+                    match reconciled.map(|r| *r) {
+                        Some(Ok(a)) => self.state.alignment = Some(a),
+                        Some(Err(e)) => self.state.error = Some(e),
+                        None => {}
+                    }
                     match result {
                         Ok(snapshot) => {
                             crate::defaults::reference_settings(

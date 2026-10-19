@@ -500,8 +500,10 @@ fn whole_alignment_reanalysis_retains_originals_and_cannot_apply_a_profile() {
     let mut applied = original.clone();
     applied.applied_snapshot = Some(applied.snapshot.clone());
     assert!(alignment::reanalyze(&applied).is_err());
+    // Captured under other settings (a revision alone would be the same installation).
     change(&folders[1], "snapshot.json", |r| {
-        r["revision"] = json!("different")
+        r["revision"] = json!("different");
+        r["outputs"][0]["gain_db"] = json!(-7.0);
     });
     let mismatched = alignment::reanalyze(&original).unwrap();
     assert!(mismatched.rows[0].qualified.is_none());

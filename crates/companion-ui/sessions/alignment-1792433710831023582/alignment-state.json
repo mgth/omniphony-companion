@@ -1,0 +1,189 @@
+{
+  "schema_version": 1,
+  "endpoint": "127.0.0.1:9000",
+  "settings": {
+    "device": "Preview audio interface",
+    "input_channel": 1,
+    "sample_rate": 48000,
+    "microphone_id": "mic-1",
+    "position_id": "main-seat",
+    "reference_output": "Front left",
+    "calibration_path": "",
+    "output_root": "sessions",
+    "sweep": {
+      "duration_ms": 1000,
+      "peak_dbfs": -30.0,
+      "start_hz": 200.0,
+      "end_hz": 10000.0
+    },
+    "retake_clipped": true
+  },
+  "snapshot": {
+    "instance_id": "ui-preview",
+    "revision": "ui-preview:1",
+    "sample_rate": 48000,
+    "master_gain_db": 0.0,
+    "max_delay_ms": 100.0,
+    "outputs": [
+      {
+        "id": "Front left",
+        "index": 0,
+        "name": "Front left",
+        "gain_db": -4.5,
+        "delay_ms": 0.0,
+        "muted": false,
+        "freq_low_hz": 80.0,
+        "freq_high_hz": 20000.0,
+        "azimuth_deg": -30.0,
+        "elevation_deg": 0.0,
+        "distance_m": 2.6
+      },
+      {
+        "id": "Front right",
+        "index": 1,
+        "name": "Front right",
+        "gain_db": -2.0,
+        "delay_ms": 0.35,
+        "muted": false,
+        "freq_low_hz": 80.0,
+        "freq_high_hz": 20000.0,
+        "azimuth_deg": 30.0,
+        "elevation_deg": 0.0,
+        "distance_m": 2.6
+      },
+      {
+        "id": "Center",
+        "index": 2,
+        "name": "Center",
+        "gain_db": 0.0,
+        "delay_ms": 1.2,
+        "muted": false,
+        "freq_low_hz": 80.0,
+        "freq_high_hz": 20000.0,
+        "azimuth_deg": 0.0,
+        "elevation_deg": 0.0,
+        "distance_m": 2.4
+      },
+      {
+        "id": "Surround left",
+        "index": 3,
+        "name": "Surround left",
+        "gain_db": -0.5,
+        "delay_ms": 3.1,
+        "muted": false,
+        "freq_low_hz": 80.0,
+        "freq_high_hz": 20000.0,
+        "azimuth_deg": -110.0,
+        "elevation_deg": 15.0,
+        "distance_m": 1.9
+      },
+      {
+        "id": "Surround right",
+        "index": 4,
+        "name": "Surround right",
+        "gain_db": -0.5,
+        "delay_ms": 3.45,
+        "muted": false,
+        "freq_low_hz": 80.0,
+        "freq_high_hz": 20000.0,
+        "azimuth_deg": 110.0,
+        "elevation_deg": 15.0,
+        "distance_m": 2.1
+      },
+      {
+        "id": "Subwoofer",
+        "index": 5,
+        "name": "Subwoofer",
+        "gain_db": -3.0,
+        "delay_ms": 0.0,
+        "muted": true,
+        "freq_low_hz": 20.0,
+        "freq_high_hz": 120.0,
+        "azimuth_deg": 25.0,
+        "elevation_deg": -20.0
+      }
+    ],
+    "unavailable_reason": null
+  },
+  "rows": [
+    {
+      "output_id": "Front left",
+      "take_folders": [],
+      "repeats": [],
+      "quality": [],
+      "qualified": null,
+      "reason": "two independent complete target captures are required",
+      "reason_code": {
+        "code": "not_measured_twice"
+      }
+    },
+    {
+      "output_id": "Front right",
+      "take_folders": [],
+      "repeats": [],
+      "quality": [],
+      "qualified": null,
+      "reason": "two independent complete target captures are required",
+      "reason_code": {
+        "code": "not_measured_twice"
+      }
+    },
+    {
+      "output_id": "Center",
+      "take_folders": [],
+      "repeats": [],
+      "quality": [],
+      "qualified": null,
+      "reason": "two independent complete target captures are required",
+      "reason_code": {
+        "code": "not_measured_twice"
+      }
+    },
+    {
+      "output_id": "Surround left",
+      "take_folders": [],
+      "repeats": [],
+      "quality": [],
+      "qualified": null,
+      "reason": "two independent complete target captures are required",
+      "reason_code": {
+        "code": "not_measured_twice"
+      }
+    },
+    {
+      "output_id": "Surround right",
+      "take_folders": [],
+      "repeats": [],
+      "quality": [],
+      "qualified": null,
+      "reason": "two independent complete target captures are required",
+      "reason_code": {
+        "code": "not_measured_twice"
+      }
+    }
+  ],
+  "pass_reports": [
+    {
+      "analyzed_speakers": 0,
+      "error": "Continuous batch capture is unavailable in this backend."
+    }
+  ],
+  "verification_pass_reports": null,
+  "blockers": [
+    "Continuous batch capture is unavailable in this backend."
+  ],
+  "blocker_codes": [
+    {
+      "code": "capture",
+      "detail": "Continuous batch capture is unavailable in this backend."
+    }
+  ],
+  "session": null,
+  "profile": null,
+  "applied_snapshot": null,
+  "restored_snapshot": null,
+  "verification_note": null,
+  "verification": null,
+  "application_uncertain": false,
+  "physical_levels_changed": false
+}

@@ -584,6 +584,31 @@ fn valid_sequence(p: &Progress, snapshot: &Snapshot) -> bool {
             == Ok(p.total_frames)
 }
 
+/// Whether two snapshots describe the same installation in the same state, whichever
+/// renderer process published them: the same outputs in the same order (identity, name,
+/// index, mute and band), sample rate, master gain, delay capacity, and gains and delays
+/// within float roundoff. The address it was reached at, the instance identity (new at
+/// every start) and the revision are not part of it, nor are layout positions, which
+/// describe panning rather than the acoustic path and are absent from older protocols.
+pub fn same_installation(a: &Snapshot, b: &Snapshot) -> bool {
+    a.sample_rate == b.sample_rate
+        && a.master_gain_db.to_bits() == b.master_gain_db.to_bits()
+        && a.max_delay_ms.to_bits() == b.max_delay_ms.to_bits()
+        && a.outputs.len() == b.outputs.len()
+        && a.outputs.iter().zip(&b.outputs).all(|(x, y)| {
+            x.id == y.id
+                && x.name == y.name
+                && x.index == y.index
+                && x.muted == y.muted
+                && x.freq_low_hz == y.freq_low_hz
+                && x.freq_high_hz == y.freq_high_hz
+                && x.gain_db.is_finite()
+                && x.delay_ms.is_finite()
+                && (x.gain_db - y.gain_db).abs() <= 0.0001
+                && (x.delay_ms - y.delay_ms).abs() <= 0.0001
+        })
+}
+
 /// Compare physical state while ignoring the revision assigned to its publication.
 /// Gain conversion through a float linear amplitude permits a tiny roundoff only.
 pub fn same_configuration(a: &Snapshot, b: &Snapshot) -> bool {
