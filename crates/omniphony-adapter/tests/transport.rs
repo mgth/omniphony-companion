@@ -668,6 +668,55 @@ fn a_version_5_renderer_keeps_positions_but_cannot_skip_the_output_gain() {
 }
 
 #[test]
+fn applying_settings_to_an_older_renderer_retries_in_its_version() {
+    // Apply opens a connection without discovering first: its first request
+    // meets the older renderer's refusal and is sent again in that version.
+    let (endpoint, handle) = server(|mut stream| {
+        let r = receive(&mut stream);
+        assert_eq!(r.version, VERSION);
+        assert!(matches!(r.command, Command::SetOutputs { .. }));
+        send_version(
+            &mut stream,
+            5,
+            r.request_id,
+            Reply::Error {
+                code: "unsupported_version".into(),
+                message: "unsupported measurement protocol version; this renderer answers versions 4 to 5".into(),
+            },
+        );
+        let r = receive(&mut stream);
+        assert_eq!(r.version, 5);
+        let Command::SetOutputs { settings, .. } = r.command else {
+            panic!("expected the same settings again")
+        };
+        let mut applied = snapshot();
+        applied.revision = "test:2".into();
+        applied.outputs[0].gain_db = settings[0].gain_db;
+        applied.outputs[0].delay_ms = settings[0].delay_ms;
+        send_version(
+            &mut stream,
+            5,
+            r.request_id,
+            Reply::Snapshot { snapshot: applied },
+        );
+    });
+    let mut client = Client::connect(endpoint, Duration::from_secs(1)).unwrap();
+    let applied = client
+        .set_outputs(
+            &snapshot(),
+            vec![OutputSetting {
+                output_id: "L".into(),
+                gain_db: -4.0,
+                delay_ms: 2.5,
+            }],
+        )
+        .unwrap();
+    assert_eq!(applied.revision, "test:2");
+    assert_eq!(client.protocol_version(), 5);
+    handle.join().unwrap();
+}
+
+#[test]
 fn a_version_refusal_outside_the_supported_range_poisons_the_connection() {
     let (endpoint, handle) = server(|mut stream| {
         let r = receive(&mut stream);
