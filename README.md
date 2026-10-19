@@ -93,14 +93,15 @@ The Rust/egui desktop window lets you:
   the measured ms/dB and the planned delay/gain, or the one-line reason when a
   speaker is excluded. Cards keep a fixed size and place; capture progress stays
   inside the active card.
-- Measure one speaker again into the alignment: while a session is not applied, a
-  card's **Measure** opens a choice between **Measure again into the session** (two
-  takes of that speaker, one per pass, in the same reference sequence and settings;
-  they replace its takes, the proposal is rebuilt and the session folder updated,
-  the other speakers keep theirs) and **One diagnostic take** (the plain take, as
-  before). The session choice refuses, with the reason, changed measurement settings
-  or a renderer whose settings moved since the session. **Stop** keeps the previous
-  takes.
+- Measure one speaker again into the alignment: when a session includes the
+  speaker, a card's **Measure** opens a choice between **Measure again into the
+  session** (two takes of that speaker, one per pass, in the same reference sequence
+  and settings; they replace its takes, the proposal is rebuilt and the session folder
+  updated, the other speakers keep theirs) and **One diagnostic take** (the plain
+  take, as before). The session choice is greyed, with the reason in its tooltip,
+  while the session is applied (undo it first), was measured on another renderer or
+  with other settings, or the renderer's settings moved since. **Stop** keeps the
+  previous takes.
 - See where each speaker is on the **room map**, a top view beside the cards (below
   them in a narrow window): the listener in the centre, front up, each
   speaker as a chip placed by its layout azimuth and distance, with the card's

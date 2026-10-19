@@ -994,6 +994,11 @@ impl Controller {
         if !a.rows.iter().any(|r| r.output_id == output_id) {
             return Err("This speaker is not part of the alignment.".into());
         }
+        if a.applied_snapshot.is_some() || a.application_uncertain {
+            return Err(
+                "Undo the applied alignment first: a speaker is measured again under the original settings.".into(),
+            );
+        }
         a.refreshable()?;
         if self.state.endpoint != Some(a.endpoint) {
             return Err("Connect to the renderer used for this alignment first.".into());

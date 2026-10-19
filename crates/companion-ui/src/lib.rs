@@ -1453,13 +1453,12 @@ impl CompanionApp {
                             );
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        // With an alignment that is not applied, Measure offers to measure
-                        // this speaker again into it; the diagnostic take stays a choice.
+                        // With an alignment that includes this speaker, Measure offers to
+                        // measure it again into the session (greyed with the reason when that
+                        // is not possible now); the diagnostic take stays a choice.
                         let session = !active
                             && self.controller.state.alignment.as_ref().is_some_and(|a| {
-                                a.applied_snapshot.is_none()
-                                    && !a.application_uncertain
-                                    && a.rows.iter().any(|r| r.output_id == output.id)
+                                a.rows.iter().any(|r| r.output_id == output.id)
                             });
                         let enabled = if active {
                             !self.controller.state.stopping
