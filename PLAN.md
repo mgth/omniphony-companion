@@ -280,3 +280,14 @@ profile. Current alignment proposals are retired before adjustments while keepin
 original digital restoration data. See `docs/manual-speaker-levels.md`.
 Installation validation, subwoofer matching and sensitivity-calibrated SPL remain
 future work.
+
+
+### Partial alignment proposals
+
+Independent speaker-quality failures now exclude only those speakers. The pure
+core requalifies the subset and checks its shared references; the service retains
+all rows and captures, proposes only eligible outputs and preserves excluded
+settings through application/restoration. Verification checks the fixed corrected
+subset. The UI reports membership and exclusion reasons explicitly. Complete
+original saved passes can update their proposal without replay or hardware writes;
+diagnostic-only reanalysis remains non-applicable.

@@ -182,19 +182,22 @@ never read or write personal settings. See [the application boundaries](docs/ui-
    reference. Keep the microphone at the listening position and the preamp gain fixed.
 2. Choose **Align levels and delays**. Each pass uses the shared-reference
    sequence. Progress remains in the active speaker row; Stop cancels the run.
-3. Inspect the **Alignment** tab below the speakers. Levels use equal log-frequency
+3. Inspect the alignment results directly in each speaker row. Levels use equal log-frequency
    power weighting over 500–2000 Hz, including the room response. They are transfer
    dB, not sweep RMS, calibrated SPL or microphone-corrected levels.
-4. A proposal requires all selected speakers to pass acquisition/arrival checks,
+4. Each included speaker must pass acquisition/arrival checks,
    15 dB excited-band acquisition SNR, 20 dB integrated estimated SNR over the
    complete level band, at most 0.15 ms arrival variation and
    0.50 dB level variation between independent target captures, and stable reference
    levels. These are prototype gates, not certified accuracy. Ambiguous speakers
-   remain unresolved; they are never silently omitted.
+   remain visible with an exclusion reason. A proposal uses the qualified subset
+   when at least two speakers qualify; excluded gains and delays stay unchanged.
+   Use **Update correction proposal** for complete original saved passes created
+   by an older build. Shared-reference or session failures still block application.
 5. **Apply gains and delays** changes live absolute settings. Existing gains and
    delays are included; the policy attenuates louder speakers and delays earlier
    arrivals. Application requires the unchanged renderer snapshot.
-6. **Verify · 2 passes** measures again and reports before/after arrival and level
+6. **Verify · 2 passes** measures the corrected subset again and reports before/after arrival and level
    spread. A failed or unresolved verification is not success. **Restore original
    settings** restores the baseline only if the renderer has not changed meanwhile.
 7. Save in Studio after a satisfactory result if you want persistent renderer
@@ -388,8 +391,8 @@ low-SNR, clipped and legacy ambiguity cases; a missing target does not receive a
 invented delay. Original rejection reasons remain visible. Interrupted, faulty or
 mismatched takes cannot be promoted by reanalysis.
 
-For a saved two-pass alignment, choose **Reanalyze saved passes** in the Alignment
-tab, or run:
+For a saved two-pass alignment, choose **Reanalyze saved passes** in the session
+controls above the speaker list, or run:
 
 ```sh
 cargo run --locked -p companion-cli -- capture review-alignment --session sessions/example-alignment

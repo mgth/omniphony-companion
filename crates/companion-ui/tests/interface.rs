@@ -803,7 +803,12 @@ fn alignment_session_stays_above_individual_results_and_unqualified_actions_stay
         click(&mut app, &ctx, details.center(), size);
         find_speaker_text(&mut app, &ctx, size, "Baseline pass 1 / 2: stopped");
         find_speaker_text(&mut app, &ctx, size, "Baseline pass 2 / 2: not started");
-        find_speaker_text(&mut app, &ctx, size, "No correction proposal");
+        find_speaker_text(
+            &mut app,
+            &ctx,
+            size,
+            "Correction proposal blocked by session issues",
+        );
         let apply = find_speaker_text(&mut app, &ctx, size, "Apply gains and delays");
         click(&mut app, &ctx, apply.center(), size);
         assert!(!app.controller.busy());
@@ -866,7 +871,7 @@ fn alignment_estimates_and_targets_stay_in_the_speaker_rows_while_individual_res
                 }
             } else {
                 for value in [
-                    "Diagnostic · not qualified",
+                    "Excluded from correction",
                     "Weak target signal · diagnostic estimate only",
                     "Long delay:",
                 ] {
@@ -1671,4 +1676,54 @@ fn manual_level_panel_saves_a_fresh_reference_shows_direction_and_stops() {
     assert!(app.controller.state.stopping);
     assert!(!app.controller.can_set_manual_reference(-30.0));
     assert_eq!(starts.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn partial_alignment_names_exclusions_and_displays_only_eligible_targets() {
+    use companion_service::alignment::Row;
+    for size in [Vec2::new(850.0, 640.0), Vec2::new(1160.0, 800.0)] {
+        let ctx = egui::Context::default();
+        let (mut controller, starts) = support::ready();
+        let mut alignment = support::alignment(&controller, true);
+        alignment.rows.push(Row {
+            output_id: "Center".into(),
+            take_folders: vec![],
+            repeats: vec![],
+            quality: vec![],
+            qualified: None,
+            reason: Some(
+                "invalid calibration data: invalid calibration data: clipped recording".into(),
+            ),
+        });
+        controller.state.alignment = Some(alignment);
+        let mut app = CompanionApp::preview(&ctx, controller);
+        for _ in 0..3 {
+            frame(&mut app, &ctx, vec![], size);
+        }
+        find_speaker_text(
+            &mut app,
+            &ctx,
+            size,
+            "Correction proposal ready for 2 / 3 speakers · 1 excluded",
+        );
+        find_speaker_text(&mut app, &ctx, size, "Center: clipped recording");
+        find_speaker_text(&mut app, &ctx, size, "Gain: before → target");
+        find_speaker_text(
+            &mut app,
+            &ctx,
+            size,
+            "Excluded: clipped recording · gain and delay unchanged",
+        );
+        let alignment = app.controller.state.alignment.as_mut().unwrap();
+        alignment.profile = None;
+        alignment.blockers.clear();
+        find_speaker_text(
+            &mut app,
+            &ctx,
+            size,
+            "2 / 3 speakers qualify · update the proposal from saved passes",
+        );
+        find_speaker_text(&mut app, &ctx, size, "Update correction proposal");
+        assert_eq!(starts.load(Ordering::Relaxed), 0);
+    }
 }

@@ -14,20 +14,79 @@ pub fn session(ui: &mut egui::Ui, a: &Alignment, busy: bool) -> Option<&'static 
         .small()
         .color(super::MUTED),
     );
+    let included = a
+        .profile
+        .as_ref()
+        .map_or(0, |p| p.target_snapshot.speakers.len());
+    let excluded = a.rows.iter().filter(|r| r.qualified.is_none()).count();
     if a.physical_levels_changed {
         ui.colored_label(super::WARM, "Physical levels may have changed · measure a new alignment. Original digital settings can still be restored.");
     }
     if a.application_uncertain {
         ui.colored_label(super::RED, "Application outcome is uncertain. Inspect Omniphony and the saved original settings before further changes.");
-    } else if a.physical_levels_changed {
-        // The explicit stale-state message above replaces proposal readiness.
-    } else if a.profile.is_none() {
-        ui.colored_label(super::WARM, "No correction proposal. Speaker gains and delays have not been changed by this session.");
-    } else if a.applied_snapshot.is_none() {
-        ui.colored_label(
-            super::ACCENT,
-            "Correction proposal ready · inspect the targets in each speaker row",
-        );
+    } else if !a.physical_levels_changed {
+        if a.profile.is_some() {
+            ui.colored_label(
+                super::ACCENT,
+                format!(
+                    "{} for {} / {} speakers · {} excluded",
+                    if a.applied_snapshot.is_some() {
+                        "Corrections applied"
+                    } else {
+                        "Correction proposal ready"
+                    },
+                    included,
+                    a.rows.len(),
+                    excluded
+                ),
+            );
+            ui.label("Only included speakers receive targets. Excluded speaker gains and delays stay unchanged.");
+        } else if !a.blockers.is_empty() {
+            ui.colored_label(
+                super::WARM,
+                "Correction proposal blocked by session issues:",
+            );
+            for reason in &a.blockers {
+                ui.colored_label(super::WARM, readable_reason(reason));
+            }
+        } else if a.qualified_count() >= 2 {
+            ui.colored_label(
+                super::WARM,
+                format!(
+                    "{} / {} speakers qualify · update the proposal from saved passes",
+                    a.qualified_count(),
+                    a.rows.len()
+                ),
+            );
+        } else {
+            ui.colored_label(
+                super::WARM,
+                format!(
+                    "{} / {} speakers qualify · at least two are needed for relative correction",
+                    a.qualified_count(),
+                    a.rows.len()
+                ),
+            );
+        }
+    }
+    if excluded > 0 {
+        egui::CollapsingHeader::new(format!("Excluded speakers ({}) · unchanged", excluded))
+            .default_open(true)
+            .show(ui, |ui| {
+                for row in a.rows.iter().filter(|r| r.qualified.is_none()) {
+                    ui.colored_label(
+                        super::WARM,
+                        format!(
+                            "{}: {}",
+                            row.output_id,
+                            row.reason
+                                .as_deref()
+                                .map(readable_reason)
+                                .unwrap_or("Two qualified independent captures are required.")
+                        ),
+                    );
+                }
+            });
     }
     if !a.blockers.is_empty() {
         ui.colored_label(
@@ -43,6 +102,12 @@ pub fn session(ui: &mut egui::Ui, a: &Alignment, busy: bool) -> Option<&'static 
         if ui.add_enabled(!busy && a.applied_snapshot.is_none() && !a.application_uncertain, egui::Button::new("Reanalyze saved passes"))
             .on_hover_text("Recompute diagnostic results and quality from the original audio. Creates a separate report; no playback or correction.").clicked() {
             action = Some("reanalyze");
+        }
+        if ui.add_enabled(!busy && a.profile.is_none() && a.blockers.is_empty() && !a.physical_levels_changed
+            && a.applied_snapshot.is_none() && !a.application_uncertain && a.qualified_count() >= 2,
+            egui::Button::new("Update correction proposal"))
+            .on_hover_text("Requalify the original saved passes and propose targets for eligible speakers only. No playback or settings changes.").clicked() {
+            action = Some("proposal");
         }
         let ready = !busy && !a.application_uncertain && a.profile.is_some();
         if ui
@@ -79,7 +144,7 @@ pub fn session(ui: &mut egui::Ui, a: &Alignment, busy: bool) -> Option<&'static 
         ui.label(format!("Position: {} · Microphone: {} · Reference: {}", a.settings.position_id, a.settings.microphone_id, a.settings.reference_output.as_deref().unwrap_or("—")));
         pass_summary(ui, "Baseline", a.pass_reports.as_deref(), a.rows.len());
         if let Some(passes) = &a.verification_pass_reports {
-            pass_summary(ui, "Verification", Some(passes), a.rows.len());
+            pass_summary(ui, "Verification", Some(passes), included);
         }
         for reason in &a.blockers { ui.colored_label(super::RED, reason); }
         ui.label("Targets include existing output settings. Earlier speakers receive delay; louder speakers are attenuated. Levels are relative transfer dB, not SPL.");
@@ -157,7 +222,7 @@ pub fn speaker(ui: &mut egui::Ui, a: &Alignment, row: &Row, older: bool) {
             RichText::new(if row.qualified.is_some() {
                 "Repeatable"
             } else {
-                "Diagnostic · not qualified"
+                "Excluded from correction"
             })
             .small()
             .color(if row.qualified.is_some() {
@@ -247,8 +312,21 @@ pub fn speaker(ui: &mut egui::Ui, a: &Alignment, row: &Row, older: bool) {
         ui.colored_label(super::WARM, warning);
     }
     if let Some(reason) = &row.reason {
-        ui.colored_label(super::WARM, reason);
+        ui.colored_label(
+            super::WARM,
+            format!(
+                "Excluded: {} · gain and delay unchanged",
+                readable_reason(reason)
+            ),
+        );
     }
+}
+
+fn readable_reason(mut reason: &str) -> &str {
+    while let Some(trimmed) = reason.strip_prefix("invalid calibration data: ") {
+        reason = trimmed;
+    }
+    reason
 }
 
 fn metric(ui: &mut egui::Ui, label: &str, value: String) {

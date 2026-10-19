@@ -11,7 +11,10 @@ A fixed microphone and reference speaker are used for two complete independent
 passes. Each pass preserves the existing reference–target–reference sequence and
 its raw captures. Selected speakers must support broadband timing and the common
 500–2000 Hz level band. Muted, unwired or incompatible speakers should be excluded
-before starting; unresolved selected speakers block the whole proposal.
+before starting. Unresolved selected speakers remain in the report with an explicit
+exclusion reason. The proposal uses the qualified subset when at least two speakers
+qualify; excluded gains and delays are unchanged. Shared-reference inconsistency,
+cancellation or session-wide acquisition failure still blocks the proposal.
 
 The level estimate uses the unnormalized, regularized transfer response, sampled
 on the same 25-point logarithmic grid for every segment. Magnitude in dB is
@@ -56,7 +59,7 @@ incorrect acknowledgement cannot be presented as success or automatically retrie
 A confirmed state is saved atomically. Reapplying/restoring is idempotent, and
 restoration refuses intervening edits rather than overwriting them.
 
-Verification captures two fresh passes using the saved acquisition settings and
+Verification captures two fresh passes of the fixed corrected subset using the saved acquisition settings and
 applied snapshot. It compares measured spread with the baseline at the same
 position, using prototype 0.10 ms / 0.50 dB tolerances. Predicted correction alone
 cannot pass verification. Incomplete or ambiguous verification clears any previous
@@ -102,3 +105,26 @@ and band evidence; apply only a qualified proposal; run verification; compare th
 new measured spreads and test restoration. Keep levels comfortable. Increasing
 volume is not a remedy for ambiguous arrival timing. Longer bass windows,
 microphone calibration, multipoint EQ and subwoofer integration remain deferred.
+
+
+## Partial proposals and existing sessions
+
+The session summary reports how many speakers have targets and how many are
+excluded. It lists exclusion reasons; the same reason is visible in each excluded
+speaker row. Excluded observations do not determine the latest arrival, quietest
+level, or shared-reference consistency of the eligible subset. The two-capture,
+SNR, clipping and repeatability thresholds are unchanged. At least two speakers
+must qualify, even when the timing-reference speaker itself has no correction
+target; remaining captures must still contain valid reference bursts.
+
+Applying and restoring send only the included outputs. Full renderer readback
+still checks that every other output is unchanged. Verification keeps this exact
+membership and requires new evidence for every corrected output; it cannot claim
+success for a smaller surviving subset.
+
+For complete original saved sessions from the former all-or-nothing workflow,
+**Update correction proposal** revalidates the saved independent estimates and
+builds eligible targets without playback or renderer writes. It updates only
+`alignment-state.json`; the original plan, captures and rejection reasons remain
+available. Applied/uncertain profiles, physical-volume changes, incomplete passes,
+simulated data and diagnostic-only reanalyses cannot be promoted by this action.

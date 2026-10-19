@@ -149,3 +149,74 @@ mod tests {
         }
     }
 }
+
+/// Per-speaker failures do not invalidate independent, qualified neighbours.
+/// Shared reference consistency is checked only on the retained evidence.
+#[derive(Debug)]
+pub struct QualifiedSubset {
+    pub rows: Vec<std::result::Result<QualifiedEstimate, String>>,
+    pub blockers: Vec<String>,
+}
+pub fn qualify_subset<'a>(
+    repeats: impl IntoIterator<Item = &'a [RepeatEstimate]>,
+) -> QualifiedSubset {
+    let mut rows = Vec::new();
+    let mut references = Vec::new();
+    for repeats in repeats {
+        let qualified = qualify(repeats).map_err(|e| e.to_string());
+        if qualified.is_ok() {
+            references.extend(repeats.iter().filter_map(|r| r.reference_level_db));
+        }
+        rows.push(qualified);
+    }
+    let count = rows.iter().filter(|r| r.is_ok()).count();
+    let mut blockers = Vec::new();
+    if count < 2 {
+        blockers.push(format!(
+            "Only {count} speaker(s) qualify; relative correction requires at least two."
+        ));
+    }
+    if !references.is_empty()
+        && references.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+            - references.iter().copied().fold(f64::INFINITY, f64::min)
+            > 0.5
+    {
+        blockers.push("Reference level changed across qualified speakers; keep microphone and input gain fixed.".into());
+    }
+    QualifiedSubset { rows, blockers }
+}
+
+#[cfg(test)]
+mod subset_tests {
+    use super::*;
+    fn pair(reference: f64) -> Vec<RepeatEstimate> {
+        vec![
+            RepeatEstimate {
+                arrival_ms: Some(0.0),
+                level_db: Some(-6.0),
+                minimum_snr_db: Some(30.0),
+                reference_level_db: Some(reference),
+                reasons: vec![]
+            };
+            2
+        ]
+    }
+    #[test]
+    fn excludes_independent_failures_without_weakening_shared_reference_checks() {
+        let good = pair(-5.0);
+        let mut weak = pair(-80.0);
+        weak[1].minimum_snr_db = Some(18.5);
+        let mut clipped = pair(0.0);
+        clipped[0].reasons.push("clipped recording".into());
+        let selection = qualify_subset([good.as_slice(), &weak, &good, &clipped]);
+        assert!(selection.blockers.is_empty());
+        assert!(selection.rows[0].is_ok() && selection.rows[2].is_ok());
+        assert!(selection.rows[1].as_ref().unwrap_err().contains("18.5"));
+        assert!(selection.rows[3].as_ref().unwrap_err().contains("clipped"));
+        assert!(qualify_subset([good.as_slice(), &weak]).blockers[0].contains("at least two"));
+        assert!(
+            qualify_subset([good.as_slice(), &pair(-4.0)]).blockers[0]
+                .contains("Reference level changed")
+        );
+    }
+}
