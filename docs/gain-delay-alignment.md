@@ -43,8 +43,18 @@ observations. Simulated/imported sessions cannot enter this live workflow.
 
 ## Application and verification
 
-Targets are absolute: add only the new timing difference to existing delay and
-attenuate louder speakers to the quietest selected speaker. The service retains
+Targets are absolute: add only the new timing difference to the delay the speakers
+were measured with and attenuate louder speakers to the quietest selected speaker.
+An alignment measured **from zero** sets the measured outputs and the reference to
+0 dB and 0 ms with `set_outputs` before the passes (the renderer must read them
+back, or nothing is measured) and puts the previous settings back after them,
+stopped or failed included; the session keeps that zeroed state as
+`zeroed_snapshot`, the state its takes, retakes and re-measures are read under, and
+`snapshot` stays the settings from before, which Original and Undo restore. Its
+targets are therefore independent of the settings it found. A **refining**
+alignment measures through the current settings and corrects on top of them; it may
+start while another alignment is applied, taking its corrections as the settings to
+restore. The service retains
 both the full renderer snapshot and the selected-output core profile. Other
 outputs remain unchanged. Core policy bounds and renderer limits are both checked.
 

@@ -125,6 +125,21 @@ pub struct Alignment {
     /// the restoration after it. Reanalysis accepts takes from these states only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub retake_snapshots: Vec<Snapshot>,
+    /// Measured from zero: the renderer state the passes were captured under, with the
+    /// measured outputs at 0 dB and 0 ms. `snapshot` stays the settings from before, which
+    /// the outputs went back to after the passes and which Undo restores. Absent when the
+    /// passes refined the settings `snapshot` holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zeroed_snapshot: Option<Snapshot>,
+}
+/// How an alignment treats the gains and delays the renderer has when it starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Basis {
+    /// Set the measured outputs to 0 dB and 0 ms for the passes, then put them back: the
+    /// proposal is absolute, the quietest speaker at 0 dB and the latest at 0 ms.
+    FromZero,
+    /// Measure through the current gains and delays and correct on top of them.
+    Refine,
 }
 #[derive(Debug, Clone)]
 pub struct Outcome {
@@ -257,6 +272,7 @@ pub fn capture<B: Backend + ?Sized>(
     request: MeasureRequest,
     settings: Settings,
     outputs: Vec<String>,
+    basis: Basis,
     cancel: &AtomicBool,
     progress: &mut dyn FnMut(usize, usize, MeasureProgress),
 ) -> Result<Outcome, String> {
@@ -301,6 +317,7 @@ pub fn capture<B: Backend + ?Sized>(
         application_uncertain: false,
         physical_levels_changed: false,
         retake_snapshots: vec![],
+        zeroed_snapshot: None,
     };
     let mut takes = vec![];
     // Preserve one calibration file for both passes, even if its source is edited.
@@ -317,6 +334,26 @@ pub fn capture<B: Backend + ?Sized>(
     let mut retakes = vec![];
     // A retake leaves the renderer in the original configuration under a newer revision.
     let mut current = request.snapshot.clone();
+    if basis == Basis::FromZero {
+        // The reference speaker plays in every take: it is measured from zero too.
+        let mut ids = outputs.clone();
+        if let Some(reference) = &alignment.settings.reference_output
+            && !ids.contains(reference)
+        {
+            ids.push(reference.clone());
+        }
+        current = move_outputs(backend, request.endpoint, &current, &zeroed(&current, &ids))
+            .map_err(|error| {
+                // A write that went through and reads back wrong is undone.
+                if let Ok(live) = backend.discover(request.endpoint)
+                    && !omniphony_adapter::same_installation(&live, &request.snapshot)
+                {
+                    let _ = move_outputs(backend, request.endpoint, &live, &request.snapshot);
+                }
+                format!("Setting the measured speakers to 0 dB and 0 ms failed ({error}); nothing was measured. Check their gains and delays in Studio.")
+            })?;
+        alignment.zeroed_snapshot = Some(current.clone());
+    }
     for pass in 0..2 {
         if cancel.load(Ordering::Relaxed) {
             alignment.block(Blocker::Cancelled);
@@ -388,6 +425,10 @@ pub fn capture<B: Backend + ?Sized>(
             break;
         }
     }
+    // Stopped or failed, the outputs go back to their settings all the same.
+    if let Err(detail) = put_back(backend, &mut alignment, &current) {
+        alignment.block(Blocker::Capture { detail });
+    }
     if cancel.load(Ordering::Relaxed) {
         alignment.block(Blocker::Cancelled);
     }
@@ -399,6 +440,69 @@ pub fn capture<B: Backend + ?Sized>(
         takes,
         retakes,
     })
+}
+
+/// `snapshot` with the outputs `ids` at 0 dB and 0 ms.
+fn zeroed(snapshot: &Snapshot, ids: &[String]) -> Snapshot {
+    let mut zeroed = snapshot.clone();
+    for output in zeroed.outputs.iter_mut().filter(|o| ids.contains(&o.id)) {
+        output.gain_db = 0.0;
+        output.delay_ms = 0.0;
+    }
+    zeroed
+}
+
+/// Give the outputs of the renderer, found in `current`, the gains and delays they have
+/// in `target`; only the outputs that differ are written. The renderer must read back
+/// `target`.
+fn move_outputs<B: Backend + ?Sized>(
+    backend: &B,
+    endpoint: SocketAddr,
+    current: &Snapshot,
+    target: &Snapshot,
+) -> Result<Snapshot, String> {
+    let settings: Vec<_> = target
+        .outputs
+        .iter()
+        .filter(|t| {
+            current
+                .outputs
+                .iter()
+                .any(|c| c.id == t.id && (c.gain_db != t.gain_db || c.delay_ms != t.delay_ms))
+        })
+        .map(|t| OutputSetting {
+            output_id: t.id.clone(),
+            gain_db: t.gain_db,
+            delay_ms: t.delay_ms,
+        })
+        .collect();
+    if settings.is_empty() {
+        return Ok(current.clone());
+    }
+    let live = backend.set_outputs(endpoint, current.clone(), settings)?;
+    if !omniphony_adapter::same_installation(&live, target) {
+        return Err("the renderer reads back other gains and delays".into());
+    }
+    Ok(live)
+}
+
+/// After passes measured from zero, give the outputs, found in `current`, their settings
+/// from before the passes again. Nothing to do when the passes refined them.
+fn put_back<B: Backend + ?Sized>(
+    backend: &B,
+    a: &mut Alignment,
+    current: &Snapshot,
+) -> Result<(), String> {
+    if a.zeroed_snapshot.is_none() {
+        return Ok(());
+    }
+    let restored = move_outputs(backend, a.endpoint, current, &a.snapshot).map_err(|error| {
+        format!("The measured speakers were set to 0 dB and 0 ms and could not be put back ({error}); set their gains and delays back in Studio before measuring again.")
+    })?;
+    if restored.revision != a.snapshot.revision {
+        a.restored_snapshot = Some(restored);
+    }
+    Ok(())
 }
 
 /// Measure again, in the same pass, the speakers a retake can fix, and keep those takes:
@@ -526,10 +630,13 @@ fn retake<B: Backend + ?Sized>(
     });
     if !lowering.is_empty() {
         match backend.set_outputs(a.endpoint, renderer.clone(), restoring) {
-            Ok(restored) if omniphony_adapter::same_installation(&restored, &a.snapshot) => {
+            Ok(restored) if omniphony_adapter::same_installation(&restored, a.measured_state()) => {
                 a.retake_snapshots.push(restored.clone());
                 *current = restored.clone();
-                a.restored_snapshot = Some(restored);
+                // Measured from zero, the original settings come back after the passes.
+                if a.zeroed_snapshot.is_none() {
+                    a.restored_snapshot = Some(restored);
+                }
             }
             restored => {
                 let lowered: Vec<_> = lowering.iter().map(|s| s.output_id.as_str()).collect();
@@ -614,17 +721,16 @@ fn references_pass(take: &TakeOutcome) -> bool {
 }
 
 /// How far `output_id`'s gain was lowered in the renderer state a take was captured
-/// under: zero in the alignment's own installation state (whichever process or port
+/// under: zero in the state the alignment measured under (whichever process or port
 /// published it) or after a retake's restoration, the retake's offset in its lowered
 /// state. None for a state the alignment did not record.
 fn gain_offset(a: &Alignment, take: &Snapshot, output_id: &str) -> Option<f64> {
-    if !omniphony_adapter::same_installation(take, &a.snapshot)
-        && !a.retake_snapshots.contains(take)
-    {
+    let measured = a.measured_state();
+    if !omniphony_adapter::same_installation(take, measured) && !a.retake_snapshots.contains(take) {
         return None;
     }
     let gain = |s: &Snapshot| Some(s.outputs.iter().find(|o| o.id == output_id)?.gain_db);
-    Some(((gain(&a.snapshot)? - gain(take)?) as f64).max(0.0))
+    Some(((gain(measured)? - gain(take)?) as f64).max(0.0))
 }
 
 /// Measure one speaker of a saved alignment again and replace its two repeats: one take
@@ -676,6 +782,12 @@ pub fn remeasure<B: Backend + ?Sized>(
         .map(|_| a.directory.join("microphone-calibration.txt"));
     let mut updated = a.clone();
     let mut current = live;
+    // Measured from zero: the speaker is measured again in the state the passes were.
+    if let Some(zeroed) = &a.zeroed_snapshot {
+        current = move_outputs(backend, a.endpoint, &current, zeroed).map_err(|error| {
+            format!("Setting the measured speakers to 0 dB and 0 ms failed ({error}); nothing was measured. Check their gains and delays in Studio.")
+        })?;
+    }
     let outputs = vec![output_id.to_owned()];
     let stamp = stamp();
     let mut takes = vec![];
@@ -734,13 +846,19 @@ pub fn remeasure<B: Backend + ?Sized>(
                 });
             }
         }
+        Ok(())
+    };
+    let measured = passes();
+    // Stopped or failed, the outputs go back to their settings all the same.
+    let restored = put_back(backend, &mut updated, &current);
+    let result = measured.and(restored).and_then(|()| {
         build_proposal(&mut updated);
         if updated.profile.is_some() {
             updated.validate_evidence()?;
         }
         save(&updated)
-    };
-    match passes() {
+    });
+    match result {
         Ok(()) => {
             *a = updated.clone();
             Ok(Outcome {
@@ -750,7 +868,9 @@ pub fn remeasure<B: Backend + ?Sized>(
             })
         }
         Err(error) => {
-            if updated.retake_snapshots.len() != a.retake_snapshots.len() {
+            if updated.retake_snapshots.len() != a.retake_snapshots.len()
+                || updated.restored_snapshot != a.restored_snapshot
+            {
                 a.retake_snapshots = updated.retake_snapshots;
                 a.restored_snapshot = updated.restored_snapshot;
                 save(a)?;
@@ -984,8 +1104,9 @@ fn make_session(a: &Alignment) -> Result<core::Session, String> {
     let mut observations = vec![];
     for row in a.rows.iter().filter(|r| r.included()) {
         let q = row.qualified.as_ref().ok_or("unqualified speaker")?;
+        // The settings the speaker was measured with: zero when measured from zero.
         let output = a
-            .snapshot
+            .measured_state()
             .outputs
             .iter()
             .find(|o| o.id == row.output_id)
@@ -1244,20 +1365,46 @@ impl Alignment {
         let profile = self.profile.as_ref().ok_or("No qualified proposal.")?;
         // Recompute rather than trusting edited/deserialized target values.
         core::settings_for_apply(session, profile, &profile.base_snapshot).map_err(err)?;
-        let snapshot = if restore {
-            &profile.base_snapshot
-        } else {
-            &profile.target_snapshot
-        };
-        Ok(snapshot
+        profile
+            .target_snapshot
             .speakers
             .iter()
-            .map(|s| OutputSetting {
-                output_id: s.id.clone(),
-                gain_db: s.settings.gain_db as f32,
-                delay_ms: s.settings.delay_ms as f32,
+            .map(|s| {
+                // Restored to the settings from before the alignment, which a proposal
+                // measured from zero does not start from.
+                if restore {
+                    let output = self
+                        .snapshot
+                        .outputs
+                        .iter()
+                        .find(|o| o.id == s.id)
+                        .ok_or("unknown target")?;
+                    Ok(OutputSetting {
+                        output_id: s.id.clone(),
+                        gain_db: output.gain_db,
+                        delay_ms: output.delay_ms,
+                    })
+                } else {
+                    Ok(OutputSetting {
+                        output_id: s.id.clone(),
+                        gain_db: s.settings.gain_db as f32,
+                        delay_ms: s.settings.delay_ms as f32,
+                    })
+                }
             })
-            .collect())
+            .collect()
+    }
+    /// The renderer state the passes were captured under: `snapshot`, or the measured
+    /// outputs at zero when the alignment measured from zero.
+    pub fn measured_state(&self) -> &Snapshot {
+        self.zeroed_snapshot.as_ref().unwrap_or(&self.snapshot)
+    }
+    pub fn basis(&self) -> Basis {
+        if self.zeroed_snapshot.is_some() {
+            Basis::FromZero
+        } else {
+            Basis::Refine
+        }
     }
     pub fn expected_target(&self) -> Result<Snapshot, String> {
         let mut snapshot = self.snapshot.clone();
@@ -1483,6 +1630,7 @@ pub fn verify<B: Backend + ?Sized>(
             ..a.settings.clone()
         },
         outputs,
+        Basis::Refine,
         cancel,
         progress,
     )?;

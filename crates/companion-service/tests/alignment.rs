@@ -248,6 +248,13 @@ impl Backend for Rig {
     }
 }
 fn acquire(rig: &Rig, root: &std::path::Path) -> alignment::Alignment {
+    acquire_with(rig, root, alignment::Basis::Refine)
+}
+fn acquire_with(
+    rig: &Rig,
+    root: &std::path::Path,
+    basis: alignment::Basis,
+) -> alignment::Alignment {
     let settings = Settings {
         device: Some("test microphone".into()),
         reference_output: Some("L".into()),
@@ -271,6 +278,7 @@ fn acquire(rig: &Rig, root: &std::path::Path) -> alignment::Alignment {
         request,
         settings,
         vec!["L".into(), "R".into()],
+        basis,
         &AtomicBool::new(false),
         &mut |_, _, _| {},
     )
@@ -613,6 +621,7 @@ fn reason_codes_round_trip_and_text_only_sessions_still_load() {
         request,
         settings,
         vec!["L".into(), "R".into(), "Unused".into(), "Clipped".into()],
+        alignment::Basis::Refine,
         &AtomicBool::new(false),
         &mut |_, _, _| {},
     )
@@ -701,6 +710,14 @@ fn loud_rig(over_db: f64) -> (Rig, f64) {
     (rig, 20.0 * factor.log10())
 }
 fn capture_loud(rig: &Rig, root: &std::path::Path, retake_clipped: bool) -> alignment::Outcome {
+    capture_loud_with(rig, root, retake_clipped, alignment::Basis::Refine)
+}
+fn capture_loud_with(
+    rig: &Rig,
+    root: &std::path::Path,
+    retake_clipped: bool,
+    basis: alignment::Basis,
+) -> alignment::Outcome {
     let settings = Settings {
         device: Some("test microphone".into()),
         reference_output: Some("L".into()),
@@ -724,6 +741,7 @@ fn capture_loud(rig: &Rig, root: &std::path::Path, retake_clipped: bool) -> alig
         request,
         settings,
         vec!["L".into(), "R".into(), "Loud".into()],
+        basis,
         &AtomicBool::new(false),
         &mut |_, _, _| {},
     )
@@ -846,6 +864,7 @@ fn capture_pair(rig: &Rig, root: &std::path::Path) -> alignment::Outcome {
         request,
         settings,
         vec!["L".into(), "R".into()],
+        alignment::Basis::Refine,
         &AtomicBool::new(false),
         &mut |_, _, _| {},
     )
@@ -1082,6 +1101,7 @@ fn partial_proposal_preserves_excluded_outputs_through_apply_verify_reload_and_r
         request,
         settings,
         vec!["L".into(), "R".into(), "Unused".into(), "Clipped".into()],
+        alignment::Basis::Refine,
         &AtomicBool::new(false),
         &mut |_, _, _| {},
     )
@@ -1565,4 +1585,256 @@ fn corrections_studio_republished_rounded_still_read_as_applied() {
         a.live_state(&rig.snapshot.lock().unwrap()),
         alignment::LiveState::Applied
     );
+}
+
+/// The rig with L at -2 dB / 1 ms and R at -5 dB / 4 ms, as an earlier alignment or a
+/// hand edit leaves them.
+fn adjusted_rig() -> Rig {
+    let rig = Rig::new();
+    for (id, gain_db, delay_ms) in [("L", -2.0, 1.0), ("R", -5.0, 4.0)] {
+        let mut state = rig.snapshot.lock().unwrap();
+        let output = state.outputs.iter_mut().find(|o| o.id == id).unwrap();
+        output.gain_db = gain_db;
+        output.delay_ms = delay_ms;
+    }
+    rig
+}
+fn settings_of(snapshot: &Snapshot, id: &str) -> (f32, f32) {
+    let output = snapshot.outputs.iter().find(|o| o.id == id).unwrap();
+    (output.gain_db, output.delay_ms)
+}
+fn target_of(a: &alignment::Alignment, id: &str) -> (f32, f32) {
+    let target = a.targets(false).unwrap();
+    let setting = target.iter().find(|s| s.output_id == id).unwrap();
+    (setting.gain_db, setting.delay_ms)
+}
+fn close(actual: (f32, f32), expected: (f32, f32)) -> bool {
+    (actual.0 - expected.0).abs() < 0.05 && (actual.1 - expected.1).abs() < 0.05
+}
+
+#[test]
+fn refining_corrects_on_top_of_the_current_settings() {
+    let root = tempfile::tempdir().unwrap();
+    let rig = adjusted_rig();
+    let a = acquire_with(&rig, root.path(), alignment::Basis::Refine);
+    assert_eq!(a.basis(), alignment::Basis::Refine);
+    assert!(a.zeroed_snapshot.is_none());
+    // L is 6 dB louder and 3 ms earlier than R from zero; the current settings add
+    // 3 dB and 3 ms to that, and the targets keep them.
+    assert!(
+        close(target_of(&a, "L"), (-11.02, 7.0)),
+        "{:?}",
+        target_of(&a, "L")
+    );
+    assert!(
+        close(target_of(&a, "R"), (-5.0, 4.0)),
+        "{:?}",
+        target_of(&a, "R")
+    );
+}
+
+#[test]
+fn measuring_from_zero_proposes_absolute_settings_and_puts_the_old_ones_back() {
+    let root = tempfile::tempdir().unwrap();
+    let rig = adjusted_rig();
+    let endpoint = "127.0.0.1:9000".parse().unwrap();
+    let before = rig.discover(endpoint).unwrap();
+    let mut a = acquire_with(&rig, root.path(), alignment::Basis::FromZero);
+    assert!(a.blockers.is_empty(), "{:?}", a.blockers);
+    assert_eq!(a.basis(), alignment::Basis::FromZero);
+    let zeroed = a.zeroed_snapshot.clone().unwrap();
+    assert_eq!(settings_of(&zeroed, "L"), (0.0, 0.0));
+    assert_eq!(settings_of(&zeroed, "R"), (0.0, 0.0));
+    // The unmeasured output is left alone, even while the speakers are measured.
+    assert_eq!(
+        settings_of(&zeroed, "Unused"),
+        settings_of(&before, "Unused")
+    );
+    // The same targets as a rig that really starts at zero: none of the old settings.
+    assert!(
+        close(target_of(&a, "L"), (-6.02, 3.0)),
+        "{:?}",
+        target_of(&a, "L")
+    );
+    assert!(
+        close(target_of(&a, "R"), (0.0, 0.0)),
+        "{:?}",
+        target_of(&a, "R")
+    );
+    // The passes over, the renderer has its settings back, and the session says so.
+    let live = rig.discover(endpoint).unwrap();
+    assert_eq!(settings_of(&live, "L"), (-2.0, 1.0));
+    assert_eq!(settings_of(&live, "R"), (-5.0, 4.0));
+    assert_eq!(a.live_state(&live), alignment::LiveState::Original);
+    // Apply sets the absolute targets; Undo goes back to the old settings, not to zero.
+    alignment::apply(&rig, &mut a, false).unwrap();
+    let live = rig.discover(endpoint).unwrap();
+    assert!(close(settings_of(&live, "L"), (-6.02, 3.0)));
+    assert!(close(settings_of(&live, "R"), (0.0, 0.0)));
+    assert_eq!(a.live_state(&live), alignment::LiveState::Applied);
+    alignment::apply(&rig, &mut a, true).unwrap();
+    let live = rig.discover(endpoint).unwrap();
+    assert_eq!(settings_of(&live, "L"), (-2.0, 1.0));
+    assert_eq!(settings_of(&live, "R"), (-5.0, 4.0));
+    assert_eq!(a.live_state(&live), alignment::LiveState::Original);
+    // Reloaded, the session still measures from zero and recomputes the same targets.
+    let loaded = alignment::load(&a.directory).unwrap();
+    assert_eq!(loaded.basis(), alignment::Basis::FromZero);
+    assert!(close(target_of(&loaded, "L"), (-6.02, 3.0)));
+    // Applied twice, nothing accumulates.
+    let mut again = loaded;
+    alignment::apply(&rig, &mut again, false).unwrap();
+    alignment::apply(&rig, &mut again, false).unwrap();
+    assert!(close(
+        settings_of(&rig.discover(endpoint).unwrap(), "L"),
+        (-6.02, 3.0)
+    ));
+}
+
+#[test]
+fn a_speaker_measured_again_from_zero_is_zeroed_again_and_put_back() {
+    let root = tempfile::tempdir().unwrap();
+    let rig = adjusted_rig();
+    let endpoint = "127.0.0.1:9000".parse().unwrap();
+    let mut a = acquire_with(&rig, root.path(), alignment::Basis::FromZero);
+    let settings = a.settings.clone();
+    let writes = rig.writes.load(Ordering::Relaxed);
+    alignment::remeasure(
+        &rig,
+        &mut a,
+        "R",
+        &settings,
+        &AtomicBool::new(false),
+        &mut |_, _, _| {},
+    )
+    .unwrap();
+    // Zeroed for the passes and put back: two writes, the takes read at zero.
+    assert_eq!(rig.writes.load(Ordering::Relaxed), writes + 2);
+    assert!(
+        close(target_of(&a, "L"), (-6.02, 3.0)),
+        "{:?}",
+        target_of(&a, "L")
+    );
+    assert!(
+        close(target_of(&a, "R"), (0.0, 0.0)),
+        "{:?}",
+        target_of(&a, "R")
+    );
+    let live = rig.discover(endpoint).unwrap();
+    assert_eq!(settings_of(&live, "R"), (-5.0, 4.0));
+    assert_eq!(a.live_state(&live), alignment::LiveState::Original);
+}
+
+#[test]
+fn outputs_that_cannot_be_zeroed_are_not_measured() {
+    let root = tempfile::tempdir().unwrap();
+    let rig = adjusted_rig();
+    rig.refuse_writes.store(true, Ordering::Relaxed);
+    let settings = Settings {
+        device: Some("test microphone".into()),
+        reference_output: Some("L".into()),
+        output_root: root.path().display().to_string(),
+        ..Settings::default()
+    };
+    let endpoint = "127.0.0.1:9000".parse().unwrap();
+    let request = alignment::request(
+        endpoint,
+        rig.discover(endpoint).unwrap(),
+        &settings,
+        "L".into(),
+        root.path().join("alignment"),
+    )
+    .unwrap();
+    let error = alignment::capture(
+        &rig,
+        request,
+        settings,
+        vec!["L".into(), "R".into()],
+        alignment::Basis::FromZero,
+        &AtomicBool::new(false),
+        &mut |_, _, _| {},
+    )
+    .unwrap_err();
+    assert!(error.contains("0 dB and 0 ms"), "{error}");
+    assert_eq!(rig.captures.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn a_speaker_clipping_at_zero_is_measured_again_lower_and_its_old_gain_put_back() {
+    let root = tempfile::tempdir().unwrap();
+    let (rig, louder_db) = loud_rig(9.3);
+    // Lowered by 3 dB now, it clips by about 12 dB once measured from zero.
+    rig.snapshot.lock().unwrap().outputs[3].gain_db = -3.0;
+    let outcome = capture_loud_with(&rig, root.path(), true, alignment::Basis::FromZero);
+    let a = outcome.alignment;
+    assert!(a.blockers.is_empty(), "{:?}", a.blockers);
+    assert_eq!(outcome.retakes.len(), 2, "one retake per pass");
+    assert_eq!(a.corrected_output_ids(), ["L", "R", "Loud"]);
+    // Counted back to zero, not to its old -3 dB: absolute, as for the others.
+    let (gain, _) = target_of(&a, "Loud");
+    assert!(
+        (gain as f64 + louder_db).abs() < 0.1,
+        "{gain} vs -{louder_db}"
+    );
+    assert!(
+        close(target_of(&a, "R"), (0.0, 0.0)),
+        "{:?}",
+        target_of(&a, "R")
+    );
+    let live = rig.discover("127.0.0.1:9000".parse().unwrap()).unwrap();
+    assert_eq!(settings_of(&live, "Loud"), (-3.0, 0.0));
+    assert_eq!(a.live_state(&live), alignment::LiveState::Original);
+}
+
+#[test]
+fn an_applied_alignment_is_refined_by_default_and_from_zero_otherwise() {
+    use alignment::Basis;
+    use companion_service::controller::Controller;
+    let root = tempfile::tempdir().unwrap();
+    let rig = Arc::new(adjusted_rig());
+    let endpoint: SocketAddr = "127.0.0.1:9000".parse().unwrap();
+    let mut a = acquire_with(&rig, root.path(), Basis::FromZero);
+    let mut controller = Controller::new(rig.clone());
+    controller.state.endpoint = Some(endpoint);
+    controller.state.snapshot = Some(rig.discover(endpoint).unwrap());
+    // Nothing measured yet, or measured and not applied: from zero.
+    assert_eq!(controller.alignment_basis(), Basis::FromZero);
+    controller.state.alignment = Some(a.clone());
+    assert_eq!(controller.alignment_basis(), Basis::FromZero);
+    // Applied: the next alignment refines it, and may start on top of it.
+    alignment::apply(&*rig, &mut a, false).unwrap();
+    controller.state.alignment = Some(a.clone());
+    controller.state.snapshot = Some(rig.discover(endpoint).unwrap());
+    assert_eq!(controller.alignment_basis(), Basis::Refine);
+    // From zero can still be chosen.
+    controller.chosen_alignment_basis = Some(Basis::FromZero);
+    assert_eq!(controller.alignment_basis(), Basis::FromZero);
+    controller.chosen_alignment_basis = None;
+    // Undone, or changed in Studio since: from zero again.
+    alignment::apply(&*rig, &mut a, true).unwrap();
+    controller.state.alignment = Some(a);
+    controller.state.snapshot = Some(rig.discover(endpoint).unwrap());
+    assert_eq!(controller.alignment_basis(), Basis::FromZero);
+}
+
+#[test]
+fn refining_an_applied_alignment_starts_from_its_corrections() {
+    let root = tempfile::tempdir().unwrap();
+    let rig = adjusted_rig();
+    let endpoint = "127.0.0.1:9000".parse().unwrap();
+    let mut first = acquire_with(&rig, &root.path().join("first"), alignment::Basis::FromZero);
+    alignment::apply(&rig, &mut first, false).unwrap();
+    let corrected = rig.discover(endpoint).unwrap();
+    let mut second = acquire_with(&rig, &root.path().join("second"), alignment::Basis::Refine);
+    // Already aligned: the refinement keeps the corrections, and Undo returns to them.
+    assert!(close(target_of(&second, "L"), settings_of(&corrected, "L")));
+    assert!(close(target_of(&second, "R"), settings_of(&corrected, "R")));
+    assert!(omniphony_adapter::same_installation(
+        &second.snapshot,
+        &corrected
+    ));
+    alignment::apply(&rig, &mut second, false).unwrap();
+    alignment::apply(&rig, &mut second, true).unwrap();
+    let live = rig.discover(endpoint).unwrap();
+    assert_eq!(settings_of(&live, "L"), settings_of(&corrected, "L"));
 }

@@ -846,6 +846,13 @@ impl CompanionApp {
             {
                 self.controller.start_alignment();
             }
+            if let Some(basis) = alignment_view::basis_toggle(
+                ui,
+                self.controller.alignment_basis(),
+                !self.controller.busy(),
+            ) {
+                self.controller.chosen_alignment_basis = Some(basis);
+            }
             if ui
                 .add_enabled(
                     self.controller.cancellable() && !self.controller.state.stopping,

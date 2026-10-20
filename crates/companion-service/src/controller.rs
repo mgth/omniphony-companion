@@ -334,6 +334,9 @@ pub struct Controller {
     cancelled: Arc<AtomicBool>,
     sequence: u64,
     startup_endpoint: Option<String>,
+    /// The basis the user chose for the next alignment; `None` follows
+    /// [`Controller::default_alignment_basis`].
+    pub chosen_alignment_basis: Option<alignment::Basis>,
 }
 impl Default for Controller {
     fn default() -> Self {
@@ -353,6 +356,7 @@ impl Controller {
             cancelled: Arc::new(AtomicBool::new(false)),
             sequence: 0,
             startup_endpoint: None,
+            chosen_alignment_basis: None,
         }
     }
     pub fn busy(&self) -> bool {
@@ -955,10 +959,37 @@ impl Controller {
                     .into(),
             );
         }
-        if self.active_alignment_blocks() {
-            return Err("Restore the active alignment before starting another baseline.".into());
+        // An applied alignment can be refined: the next one starts from its corrections.
+        if self
+            .state
+            .alignment
+            .as_ref()
+            .is_some_and(|a| a.application_uncertain)
+        {
+            return Err(
+                "The last application is uncertain. Refresh before starting another baseline."
+                    .into(),
+            );
         }
         Ok(outputs)
+    }
+    /// Refine once the renderer has the corrections of an alignment applied to it, from
+    /// zero otherwise: before any alignment, after an Undo, or once its settings changed.
+    pub fn default_alignment_basis(&self) -> alignment::Basis {
+        let applied = self.state.alignment.as_ref().is_some_and(|a| {
+            a.applied_snapshot.is_some()
+                && self.alignment_live_state() == Some(alignment::LiveState::Applied)
+        });
+        if applied {
+            alignment::Basis::Refine
+        } else {
+            alignment::Basis::FromZero
+        }
+    }
+    /// The basis the next alignment measures with: the user's choice, else the default.
+    pub fn alignment_basis(&self) -> alignment::Basis {
+        self.chosen_alignment_basis
+            .unwrap_or_else(|| self.default_alignment_basis())
     }
     pub fn start_alignment(&mut self) {
         let outputs = match self.alignment_readiness() {
@@ -986,6 +1017,10 @@ impl Controller {
                 return;
             }
         };
+        // Chosen while the previous alignment is still known: it decides the default.
+        let basis = self.alignment_basis();
+        // A choice is for one alignment; the next follows the default again.
+        self.chosen_alignment_basis = None;
         self.state.alignment = None;
         self.state.job = Some(Job::Alignment {
             output_ids: outputs.clone(),
@@ -1009,6 +1044,7 @@ impl Controller {
                     request,
                     settings,
                     outputs,
+                    basis,
                     &cancel,
                     &mut |pass, i, p| {
                         let _ = sender.send(Event::AlignmentProgress(pass, i, p));

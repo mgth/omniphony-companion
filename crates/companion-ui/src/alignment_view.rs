@@ -1099,6 +1099,48 @@ pub fn live(a: &Alignment, state: Option<LiveState>) -> bool {
     }
 }
 
+/// From zero / Refine for the next alignment, in the style of Original/Corrected.
+/// Returns the basis the user picked, if they picked one.
+pub fn basis_toggle(
+    ui: &mut egui::Ui,
+    current: companion_service::alignment::Basis,
+    enabled: bool,
+) -> Option<companion_service::alignment::Basis> {
+    use companion_service::alignment::Basis;
+    let mut picked = None;
+    egui::Frame::new()
+        .stroke(Stroke::new(1.0_f32, super::MUTED.gamma_multiply(0.4)))
+        .corner_radius(6)
+        .inner_margin(egui::Margin::same(2))
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            ui.horizontal(|ui| {
+                for (basis, label, help) in [
+                    (
+                        Basis::FromZero,
+                        "From zero",
+                        "Set the measured speakers to 0 dB and 0 ms for the passes, then put them back. The proposal is absolute: the quietest speaker at 0 dB, the latest at 0 ms. Speakers whose gain is lowered now play louder while measured.",
+                    ),
+                    (
+                        Basis::Refine,
+                        "Refine",
+                        "Measure through the current gains and delays and correct on top of them. The default while an alignment is applied.",
+                    ),
+                ] {
+                    if ui
+                        .add_enabled(enabled, egui::Button::selectable(current == basis, label))
+                        .on_hover_text(help)
+                        .clicked()
+                        && current != basis
+                    {
+                        picked = Some(basis);
+                    }
+                }
+            });
+        });
+    picked
+}
+
 /// Apply, Original/Corrected, Confirm and Undo with one status line.
 pub fn action_bar(
     ui: &mut egui::Ui,
