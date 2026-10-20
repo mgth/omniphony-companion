@@ -1818,6 +1818,14 @@ fn manual_level_panel_saves_a_fresh_reference_shows_direction_and_stops() {
     );
     assert!(text.iter().any(|(s, _)| s == "Noise · -3.0 dB"));
     assert!(!text.iter().any(|(s, _)| s.contains("This Omniphony build")));
+    // The noise skips Front right's -2.0 dB gain: it is said to play at 0 dB.
+    assert!(
+        text.iter()
+            .any(|(s, _)| s.ends_with(" · LIVE · turn its volume knob · at 0 dB in Omniphony"))
+    );
+    assert!(text.iter().any(|(s, _)| {
+        s.starts_with("Front right plays at 0 dB in Omniphony: its -2.0 dB gain is skipped")
+    }));
     // Check mode compares the speakers as corrected: Front right's -2.0 dB gain
     // against Front left's -1.5 dB adds -0.5 dB.
     let run = app.controller.state.manual_run.as_mut().unwrap();
@@ -1842,6 +1850,7 @@ fn manual_level_panel_saves_a_fresh_reference_shows_direction_and_stops() {
         text.iter()
             .any(|(s, _)| s.contains("This Omniphony build plays the noise through"))
     );
+    assert!(!text.iter().any(|(s, _)| s.contains("at 0 dB in Omniphony")));
     assert!(
         text.iter()
             .any(|(s, _)| s.contains("-3.0 dB relative to Front left"))
