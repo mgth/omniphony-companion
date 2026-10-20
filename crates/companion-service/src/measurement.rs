@@ -55,6 +55,10 @@ pub struct TakeOutcome {
     pub timing: Option<timing::TimingReport>,
     pub impulse: Option<Arc<impulse::ImpulseReport>>,
     pub impulse_error: Option<String>,
+    /// Restored without reading its saved report, which loads when the take is
+    /// opened ([`crate::controller::Controller::load_saved_take`]). Until then
+    /// only the folder is known: no verdict, diagnostics or plots.
+    pub deferred: bool,
 }
 
 impl TakeOutcome {
@@ -189,6 +193,7 @@ pub fn measure(
                 timing: None,
                 impulse: None,
                 impulse_error: None,
+                deferred: false,
             });
         }
     };
@@ -345,7 +350,7 @@ pub(crate) fn finish_take(
         .cloned()
         .map(Arc::new);
     let impulse_error = response.and_then(Result::err);
-    write_json(
+    crate::files::write_json_compact(
         &args.out_dir.join("capture-report.json"),
         &serde_json::json!({
             "schema_version": 3, "origin": origin, "capture": recording.metadata,
@@ -369,6 +374,7 @@ pub(crate) fn finish_take(
         timing: inspected.ok(),
         impulse,
         impulse_error,
+        deferred: false,
     })
 }
 

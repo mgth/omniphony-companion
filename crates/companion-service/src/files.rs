@@ -31,7 +31,16 @@ pub fn parent(path: &Path) -> &Path {
 
 /// Publish a complete document without overwriting an existing session/profile.
 pub fn write_json(path: &Path, value: &impl Serialize) -> AppResult<()> {
-    let mut bytes = serde_json::to_vec_pretty(value)?;
+    publish(path, serde_json::to_vec_pretty(value)?)
+}
+
+/// [`write_json`] without indentation, for reports dense with plot points: two
+/// thirds of an indented capture report is whitespace that every restore reads.
+pub fn write_json_compact(path: &Path, value: &impl Serialize) -> AppResult<()> {
+    publish(path, serde_json::to_vec(value)?)
+}
+
+fn publish(path: &Path, mut bytes: Vec<u8>) -> AppResult<()> {
     bytes.push(b'\n');
     let mut pending = tempfile::NamedTempFile::new_in(parent(path))?;
     pending.write_all(&bytes)?;

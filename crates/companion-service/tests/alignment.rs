@@ -209,6 +209,7 @@ impl Backend for Rig {
             takes.push((
                 id.clone(),
                 TakeOutcome {
+                    deferred: false,
                     directory,
                     accepted: rejection.is_none(),
                     cancelled: false,

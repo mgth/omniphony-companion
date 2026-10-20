@@ -184,6 +184,7 @@ impl CompanionApp {
 
     pub fn draw(&mut self, ctx: &egui::Context) {
         self.controller.poll();
+        self.load_selected_take();
         if !self.controller.busy()
             && let Some(id) = self.pending_noise.take()
         {
@@ -1810,6 +1811,29 @@ impl CompanionApp {
         }
     }
 
+    /// A take restored without its report is read when it is opened; the result
+    /// panel shows it once the controller has it.
+    fn load_selected_take(&mut self) {
+        let Some(directory) = self
+            .selected_result
+            .as_ref()
+            .and_then(|t| t.outcome.as_ref().ok())
+            .filter(|o| o.deferred)
+            .map(|o| o.directory.clone())
+        else {
+            return;
+        };
+        let loaded = self.controller.state.takes.iter().find(|t| {
+            t.outcome
+                .as_ref()
+                .is_ok_and(|o| !o.deferred && o.directory == directory)
+        });
+        match loaded {
+            Some(take) => self.selected_result = Some(take.clone()),
+            None => self.controller.load_saved_take(&directory),
+        }
+    }
+
     fn select_take(&mut self, take: Take) {
         self.selected_speaker = Some(take.output_id.clone());
         self.selected_result = Some(take);
@@ -2045,6 +2069,15 @@ impl CompanionApp {
                 } else {
                     ui.label("Selected analysis unavailable. Choose a measurement or analyze its saved folder again.");
                 }
+            } else if self
+                .selected_result
+                .as_ref()
+                .is_some_and(|t| t.outcome.as_ref().is_ok_and(|o| o.deferred))
+            {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Loading saved result…");
+                });
             } else if self.selected_result.is_some() {
                 self.result_panel(ui);
             } else if let Some(output) = &self.selected_speaker {
@@ -2493,6 +2526,7 @@ fn analysis_status(
 }
 fn take_status(take: &Take) -> (&'static str, Color32) {
     match &take.outcome {
+        Ok(o) if o.deferred => ("Saved · opens on selection", MUTED),
         Ok(o) if !o.accepted && o.timing.is_some() => ("Results available · capture fault", WARM),
         Ok(o) if o.accepted && o.timing.as_ref().is_some_and(|t| !t.warnings.is_empty()) => {
             ("Results available · quality warning", WARM)

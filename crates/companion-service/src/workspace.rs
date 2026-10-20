@@ -170,11 +170,11 @@ fn read_display_json<T: serde::de::DeserializeOwned>(path: &Path) -> crate::AppR
     crate::files::read_json_limited(path, 32 * 1024 * 1024)
 }
 
+const BUDGET_EXCEEDED: &str = "workspace report memory budget exceeded";
+
 fn report_size(path: &Path, remaining: &mut u64) -> Result<(), String> {
     let bytes = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
-    *remaining = remaining
-        .checked_sub(bytes)
-        .ok_or("workspace report memory budget exceeded")?;
+    *remaining = remaining.checked_sub(bytes).ok_or(BUDGET_EXCEEDED)?;
     Ok(())
 }
 fn load_take(
@@ -224,7 +224,31 @@ fn load_take(
         timing: report.timing,
         impulse: report.impulse.map(Arc::new),
         impulse_error: report.impulse_error,
+        deferred: false,
     })
+}
+
+/// A restored take whose report is not read yet: only its folder is known.
+fn deferred(folder: &Path) -> TakeOutcome {
+    TakeOutcome {
+        directory: folder.to_owned(),
+        accepted: false,
+        cancelled: false,
+        rejection_reason: None,
+        diagnostics: None,
+        timing: None,
+        impulse: None,
+        impulse_error: None,
+        deferred: true,
+    }
+}
+
+/// Read one saved take's report when it is opened, with the same identity checks
+/// as a restore. One report at a time, so only the per-file limit applies.
+pub fn load_saved(reference: &TakeReference) -> Result<TakeOutcome, String> {
+    let folder = reference.result.as_ref().map_err(Clone::clone)?;
+    let mut budget = REPORT_BUDGET;
+    load_take(reference, folder, &mut budget)
 }
 
 /// Bounded, read-only report loading on the controller's background worker.
@@ -250,12 +274,18 @@ pub fn restore(
     restored.analyses = analyses;
     restored.warnings.extend(warnings);
     let mut budget = REPORT_BUDGET;
-    // Newest results get priority if the bounded report budget is exhausted.
+    // Only the newest take of each speaker is read: it is what the cards, map and
+    // results show. Older takes are listed and read when opened, and so is a
+    // newest one the bounded budget no longer covers.
+    let mut newest = std::collections::HashSet::new();
     for reference in index.takes.into_iter().rev() {
+        let first = newest.insert(reference.output_id.clone());
         let outcome = match reference.result.as_ref() {
             Err(error) => Err(error.clone()),
+            Ok(folder) if !first => Ok(deferred(folder)),
             Ok(folder) => match load_take(&reference, folder, &mut budget) {
                 Ok(take) => Ok(take),
+                Err(e) if e == BUDGET_EXCEEDED => Ok(deferred(folder)),
                 Err(e) => {
                     let message = format!(
                         "{}: saved result unavailable: {e} ({})",
@@ -272,6 +302,7 @@ pub fn restore(
                         timing: None,
                         impulse: None,
                         impulse_error: None,
+                        deferred: false,
                     })
                 }
             },

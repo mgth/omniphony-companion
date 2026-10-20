@@ -241,6 +241,8 @@ pub struct State {
     pub progress: Option<MeasureProgress>,
     pub stopping: bool,
     pub takes: Vec<Take>,
+    /// Folders of deferred takes whose saved report is being read.
+    pub loading_takes: std::collections::HashSet<PathBuf>,
     pub error: Option<String>,
     /// Setup values chosen automatically because none was saved.
     pub defaults: crate::defaults::Applied,
@@ -299,6 +301,7 @@ enum Event {
     ),
     AlignmentLoaded(Box<Result<LoadedAlignment, String>>),
     Reviewed(Box<Result<SavedReview, String>>),
+    SavedTakeLoaded(PathBuf, Box<Result<TakeOutcome, String>>),
     Inputs(Result<Vec<InputDevice>, String>),
     Discovered(
         SocketAddr,
@@ -566,6 +569,27 @@ impl Controller {
                 level,
             });
         }
+    }
+
+    /// Read the saved report of a take restored without it, off the UI thread. It
+    /// does not block other work; asking again while it loads does nothing.
+    pub fn load_saved_take(&mut self, directory: &std::path::Path) {
+        let Some(take) = self.state.takes.iter().find(|t| {
+            t.outcome
+                .as_ref()
+                .is_ok_and(|o| o.deferred && o.directory == directory)
+        }) else {
+            return;
+        };
+        if !self.state.loading_takes.insert(directory.to_owned()) {
+            return;
+        }
+        let reference = crate::workspace::TakeReference::from(take);
+        let (sender, folder) = (self.sender.clone(), directory.to_owned());
+        std::thread::spawn(move || {
+            let result = catch_job(|| crate::workspace::load_saved(&reference));
+            let _ = sender.send(Event::SavedTakeLoaded(folder, Box::new(result)));
+        });
     }
 
     /// Offline analysis uses the same worker boundary as acquisition. No renderer needed.
@@ -1583,6 +1607,30 @@ impl Controller {
                     self.state.progress = None;
                     self.state.job = None;
                     self.state.stopping = false;
+                }
+                Event::SavedTakeLoaded(folder, result) => {
+                    self.state.loading_takes.remove(&folder);
+                    let outcome = match *result {
+                        Ok(outcome) => outcome,
+                        Err(e) => TakeOutcome {
+                            directory: folder.clone(),
+                            accepted: false,
+                            cancelled: false,
+                            rejection_reason: Some(format!("saved result unavailable: {e}")),
+                            diagnostics: None,
+                            timing: None,
+                            impulse: None,
+                            impulse_error: None,
+                            deferred: false,
+                        },
+                    };
+                    if let Some(take) = self.state.takes.iter_mut().find(|t| {
+                        t.outcome
+                            .as_ref()
+                            .is_ok_and(|o| o.deferred && o.directory == folder)
+                    }) {
+                        take.outcome = Ok(outcome);
+                    }
                 }
                 Event::Reviewed(result) => {
                     match *result {

@@ -328,3 +328,50 @@ fn invalid_latest_analysis_is_reported_instead_of_silently_showing_older_or_othe
         assert!(warnings[0].contains("latest saved analysis unavailable"));
     }
 }
+
+#[test]
+fn restore_reads_only_each_speakers_newest_report_and_older_ones_load_when_opened() {
+    let dir = tempfile::tempdir().unwrap();
+    // Oldest first, as the index keeps them.
+    let takes = vec![
+        fixture(dir.path(), "take-1", "L", true),
+        fixture(dir.path(), "take-2", "R", false),
+        fixture(dir.path(), "take-3", "L", false),
+        fixture(dir.path(), "take-4", "L", true),
+    ];
+    // An older report that would not even parse is never read at restore.
+    let broken = takes[0]
+        .result
+        .as_ref()
+        .unwrap()
+        .join("capture-report.json");
+    std::fs::write(&broken, b"{ not json").unwrap();
+    let settings = takes[0].settings.clone();
+    let index = WorkspaceIndex {
+        takes: takes.clone(),
+        ..Default::default()
+    };
+    let result = workspace::restore(Some(index), &settings).unwrap();
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    let deferred: Vec<_> = result
+        .takes
+        .iter()
+        .map(|t| t.outcome.as_ref().unwrap().deferred)
+        .collect();
+    assert_eq!(deferred, [true, false, true, false]);
+    // The newest of each speaker carries its verdict; the others none yet.
+    assert!(result.takes[3].outcome.as_ref().unwrap().accepted);
+    assert!(result.takes[1].outcome.as_ref().unwrap().cancelled);
+    assert!(
+        result.takes[2]
+            .outcome
+            .as_ref()
+            .unwrap()
+            .rejection_reason
+            .is_none()
+    );
+    // Opening an older take reads it with the same checks.
+    let older = workspace::load_saved(&takes[2]).unwrap();
+    assert!(!older.deferred && older.cancelled);
+    assert!(workspace::load_saved(&takes[0]).is_err());
+}
