@@ -919,6 +919,7 @@ pub fn reanalyze(original: &Alignment) -> Result<Alignment, String> {
                         timing: review.timing,
                         impulse: review.impulse,
                         impulse_error: review.impulse_error,
+                        deferred: false,
                     };
                     row.repeats.push(estimate(&take, gain_offset_db));
                     let mut quality = take.quality();

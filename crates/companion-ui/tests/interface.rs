@@ -475,6 +475,7 @@ fn captured_sweeps_with_ambiguous_arrivals_show_levels_and_withhold_timing() {
         revision: "ui-preview:1".into(),
         settings: controller.settings.clone(),
         outcome: Ok(TakeOutcome {
+            deferred: false,
             directory: "sessions/synthetic-review".into(),
             accepted: true,
             cancelled: false,
@@ -1116,6 +1117,7 @@ fn restart_restores_graph_selection_and_speaker_results_even_without_the_rendere
         revision: snapshot.revision.clone(),
         settings: settings.clone(),
         outcome: Ok(TakeOutcome {
+            deferred: false,
             directory: folder.clone(),
             accepted: true,
             cancelled: false,
@@ -1588,6 +1590,7 @@ pub fn saved_result(
         revision: controller.state.snapshot.as_ref().unwrap().revision.clone(),
         settings: controller.settings.clone(),
         outcome: Ok(companion_service::measurement::TakeOutcome {
+            deferred: false,
             directory: folder.to_owned(),
             accepted: false,
             cancelled: false,
@@ -2635,5 +2638,60 @@ fn an_alignment_applied_to_another_renderer_does_not_block_a_new_one() {
         app.controller.state.error
     );
     finish_worker(&mut app, &ctx, size);
+    assert_eq!(starts.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn an_older_take_restored_without_its_report_loads_when_opened() {
+    let ctx = egui::Context::default();
+    let dir = tempfile::tempdir().unwrap();
+    let (mut controller, starts) = support::ready();
+    let (mut older, _) = saved_result(&controller, &dir.path().join("older-take"), "Front right");
+    let (newer, _) = saved_result(&controller, &dir.path().join("newer-take"), "Front right");
+    // As a restore leaves it: only the folder of the older take is known.
+    if let Ok(outcome) = &mut older.outcome {
+        outcome.deferred = true;
+        outcome.rejection_reason = None;
+    }
+    controller.state.takes = vec![older, newer];
+    let mut app = CompanionApp::with_controller(&ctx, controller, false);
+    let size = Vec2::new(1400.0, 1000.0);
+    frame(&mut app, &ctx, vec![], size);
+    // Opened from the results' history menu.
+    let menu = find_result_text(&mut app, &ctx, size, "Previous measurements");
+    click(&mut app, &ctx, menu.center(), size);
+    let entry = labels(&frame(&mut app, &ctx, vec![], size))
+        .into_iter()
+        .find(|(s, _)| s.starts_with("Front right") && s.ends_with("older-take"))
+        .expect("history entry")
+        .1;
+    click(&mut app, &ctx, entry.center(), size);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let loaded = |app: &CompanionApp| {
+        app.controller.state.takes[0]
+            .outcome
+            .as_ref()
+            .is_ok_and(|o| !o.deferred)
+    };
+    while !loaded(&app) {
+        frame(&mut app, &ctx, vec![], size);
+        assert!(Instant::now() < deadline, "the older take did not load");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    // The result panel then shows the older take itself.
+    let text = labels(&frame(&mut app, &ctx, vec![], size));
+    assert!(!text.iter().any(|(s, _)| s == "Loading saved result…"));
+    assert!(
+        text.iter()
+            .any(|(s, _)| s == "Recorded · timing unavailable")
+    );
+    let take = &app.controller.state.takes[0];
+    let outcome = take.outcome.as_ref().unwrap();
+    assert!(!outcome.deferred);
+    assert_eq!(
+        outcome.rejection_reason.as_deref(),
+        Some("legacy broadband signal/noise rejection")
+    );
+    assert!(app.controller.state.loading_takes.is_empty());
     assert_eq!(starts.load(Ordering::Relaxed), 0);
 }
