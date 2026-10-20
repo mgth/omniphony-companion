@@ -1283,12 +1283,20 @@ pub enum LiveState {
 }
 impl Alignment {
     pub fn live_state(&self, live: &Snapshot) -> LiveState {
+        let same = |reference: &Snapshot| {
+            omniphony_adapter::same_settings_within(
+                live,
+                reference,
+                LIVE_GAIN_TOLERANCE_DB,
+                LIVE_DELAY_TOLERANCE_MS,
+            )
+        };
         let applied = self
             .profile
             .as_ref()
             .and_then(|_| self.expected_target().ok())
-            .is_some_and(|target| omniphony_adapter::same_installation(live, &target));
-        let original = omniphony_adapter::same_installation(live, &self.snapshot);
+            .is_some_and(|target| same(&target));
+        let original = same(&self.snapshot);
         match (applied, original) {
             // A proposal that changes nothing reads as both; the saved state decides.
             (true, true) if self.applied_snapshot.is_some() => LiveState::Applied,
@@ -1299,40 +1307,58 @@ impl Alignment {
     }
 }
 
+/// Studio keeps and republishes gains rounded to 0.1 dB, and delays come back from
+/// the renderer within about a microsecond: a renderer within half a gain step and a
+/// hundredth of a millisecond (under half a sample) of a state is in that state.
+const LIVE_GAIN_TOLERANCE_DB: f32 = 0.0501;
+const LIVE_DELAY_TOLERANCE_MS: f32 = 0.01;
+
 /// Record where the connected renderer stands: applied when it has the proposal's
 /// settings, not applied when it has the original ones, whichever process or port
-/// carries them. Saves the session when that changes what it records. A renderer with
-/// other settings, or an uncertain application, leaves the session as it is.
+/// carries them. Saves the session when that changes what it records. Either also
+/// settles an uncertain application: the renderer shows which way it went. A renderer
+/// with other settings leaves the session as it is, uncertainty included.
 pub fn reconcile(a: &mut Alignment, live: &Snapshot) -> Result<bool, String> {
-    if a.application_uncertain {
+    let state = a.live_state(live);
+    if a.application_uncertain && state == LiveState::Other {
         return Ok(false);
     }
-    let changed = match a.live_state(live) {
-        LiveState::Applied if a.applied_snapshot.as_ref() != Some(live) => {
-            a.applied_snapshot = Some(live.clone());
-            true
-        }
-        LiveState::Original if a.applied_snapshot.is_some() => {
-            // The corrections are not in this renderer: what was verified no longer is.
-            a.applied_snapshot = None;
-            a.restored_snapshot = (live != &a.snapshot).then(|| live.clone());
-            a.verification = None;
-            a.verification_pass_reports = None;
-            a.verification_note = None;
-            true
-        }
-        LiveState::Original
-            if live != &a.snapshot && a.restored_snapshot.as_ref() != Some(live) =>
-        {
-            a.restored_snapshot = Some(live.clone());
-            true
-        }
-        _ => false,
-    };
+    let settled = std::mem::take(&mut a.application_uncertain);
+    let changed = settled
+        | match state {
+            LiveState::Applied if a.applied_snapshot.as_ref() != Some(live) => {
+                a.applied_snapshot = Some(live.clone());
+                true
+            }
+            LiveState::Original if a.applied_snapshot.is_some() => {
+                // The corrections are not in this renderer: what was verified no longer is.
+                a.applied_snapshot = None;
+                a.restored_snapshot = (live != &a.snapshot).then(|| live.clone());
+                a.verification = None;
+                a.verification_pass_reports = None;
+                a.verification_note = None;
+                true
+            }
+            LiveState::Original
+                if live != &a.snapshot && a.restored_snapshot.as_ref() != Some(live) =>
+            {
+                a.restored_snapshot = Some(live.clone());
+                true
+            }
+            _ => false,
+        };
     if changed {
         save(a)?;
     }
     Ok(changed)
+}
+
+/// After a failed write, read the renderer back: a refusal or a lost reply that left
+/// it on the original or the corrected settings is no longer uncertain.
+fn settle_after_failure<B: Backend + ?Sized>(backend: &B, alignment: &mut Alignment) {
+    if let Ok(live) = backend.discover(alignment.endpoint) {
+        let _ = reconcile(alignment, &live);
+    }
 }
 
 pub fn apply<B: Backend + ?Sized>(
@@ -1375,7 +1401,13 @@ pub fn apply<B: Backend + ?Sized>(
     }
     alignment.application_uncertain = true;
     save(alignment)?;
-    let result = backend.set_outputs(alignment.endpoint, current, targets)?;
+    let result = match backend.set_outputs(alignment.endpoint, current, targets) {
+        Ok(result) => result,
+        Err(error) => {
+            settle_after_failure(backend, alignment);
+            return Err(error);
+        }
+    };
     let target = if restore {
         alignment.snapshot.clone()
     } else {

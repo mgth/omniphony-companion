@@ -23,6 +23,12 @@ struct Rig {
     slow_output: bool,
     writes: AtomicUsize,
     lose_ack: AtomicBool,
+    /// Discovery fails: the renderer cannot be read back.
+    unreadable: AtomicBool,
+    /// A lost reply also makes the renderer unreadable.
+    blind_after_lost_ack: AtomicBool,
+    /// Writes are refused outright, as an older renderer refuses a newer protocol.
+    refuse_writes: AtomicBool,
     bad_repeat: AtomicBool,
     silent_batch: AtomicBool,
     captures: AtomicUsize,
@@ -68,6 +74,9 @@ impl Rig {
             }),
             writes: AtomicUsize::new(0),
             lose_ack: AtomicBool::new(false),
+            unreadable: AtomicBool::new(false),
+            blind_after_lost_ack: AtomicBool::new(false),
+            refuse_writes: AtomicBool::new(false),
             bad_repeat: AtomicBool::new(false),
             silent_batch: AtomicBool::new(false),
             captures: AtomicUsize::new(0),
@@ -84,6 +93,9 @@ impl Backend for Rig {
         Ok(vec![])
     }
     fn discover(&self, _: SocketAddr) -> Result<Snapshot, String> {
+        if self.unreadable.load(Ordering::Relaxed) {
+            return Err("renderer unreachable".into());
+        }
         Ok(self.snapshot.lock().unwrap().clone())
     }
     fn measure(
@@ -101,6 +113,9 @@ impl Backend for Rig {
         settings: Vec<OutputSetting>,
     ) -> Result<Snapshot, String> {
         self.endpoints.lock().unwrap().push(endpoint);
+        if self.refuse_writes.load(Ordering::Relaxed) {
+            return Err("renderer refused the request (unsupported_version)".into());
+        }
         let mut state = self.snapshot.lock().unwrap();
         if *state != expected {
             return Err("stale".into());
@@ -117,6 +132,9 @@ impl Backend for Rig {
         let n = self.writes.fetch_add(1, Ordering::Relaxed) + 1;
         state.revision = format!("rig:{n}");
         if self.lose_ack.load(Ordering::Relaxed) {
+            if self.blind_after_lost_ack.load(Ordering::Relaxed) {
+                self.unreadable.store(true, Ordering::Relaxed);
+            }
             return Err("lost acknowledgement".into());
         }
         Ok(state.clone())
@@ -374,11 +392,58 @@ fn failed_input_records_first_pass_failure_without_starting_second_pass_or_propo
     );
 }
 #[test]
+fn a_refused_or_unacknowledged_apply_is_settled_by_reading_the_renderer_back() {
+    // Refused: the renderer kept the original settings.
+    let root = tempfile::tempdir().unwrap();
+    let rig = Rig::new();
+    let mut a = acquire(&rig, root.path());
+    let original = rig.snapshot.lock().unwrap().clone();
+    rig.refuse_writes.store(true, Ordering::Relaxed);
+    assert!(alignment::apply(&rig, &mut a, false).is_err());
+    assert_eq!(*rig.snapshot.lock().unwrap(), original);
+    assert!(!a.application_uncertain);
+    assert!(a.applied_snapshot.is_none());
+    assert!(!alignment::load(&a.directory).unwrap().application_uncertain);
+
+    // Lost reply, renderer readable: it shows the corrected settings, so applied.
+    let root = tempfile::tempdir().unwrap();
+    let rig = Rig::new();
+    let mut a = acquire(&rig, root.path());
+    rig.lose_ack.store(true, Ordering::Relaxed);
+    assert!(alignment::apply(&rig, &mut a, false).is_err());
+    assert!(!a.application_uncertain);
+    assert!(a.applied_snapshot.is_some());
+    assert_eq!(rig.writes.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn an_uncertain_session_is_settled_when_the_renderer_shows_the_original_settings() {
+    let root = tempfile::tempdir().unwrap();
+    let rig = Rig::new();
+    let mut a = acquire(&rig, root.path());
+    // As a refused application left it before this fix: uncertain, nothing written.
+    a.application_uncertain = true;
+    let live = rig.snapshot.lock().unwrap().clone();
+    assert!(alignment::reconcile(&mut a, &live).unwrap());
+    assert!(!a.application_uncertain && a.applied_snapshot.is_none());
+    assert!(!alignment::load(&a.directory).unwrap().application_uncertain);
+    // Settings that are neither original nor corrected keep it uncertain.
+    a.application_uncertain = true;
+    let mut other = live.clone();
+    other.outputs[0].gain_db += 3.0;
+    assert!(!alignment::reconcile(&mut a, &other).unwrap());
+    assert!(a.application_uncertain);
+}
+
+#[test]
 fn uncertain_mutation_is_persisted_and_never_retried() {
     let root = tempfile::tempdir().unwrap();
     let rig = Rig::new();
     let mut a = acquire(&rig, root.path());
     rig.lose_ack.store(true, Ordering::Relaxed);
+    // Lost reply and no read-back (the rig turns unreadable with the lost reply):
+    // nobody can tell whether it applied.
+    rig.blind_after_lost_ack.store(true, Ordering::Relaxed);
     assert!(alignment::apply(&rig, &mut a, false).is_err());
     assert!(a.application_uncertain);
     let mut loaded = alignment::load(&a.directory).unwrap();
@@ -1449,4 +1514,28 @@ fn connecting_on_another_port_records_where_the_renderer_stands() {
         1,
         "connecting writes nothing"
     );
+}
+
+#[test]
+fn corrections_studio_republished_rounded_still_read_as_applied() {
+    let root = tempfile::tempdir().unwrap();
+    let rig = Rig::new();
+    let mut a = acquire(&rig, root.path());
+    alignment::apply(&rig, &mut a, false).unwrap();
+    // Studio keeps gains to 0.1 dB and the renderer returns delays a microsecond off.
+    let mut rounded = rig.snapshot.lock().unwrap().clone();
+    for o in &mut rounded.outputs {
+        o.gain_db = (o.gain_db * 10.0).round() / 10.0;
+        o.delay_ms += 0.0012;
+    }
+    rounded.revision = "studio:republished".into();
+    assert_eq!(a.live_state(&rounded), alignment::LiveState::Applied);
+    // An application left uncertain is settled by it.
+    a.application_uncertain = true;
+    alignment::reconcile(&mut a, &rounded).unwrap();
+    assert!(!a.application_uncertain && a.applied_snapshot.is_some());
+    // A real change is not absorbed.
+    let mut changed = rounded.clone();
+    changed.outputs[0].gain_db += 0.2;
+    assert_eq!(a.live_state(&changed), alignment::LiveState::Other);
 }
