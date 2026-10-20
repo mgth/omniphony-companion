@@ -188,6 +188,25 @@ impl Client {
         }
     }
 
+    /// Switch the renderer's live output from headphones to the speakers (protocol
+    /// 7). Discovers first, so an older renderer is named instead of refusing an
+    /// unknown command.
+    pub fn use_speaker_output(&mut self) -> Result<Snapshot> {
+        self.discover()?;
+        if self.version < protocol::SPEAKER_OUTPUT_VERSION {
+            return Err(Error::Protocol(
+                "this Omniphony build cannot switch its output from the Companion; choose Speakers in Studio, or update Omniphony".into(),
+            ));
+        }
+        match self.exchange(protocol::Command::UseSpeakerOutput {})? {
+            protocol::Reply::Snapshot { snapshot } => {
+                validate_snapshot(&snapshot).map_err(|e| self.fail(&e))?;
+                Ok(snapshot)
+            }
+            _ => Err(self.fail("expected a snapshot after switching the output")),
+        }
+    }
+
     /// Absolute, revision-checked live settings. A lost acknowledgement is not success.
     pub fn set_outputs(
         &mut self,

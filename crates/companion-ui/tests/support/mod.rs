@@ -116,6 +116,11 @@ impl Backend for UiBench {
         }
         Ok(())
     }
+    /// The synthetic renderer switches to the speakers: discovery then reports none
+    /// of the headphone reason.
+    fn use_speaker_output(&self, endpoint: SocketAddr) -> Result<Snapshot, String> {
+        self.discover(endpoint)
+    }
     fn measure(
         &self,
         _: MeasureRequest,
