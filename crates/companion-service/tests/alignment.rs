@@ -1838,3 +1838,92 @@ fn refining_an_applied_alignment_starts_from_its_corrections() {
     let live = rig.discover(endpoint).unwrap();
     assert_eq!(settings_of(&live, "L"), settings_of(&corrected, "L"));
 }
+
+/// L, R and Unused measured with `basis`, Unused rejected on every take.
+fn acquire_with_rejected(
+    rig: &Rig,
+    root: &std::path::Path,
+    basis: alignment::Basis,
+) -> alignment::Alignment {
+    rig.rejected
+        .lock()
+        .unwrap()
+        .insert("Unused".into(), "no clear arrival".into());
+    let settings = Settings {
+        device: Some("test microphone".into()),
+        reference_output: Some("L".into()),
+        output_root: root.display().to_string(),
+        sweep: omniphony_adapter::Sweep {
+            duration_ms: 200,
+            ..Settings::default().sweep
+        },
+        ..Settings::default()
+    };
+    let endpoint = "127.0.0.1:9000".parse().unwrap();
+    let request = alignment::request(
+        endpoint,
+        rig.discover(endpoint).unwrap(),
+        &settings,
+        "L".into(),
+        root.join("alignment"),
+    )
+    .unwrap();
+    alignment::capture(
+        rig,
+        request,
+        settings,
+        vec!["L".into(), "R".into(), "Unused".into()],
+        basis,
+        &AtomicBool::new(false),
+        &mut |_, _, _| {},
+    )
+    .unwrap()
+    .alignment
+}
+
+#[test]
+fn a_speaker_left_out_of_a_correction_from_zero_with_old_settings_blocks_apply() {
+    let root = tempfile::tempdir().unwrap();
+    let rig = adjusted_rig();
+    {
+        let mut state = rig.snapshot.lock().unwrap();
+        let unused = state.outputs.iter_mut().find(|o| o.id == "Unused").unwrap();
+        unused.gain_db = -12.2;
+        unused.delay_ms = 144.8;
+    }
+    let mut a = acquire_with_rejected(&rig, root.path(), alignment::Basis::FromZero);
+    assert_eq!(a.corrected_output_ids(), ["L", "R"]);
+    let reason = a.apply_blocker().unwrap();
+    assert!(
+        reason.starts_with("Measured from zero, but Unused (-12.2 dB, 144.8 ms) would keep its settings from before."),
+        "{reason}"
+    );
+    let writes = rig.writes.load(Ordering::Relaxed);
+    assert_eq!(alignment::apply(&rig, &mut a, false).unwrap_err(), reason);
+    assert_eq!(
+        rig.writes.load(Ordering::Relaxed),
+        writes,
+        "nothing written"
+    );
+    assert!(!a.application_uncertain);
+    // Original stays available: the renderer already has it.
+    alignment::apply(&rig, &mut a, true).unwrap();
+}
+
+#[test]
+fn a_speaker_left_out_at_zero_or_while_refining_does_not_block_apply() {
+    // At zero already, it keeps nothing from another basis.
+    let root = tempfile::tempdir().unwrap();
+    let rig = adjusted_rig();
+    let mut a = acquire_with_rejected(&rig, root.path(), alignment::Basis::FromZero);
+    assert_eq!(a.corrected_output_ids(), ["L", "R"]);
+    assert_eq!(a.apply_blocker(), None);
+    alignment::apply(&rig, &mut a, false).unwrap();
+    // Refining keeps every speaker on the same basis.
+    let root = tempfile::tempdir().unwrap();
+    let rig = adjusted_rig();
+    rig.snapshot.lock().unwrap().outputs[2].gain_db = -12.2;
+    let mut a = acquire_with_rejected(&rig, root.path(), alignment::Basis::Refine);
+    assert_eq!(a.apply_blocker(), None);
+    alignment::apply(&rig, &mut a, false).unwrap();
+}

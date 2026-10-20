@@ -51,7 +51,9 @@ back, or nothing is measured) and puts the previous settings back after them,
 stopped or failed included; the session keeps that zeroed state as
 `zeroed_snapshot`, the state its takes, retakes and re-measures are read under, and
 `snapshot` stays the settings from before, which Original and Undo restore. Its
-targets are therefore independent of the settings it found. A **refining**
+targets are therefore independent of the settings it found, and it cannot be applied
+while an output it zeroed is left out of the correction with non-zero settings from
+before (`Alignment::apply_blocker`): those would stay on the old basis. A **refining**
 alignment measures through the current settings and corrects on top of them; it may
 start while another alignment is applied, taking its corrections as the settings to
 restore. The service retains

@@ -1406,6 +1406,45 @@ impl Alignment {
             Basis::Refine
         }
     }
+    /// Why the proposal cannot be applied as it stands, when it was measured from zero:
+    /// an output zeroed for the passes but left out of the correction keeps its settings
+    /// from before, which the corrected speakers no longer start from. Applied, the
+    /// corrected speakers would move to absolute settings and it would not.
+    pub fn apply_blocker(&self) -> Option<String> {
+        let zeroed = self.zeroed_snapshot.as_ref()?;
+        let corrected = self.corrected_output_ids();
+        let left: Vec<_> = self
+            .snapshot
+            .outputs
+            .iter()
+            .filter(|before| !corrected.contains(&before.id))
+            .filter(|before| {
+                zeroed.outputs.iter().any(|z| {
+                    z.id == before.id
+                        && (z.gain_db != before.gain_db || z.delay_ms != before.delay_ms)
+                })
+            })
+            .map(|o| format!("{} ({:.1} dB, {:.1} ms)", o.id, o.gain_db, o.delay_ms))
+            .collect();
+        let set_aside = self.rows.iter().any(|r| {
+            r.set_aside()
+                && left
+                    .iter()
+                    .any(|l| l.starts_with(&format!("{} (", r.output_id)))
+        });
+        let (its, it) = if left.len() == 1 {
+            ("its", "it")
+        } else {
+            ("their", "them")
+        };
+        (!left.is_empty()).then(|| {
+            format!(
+                "Measured from zero, but {} would keep {its} settings from before. Measure {it} again into the session{}, or leave {it} out of a new alignment.",
+                left.join(", "),
+                if set_aside { ", align a set-aside speaker anyway" } else { "" },
+            )
+        })
+    }
     pub fn expected_target(&self) -> Result<Snapshot, String> {
         let mut snapshot = self.snapshot.clone();
         for setting in self.targets(false)? {
@@ -1523,6 +1562,9 @@ pub fn apply<B: Backend + ?Sized>(
             "Physical speaker levels may have changed. Measure a new alignment before applying."
                 .into(),
         );
+    }
+    if !restore && let Some(reason) = alignment.apply_blocker() {
+        return Err(reason);
     }
 
     if alignment.application_uncertain {

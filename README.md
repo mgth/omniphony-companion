@@ -273,6 +273,10 @@ never read or write personal settings. See [the application boundaries](docs/ui-
    through the current gains and delays and corrects on top of them. Refine is the
    default while an alignment is applied, and a new alignment may then start on top
    of it; From zero is the default otherwise. A choice holds for one alignment.
+   From zero cannot be applied while a speaker it zeroed is left out of the
+   correction with other settings than 0 dB and 0 ms from before: applied, the others
+   would move to absolute settings and it would not. Measure it again into the
+   session, align a set-aside speaker anyway, or leave it out of a new alignment.
    Each pass uses the shared-reference sequence. Progress remains in the active speaker card, and the speaker playing
    pulses on the room map; Stop cancels the run. The previous chart's space stays
    reserved during capture, so the chart, the map and the cards do not move.

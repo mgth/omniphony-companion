@@ -1169,7 +1169,11 @@ pub fn action_bar(
     let stale = a
         .physical_levels_changed
         .then_some("Physical levels may have changed. Measure a new alignment first.");
-    let apply_block = blocked.or(stale).or(applied.then_some("Already applied."));
+    let leftover = a.apply_blocker();
+    let apply_block = blocked
+        .or(stale)
+        .or(leftover.as_deref())
+        .or(applied.then_some("Already applied."));
     let verify_block = blocked
         .or(stale)
         .or((!applied).then_some("Apply the corrections first."));
@@ -1276,6 +1280,11 @@ fn status_line(a: &Alignment, live: bool, updating: bool) -> (String, Color32) {
             "Omniphony is disconnected or changed since this alignment. Refresh; measure again if its settings changed.".into(),
             super::WARM,
         );
+    }
+    if a.applied_snapshot.is_none()
+        && let Some(reason) = a.apply_blocker()
+    {
+        return (reason, super::WARM);
     }
     match (&a.applied_snapshot, &a.verification, &a.verification_note) {
         (None, ..) => (
