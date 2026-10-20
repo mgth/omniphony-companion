@@ -2695,3 +2695,44 @@ fn an_older_take_restored_without_its_report_loads_when_opened() {
     assert!(app.controller.state.loading_takes.is_empty());
     assert_eq!(starts.load(Ordering::Relaxed), 0);
 }
+
+#[test]
+fn headphone_output_is_named_and_switched_to_the_speakers_from_the_companion() {
+    let ctx = egui::Context::default();
+    let (mut controller, starts) = support::ready();
+    controller
+        .state
+        .snapshot
+        .as_mut()
+        .unwrap()
+        .unavailable_reason = Some(omniphony_adapter::protocol::SPEAKER_OUTPUT_REQUIRED.into());
+    let mut app = CompanionApp::with_controller(&ctx, controller, false);
+    let size = Vec2::new(1160.0, 800.0);
+    let text = labels(&frame(&mut app, &ctx, vec![], size));
+    assert!(
+        text.iter()
+            .any(|(s, _)| s == "Omniphony is playing to headphones")
+    );
+    assert!(!text.iter().any(|(s, _)| s == "Measurement unavailable"));
+    let switch = text
+        .into_iter()
+        .find(|(s, _)| s == "Switch to speakers")
+        .unwrap()
+        .1;
+    click(&mut app, &ctx, switch.center(), size);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while app.controller.busy() {
+        frame(&mut app, &ctx, vec![], size);
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let text = labels(&frame(&mut app, &ctx, vec![], size));
+    assert!(
+        !text
+            .iter()
+            .any(|(s, _)| s == "Omniphony is playing to headphones")
+    );
+    assert!(!app.controller.needs_speaker_output());
+    assert_eq!(app.controller.state.error, None);
+    assert_eq!(starts.load(Ordering::Relaxed), 0);
+}

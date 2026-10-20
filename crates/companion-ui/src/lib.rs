@@ -975,7 +975,44 @@ impl CompanionApp {
             });
             ui.add_space(10.0);
         }
-        if let Some(reason) = self
+        if self.controller.needs_speaker_output() {
+            // Not the user's choice as often as not: a renderer resuming from
+            // standby takes the output mode mpv handed back. One click fixes it.
+            let busy = self.controller.busy();
+            let mut switch = false;
+            card().show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.label(
+                    RichText::new("Omniphony is playing to headphones")
+                        .strong()
+                        .color(WARM),
+                );
+                ui.label("Its output is binaural, so the speakers are silent and cannot be measured.");
+                ui.horizontal_wrapped(|ui| {
+                    switch = ui
+                        .add_enabled(
+                            !busy,
+                            egui::Button::new(RichText::new("Switch to speakers").color(BG))
+                                .fill(ACCENT),
+                        )
+                        .on_hover_text("Set Omniphony's live output to the speakers, as Studio's output mode does. Its saved configuration is not changed.")
+                        .on_disabled_hover_text("Wait for the current operation to finish.")
+                        .clicked();
+                    if busy && matches!(self.controller.state.job, Some(Job::Discover)) {
+                        ui.spinner();
+                    }
+                    ui.label(
+                        RichText::new("Live only · Studio's Save keeps it")
+                            .small()
+                            .color(MUTED),
+                    );
+                });
+            });
+            if switch {
+                self.controller.use_speaker_output();
+            }
+            ui.add_space(10.0);
+        } else if let Some(reason) = self
             .controller
             .state
             .snapshot

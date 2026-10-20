@@ -49,6 +49,11 @@ pub trait Backend: Send + Sync + 'static {
         let _ = (endpoint, expected, settings);
         Err("Profile application is unavailable in this backend.".into())
     }
+    /// Switch the renderer's live output to the speakers (protocol 7).
+    fn use_speaker_output(&self, endpoint: SocketAddr) -> Result<Snapshot, String> {
+        let _ = endpoint;
+        Err("Switching the output is unavailable in this backend.".into())
+    }
     fn measure_batch(
         &self,
         request: MeasureRequest,
@@ -119,6 +124,11 @@ impl Backend for LiveBackend {
     fn discover(&self, endpoint: SocketAddr) -> Result<Snapshot, String> {
         Client::connect(endpoint, Duration::from_secs(2))
             .and_then(|mut client| client.discover())
+            .map_err(|e| e.to_string())
+    }
+    fn use_speaker_output(&self, endpoint: SocketAddr) -> Result<Snapshot, String> {
+        Client::connect(endpoint, Duration::from_secs(2))
+            .and_then(|mut client| client.use_speaker_output())
             .map_err(|e| e.to_string())
     }
     fn measure(
@@ -302,6 +312,7 @@ enum Event {
     AlignmentLoaded(Box<Result<LoadedAlignment, String>>),
     Reviewed(Box<Result<SavedReview, String>>),
     SavedTakeLoaded(PathBuf, Box<Result<TakeOutcome, String>>),
+    OutputSwitched(Result<Snapshot, String>),
     Inputs(Result<Vec<InputDevice>, String>),
     Discovered(
         SocketAddr,
@@ -715,6 +726,32 @@ impl Controller {
                 _ => None,
             };
             let _ = sender.send(Event::Discovered(endpoint, result, reconciled));
+        });
+    }
+    /// Whether the renderer cannot measure because it plays to headphones, which
+    /// [`Self::use_speaker_output`] resolves.
+    pub fn needs_speaker_output(&self) -> bool {
+        self.state
+            .snapshot
+            .as_ref()
+            .and_then(|s| s.unavailable_reason.as_deref())
+            == Some(omniphony_adapter::protocol::SPEAKER_OUTPUT_REQUIRED)
+    }
+    /// Switch the renderer from headphones to the speakers, live only, then show
+    /// its new snapshot. The saved configuration stays Studio's to change.
+    pub fn use_speaker_output(&mut self) {
+        if self.busy() {
+            return;
+        }
+        let Some(endpoint) = self.state.endpoint else {
+            return;
+        };
+        self.state.job = Some(Job::Discover);
+        self.state.error = None;
+        let (backend, sender) = (self.backend.clone(), self.sender.clone());
+        std::thread::spawn(move || {
+            let result = catch_job(|| backend.use_speaker_output(endpoint));
+            let _ = sender.send(Event::OutputSwitched(result));
         });
     }
     pub fn input_channels(&self) -> u16 {
@@ -1607,6 +1644,16 @@ impl Controller {
                     self.state.progress = None;
                     self.state.job = None;
                     self.state.stopping = false;
+                }
+                Event::OutputSwitched(result) => {
+                    match result {
+                        Ok(snapshot) => {
+                            self.state.saved_snapshot = Some(snapshot.clone());
+                            self.state.snapshot = Some(snapshot);
+                        }
+                        Err(error) => self.state.error = Some(error),
+                    }
+                    self.state.job = None;
                 }
                 Event::SavedTakeLoaded(folder, result) => {
                     self.state.loading_takes.remove(&folder);

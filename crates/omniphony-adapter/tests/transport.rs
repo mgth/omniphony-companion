@@ -736,3 +736,64 @@ fn a_version_refusal_outside_the_supported_range_poisons_the_connection() {
     assert!(c.discover().unwrap_err().to_string().contains("closed"));
     handle.join().unwrap();
 }
+
+#[test]
+fn speaker_output_is_requested_only_from_a_renderer_that_knows_the_command() {
+    // Version 7: discover, then the switch, whose snapshot comes back.
+    let (endpoint, handle) = server(|mut stream| {
+        let r = receive(&mut stream);
+        assert!(matches!(r.command, Command::Discover {}));
+        let mut headphones = snapshot();
+        headphones.unavailable_reason = Some(SPEAKER_OUTPUT_REQUIRED.into());
+        send(
+            &mut stream,
+            r.request_id,
+            Reply::Snapshot {
+                snapshot: headphones,
+            },
+        );
+        let r = receive(&mut stream);
+        assert!(matches!(r.command, Command::UseSpeakerOutput {}));
+        send(
+            &mut stream,
+            r.request_id,
+            Reply::Snapshot {
+                snapshot: snapshot(),
+            },
+        );
+    });
+    let mut client = Client::connect(endpoint, Duration::from_secs(1)).unwrap();
+    let switched = client.use_speaker_output().unwrap();
+    assert_eq!(switched.unavailable_reason, None);
+    handle.join().unwrap();
+
+    // Version 6: named as too old; the unknown command is never sent.
+    let (endpoint, handle) = server(|mut stream| {
+        let r = receive(&mut stream);
+        send_version(
+            &mut stream,
+            6,
+            r.request_id,
+            Reply::Error {
+                code: "unsupported_version".into(),
+                message: "this renderer answers versions 4 to 6".into(),
+            },
+        );
+        let r = receive(&mut stream);
+        assert!(matches!(r.command, Command::Discover {}));
+        send_version(
+            &mut stream,
+            6,
+            r.request_id,
+            Reply::Snapshot {
+                snapshot: snapshot(),
+            },
+        );
+        assert!(read_frame(&mut stream, MAX_PACKET_BYTES).unwrap().is_none());
+    });
+    let mut client = Client::connect(endpoint, Duration::from_secs(1)).unwrap();
+    let error = client.use_speaker_output().unwrap_err().to_string();
+    assert!(error.contains("choose Speakers in Studio"), "{error}");
+    drop(client);
+    handle.join().unwrap();
+}
