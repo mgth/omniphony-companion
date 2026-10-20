@@ -39,6 +39,10 @@ pub struct ViewPreferences {
     pub burst_overview: bool,
     pub burst_overlay: bool,
     pub manual_noise_dbfs: f32,
+    /// The room map's distance from the listener to the timing reference, which anchors
+    /// measured distances. Cosmetic: never sent to the renderer. `None` fits the
+    /// measured distances to the layout's.
+    pub room_reference_m: Option<f32>,
 }
 impl Default for ViewPreferences {
     fn default() -> Self {
@@ -52,6 +56,7 @@ impl Default for ViewPreferences {
             burst_overview: false,
             burst_overlay: true,
             manual_noise_dbfs: -30.0,
+            room_reference_m: None,
         }
     }
 }

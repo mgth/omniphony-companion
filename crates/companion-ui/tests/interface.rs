@@ -2738,3 +2738,123 @@ fn headphone_output_is_named_and_switched_to_the_speakers_from_the_companion() {
     assert_eq!(app.controller.state.error, None);
     assert_eq!(starts.load(Ordering::Relaxed), 0);
 }
+
+/// The room map card: the smallest frame around its title that holds the map.
+fn map_card(output: &egui::FullOutput) -> Rect {
+    let room = central(output, "Room").expect("room map title");
+    output
+        .shapes
+        .iter()
+        .filter_map(|shape| match &shape.shape {
+            Shape::Rect(r) if r.rect.contains(room.center()) && r.rect.height() > 150.0 => {
+                Some(r.rect)
+            }
+            _ => None,
+        })
+        .min_by(|a, b| a.area().total_cmp(&b.area()))
+        .expect("map card")
+}
+
+#[test]
+fn the_bench_map_draws_measured_distances_without_changing_its_size() {
+    for size in [
+        Vec2::new(850.0, 640.0),
+        Vec2::new(1160.0, 800.0),
+        Vec2::new(1400.0, 1000.0),
+    ] {
+        let ctx = egui::Context::default();
+        let (mut controller, _) = support::ready();
+        let alignment = support::bench_alignment(&mut controller);
+        let mut app = CompanionApp::preview(&ctx, controller);
+        // The whole map: beside the first cards, or below the last in a narrow window.
+        let below = size.x < 1000.0;
+        scroll_speakers(&mut app, &ctx, size, if below { -10000.0 } else { 10000.0 });
+        for _ in 0..3 {
+            frame(&mut app, &ctx, vec![], size);
+        }
+        let before = frame(&mut app, &ctx, vec![], size);
+        let card = map_card(&before);
+        let inside = |output: &egui::FullOutput, text: &str| {
+            labels(output)
+                .into_iter()
+                .find(|(s, r)| s == text && card.contains(r.center()))
+                .map(|(_, r)| r)
+        };
+        // BL and SR share a layout position: one chip. LFE is straight below: off plan.
+        assert!(inside(&before, "BL·SR").is_some(), "{size:?}");
+        assert!(inside(&before, "BL").is_none() && inside(&before, "SR").is_none());
+        let lfe = inside(&before, "LFE").expect("LFE in the strip");
+        let off_plan = inside(&before, "Off plan").expect("strip label");
+        assert!((lfe.center().y - off_plan.center().y).abs() < 4.0);
+        // Layout radii are normalised geometry: no metres, no scale control.
+        assert!(inside(&before, "fitted to layout").is_none());
+        assert!(!labels(&before).iter().any(|(s, _)| s.ends_with(" m")));
+        app.controller.state.alignment = Some(alignment.clone());
+        for _ in 0..3 {
+            frame(&mut app, &ctx, vec![], size);
+        }
+        let after = frame(&mut app, &ctx, vec![], size);
+        assert_eq!(map_card(&after), card, "the map keeps its size at {size:?}");
+        assert!(inside(&after, "fitted to layout").is_some());
+        assert!(
+            labels(&after)
+                .iter()
+                .any(|(s, r)| s.ends_with(" m") && card.contains(r.center())),
+            "rings in metres"
+        );
+        for chip in ["S12", "S13", "FL", "BC", "BL·SR"] {
+            assert!(inside(&after, chip).is_some(), "{chip} at {size:?}");
+        }
+    }
+}
+
+#[test]
+fn the_reference_distance_is_restored_and_fitting_again_is_saved_at_once() {
+    use companion_service::preferences::{PreferenceStore, ViewPreferences};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    let mut store = PreferenceStore::open(path.clone()).unwrap();
+    store.update_view(ViewPreferences {
+        room_reference_m: Some(3.0),
+        ..Default::default()
+    });
+    drop(store);
+    let ctx = egui::Context::default();
+    let (controller, _) = support::ready();
+    let mut app = CompanionApp::with_preferences(
+        &ctx,
+        controller,
+        PreferenceStore::open(path.clone()).unwrap(),
+    );
+    let size = Vec2::new(1400.0, 1000.0);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while app.controller.busy() || !app.controller.state.workspace_ready {
+        frame(&mut app, &ctx, vec![], size);
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let alignment = support::bench_alignment(&mut app.controller);
+    app.controller.state.alignment = Some(alignment);
+    let caption = find_speaker_text(&mut app, &ctx, size, "FL at 3.00 m");
+    click(&mut app, &ctx, caption.center(), size);
+    let output = frame(&mut app, &ctx, vec![], size);
+    let text = labels(&output);
+    assert!(
+        text.iter()
+            .any(|(s, _)| s == "Distance from the listener to FL, the timing reference")
+    );
+    let fit = text
+        .iter()
+        .find(|(s, _)| s == "Fit to the layout again")
+        .expect("fit button")
+        .1;
+    click(&mut app, &ctx, fit.center(), size);
+    for _ in 0..2 {
+        frame(&mut app, &ctx, vec![], size);
+    }
+    find_speaker_text(&mut app, &ctx, size, "fitted to layout");
+    // A display preference: kept without Save, even on an immediate exit.
+    drop(app);
+    let store = PreferenceStore::open(path).unwrap();
+    assert_eq!(store.preferences().view.room_reference_m, None);
+}
