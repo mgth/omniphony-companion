@@ -1283,14 +1283,7 @@ pub enum LiveState {
 }
 impl Alignment {
     pub fn live_state(&self, live: &Snapshot) -> LiveState {
-        let same = |reference: &Snapshot| {
-            omniphony_adapter::same_settings_within(
-                live,
-                reference,
-                LIVE_GAIN_TOLERANCE_DB,
-                LIVE_DELAY_TOLERANCE_MS,
-            )
-        };
+        let same = |reference: &Snapshot| same_live_settings(live, reference);
         let applied = self
             .profile
             .as_ref()
@@ -1312,6 +1305,12 @@ impl Alignment {
 /// hundredth of a millisecond (under half a sample) of a state is in that state.
 const LIVE_GAIN_TOLERANCE_DB: f32 = 0.0501;
 const LIVE_DELAY_TOLERANCE_MS: f32 = 0.01;
+
+/// Whether two snapshots carry the same settings as far as a renderer, and the
+/// state recorded from it, can show them: within Studio's rounding.
+fn same_live_settings(a: &Snapshot, b: &Snapshot) -> bool {
+    omniphony_adapter::same_settings_within(a, b, LIVE_GAIN_TOLERANCE_DB, LIVE_DELAY_TOLERANCE_MS)
+}
 
 /// Record where the connected renderer stands: applied when it has the proposal's
 /// settings, not applied when it has the original ones, whichever process or port
@@ -1377,13 +1376,14 @@ pub fn apply<B: Backend + ?Sized>(
         return Err("Previous application is uncertain. Inspect the renderer and saved original settings before further changes.".into());
     }
     let targets = alignment.targets(restore)?;
+    // The recorded states come from the renderer, so from Studio's rounding too.
     if let Some(restored) = &alignment.restored_snapshot
-        && !omniphony_adapter::same_installation(restored, &alignment.snapshot)
+        && !same_live_settings(restored, &alignment.snapshot)
     {
         return Err("Saved restoration state differs from the original settings.".into());
     }
     if let Some(applied) = &alignment.applied_snapshot
-        && !omniphony_adapter::same_installation(applied, &alignment.expected_target()?)
+        && !same_live_settings(applied, &alignment.expected_target()?)
     {
         return Err("Saved application state differs from the proposal.".into());
     }
@@ -1413,7 +1413,8 @@ pub fn apply<B: Backend + ?Sized>(
     } else {
         alignment.expected_target()?
     };
-    if !omniphony_adapter::same_installation(&result, &target) {
+    // Outputs this write leaves alone may carry Studio's rounding.
+    if !same_live_settings(&result, &target) {
         return Err(
             "Renderer readback differs from requested settings; application is uncertain.".into(),
         );
@@ -1498,7 +1499,7 @@ pub fn verify<B: Backend + ?Sized>(
     let measured = measured.ok_or("missing verification evidence")?;
     let session = a.session.as_ref().ok_or("missing baseline")?;
     let profile = a.profile.as_ref().ok_or("missing profile")?;
-    if !omniphony_adapter::same_installation(&outcome.alignment.snapshot, &a.expected_target()?) {
+    if !same_live_settings(&outcome.alignment.snapshot, &a.expected_target()?) {
         return Err("Verification was not captured with the proposed state.".into());
     }
     let mut batch = measured.baseline.clone();
