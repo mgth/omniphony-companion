@@ -1091,11 +1091,17 @@ impl Alignment {
     /// Whether the proposal may be recomputed from the saved passes (an explicit update or
     /// an "include anyway" choice). The error says why not.
     pub fn refreshable(&self) -> Result<(), String> {
-        if self.applied_snapshot.is_some()
-            || self.application_uncertain
-            || self.physical_levels_changed
-        {
-            return Err("Restore any active alignment and capture fresh evidence after physical adjustments before updating a proposal.".into());
+        if self.application_uncertain {
+            return Err("It is not known whether the last Apply reached Omniphony. Refresh to read its settings first.".into());
+        }
+        if self.applied_snapshot.is_some() {
+            return Err("Undo the applied correction first: the proposal changes only while Omniphony has the original settings. Apply it again afterwards.".into());
+        }
+        if self.physical_levels_changed {
+            return Err(
+                "Speaker volumes may have been turned since these passes. Measure a new alignment."
+                    .into(),
+            );
         }
         if self
             .session
