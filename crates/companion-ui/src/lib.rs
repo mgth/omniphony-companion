@@ -1962,6 +1962,36 @@ impl CompanionApp {
         Some(review)
     }
 
+    /// Why a take no longer describes Omniphony as it is, if it does not: what
+    /// changed, not just that something did.
+    fn earlier_take_note(&self, take: &Take) -> Option<&'static str> {
+        if self.controller.settings != take.settings {
+            return Some("Previous measurement · the capture settings have changed since");
+        }
+        if self
+            .controller
+            .state
+            .snapshot
+            .as_ref()
+            .is_some_and(|s| s.revision == take.revision)
+        {
+            return None;
+        }
+        let corrected = self.controller.alignment_live_state()
+            == Some(companion_service::alignment::LiveState::Applied)
+            && self
+                .controller
+                .state
+                .alignment
+                .as_ref()
+                .is_some_and(|a| take.revision == a.snapshot.revision);
+        Some(if corrected {
+            "Measured with the original settings · the correction is applied now"
+        } else {
+            "Previous measurement · Omniphony restarted or its settings changed since"
+        })
+    }
+
     fn measurement_status(&self, take: &Take) -> (&'static str, Color32) {
         self.controller
             .analysis_for(take)
@@ -2134,11 +2164,12 @@ impl CompanionApp {
         };
         let mut review_requested = None;
         let lab = self.lab;
+        let earlier = self.earlier_take_note(take);
         ui.push_id("live_result", |ui| {
                 let (status, color) = take_status(take);
                 ui.label(RichText::new(status).size(20.0).color(color).strong());
-                if self.controller.state.snapshot.as_ref().is_none_or(|s| s.revision != take.revision) || self.controller.settings != take.settings {
-                    ui.colored_label(WARM, "Previous measurement · current renderer or capture settings differ");
+                if let Some(note) = earlier {
+                    ui.colored_label(WARM, note);
                 }
                 ui.label(RichText::new(format!("{} · {} · Channel {} · Reference: {}", take.settings.microphone_id, take.settings.position_id, take.settings.input_channel, take.settings.reference_output.as_deref().unwrap_or("—"))).small().color(MUTED));
                 match &take.outcome {
@@ -2202,18 +2233,12 @@ impl CompanionApp {
                 &companion_service::analysis_cache::CachedAnalysis::from_review(&review),
             );
             ui.label(RichText::new(status).size(20.0).color(color).strong());
-            if self.selected_result.as_ref().is_some_and(|take| {
-                self.controller
-                    .state
-                    .snapshot
-                    .as_ref()
-                    .is_none_or(|s| s.revision != take.revision)
-                    || self.controller.settings != take.settings
-            }) {
-                ui.colored_label(
-                    WARM,
-                    "Previous measurement · current renderer or capture settings differ",
-                );
+            if let Some(note) = self
+                .selected_result
+                .as_ref()
+                .and_then(|take| self.earlier_take_note(take))
+            {
+                ui.colored_label(WARM, note);
             }
             if let Some(delay) = review.impulse.as_ref().and_then(|r| r.relative_arrival_ms) {
                 ui.label(format!(

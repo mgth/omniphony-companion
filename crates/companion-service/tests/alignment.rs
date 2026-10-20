@@ -1275,7 +1275,10 @@ fn measuring_again_refuses_other_settings_an_applied_session_and_a_changed_rende
     alignment::apply(&rig, &mut a, false).unwrap();
     let applied = alignment::remeasure(&rig, &mut a, "R", &settings, &no_cancel, &mut quiet);
     assert!(
-        applied.as_ref().unwrap_err().contains("Restore"),
+        applied
+            .as_ref()
+            .unwrap_err()
+            .contains("Undo the applied correction"),
         "{applied:?}"
     );
     assert_eq!(rig.batches.lock().unwrap().len(), 2);
@@ -1545,7 +1548,14 @@ fn corrections_studio_republished_rounded_still_read_as_applied() {
     alignment::reconcile(&mut a, &rounded).unwrap();
     assert_eq!(a.applied_snapshot.as_ref(), Some(&rounded));
     *rig.snapshot.lock().unwrap() = rounded.clone();
+    // An applied proposal does not change; the reason says what to do.
+    assert!(
+        a.refreshable()
+            .unwrap_err()
+            .starts_with("Undo the applied correction first")
+    );
     alignment::apply(&rig, &mut a, true).unwrap();
+    assert_eq!(a.refreshable(), Ok(()));
     assert_eq!(
         a.live_state(&rig.snapshot.lock().unwrap()),
         alignment::LiveState::Original
