@@ -265,8 +265,19 @@ never read or write personal settings. See [the application boundaries](docs/ui-
 
 1. Select the working broadband speakers, one microphone input and a fixed timing
    reference. Keep the microphone at the listening position and the preamp gain fixed.
-2. Choose **Align levels and delays**. Each pass uses the shared-reference
-   sequence. Progress remains in the active speaker card, and the speaker playing
+2. Pick **From zero** or **Refine** beside **Align levels and delays**, then choose
+   it. **From zero** sets the measured speakers and the reference to 0 dB and 0 ms
+   for the passes and puts their settings back afterwards: the proposal is absolute,
+   the quietest speaker at 0 dB and the latest at 0 ms, whatever the outputs had.
+   Speakers whose gain is lowered now play louder while measured. **Refine** measures
+   through the current gains and delays and corrects on top of them. Refine is the
+   default while an alignment is applied, and a new alignment may then start on top
+   of it; From zero is the default otherwise. A choice holds for one alignment.
+   From zero cannot be applied while a speaker it zeroed is left out of the
+   correction with other settings than 0 dB and 0 ms from before: applied, the others
+   would move to absolute settings and it would not. Measure it again into the
+   session, align a set-aside speaker anyway, or leave it out of a new alignment.
+   Each pass uses the shared-reference sequence. Progress remains in the active speaker card, and the speaker playing
    pulses on the room map; Stop cancels the run. The previous chart's space stays
    reserved during capture, so the chart, the map and the cards do not move.
 3. Read the result in the alignment chart and the speaker cards; Lab shows the raw
@@ -282,13 +293,14 @@ never read or write personal settings. See [the application boundaries](docs/ui-
    when at least two speakers qualify; excluded gains and delays stay unchanged.
    Use **Update correction proposal** (Lab) for complete original saved passes created
    by an older build. Shared-reference or session failures still block application.
-5. **Apply to Omniphony** changes live absolute settings. Existing gains and
-   delays are included; the policy attenuates louder speakers and delays earlier
-   arrivals. Application requires the unchanged renderer snapshot. The
+5. **Apply to Omniphony** changes live absolute settings. The policy attenuates
+   louder speakers and delays earlier arrivals, from zero or on top of the existing
+   gains and delays (step 2). Application requires the unchanged renderer snapshot. The
    **Original / Corrected** switch restores or re-applies the same settings for listening.
 6. **Confirm by re-measuring** measures the corrected subset again, twice, and reports before/after arrival and level
    spread. A failed or unresolved verification is not success. **Undo** (or
-   **Original**) restores the baseline only if the renderer has not changed meanwhile.
+   **Original**) restores the settings from before the alignment, not zero, only if
+   the renderer has not changed meanwhile.
 7. Save in Studio after a satisfactory result if you want persistent renderer
    settings. Companion never sends the configuration-save command automatically.
 

@@ -440,6 +440,7 @@ pub fn alignment(
         application_uncertain: false,
         physical_levels_changed: false,
         retake_snapshots: vec![],
+        zeroed_snapshot: None,
     }
 }
 
@@ -589,6 +590,7 @@ pub fn room_alignment(controller: &Controller) -> companion_service::alignment::
         application_uncertain: false,
         physical_levels_changed: false,
         retake_snapshots: vec![],
+        zeroed_snapshot: None,
     }
 }
 
@@ -681,5 +683,6 @@ pub fn late_device_alignment(
         application_uncertain: false,
         physical_levels_changed: false,
         retake_snapshots: vec![],
+        zeroed_snapshot: None,
     }
 }
