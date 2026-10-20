@@ -1538,4 +1538,21 @@ fn corrections_studio_republished_rounded_still_read_as_applied() {
     let mut changed = rounded.clone();
     changed.outputs[0].gain_db += 0.2;
     assert_eq!(a.live_state(&changed), alignment::LiveState::Other);
+
+    // With the rounded state recorded as applied and in the renderer, Undo and
+    // Apply both still work (they refused: "Saved application state differs").
+    a.applied_snapshot = None;
+    alignment::reconcile(&mut a, &rounded).unwrap();
+    assert_eq!(a.applied_snapshot.as_ref(), Some(&rounded));
+    *rig.snapshot.lock().unwrap() = rounded.clone();
+    alignment::apply(&rig, &mut a, true).unwrap();
+    assert_eq!(
+        a.live_state(&rig.snapshot.lock().unwrap()),
+        alignment::LiveState::Original
+    );
+    alignment::apply(&rig, &mut a, false).unwrap();
+    assert_eq!(
+        a.live_state(&rig.snapshot.lock().unwrap()),
+        alignment::LiveState::Applied
+    );
 }
