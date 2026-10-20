@@ -1669,6 +1669,11 @@ impl Controller {
                     }
                 }
                 Event::Discovered(endpoint, result, reconciled) => {
+                    // Reaching the renderer replaces an older error, such as one a
+                    // restart restored from a renderer that has since been replaced.
+                    if result.is_ok() {
+                        self.state.error = None;
+                    }
                     match reconciled.map(|r| *r) {
                         Some(Ok(a)) => self.state.alignment = Some(a),
                         Some(Err(e)) => self.state.error = Some(e),

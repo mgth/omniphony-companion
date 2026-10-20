@@ -601,6 +601,12 @@ fn valid_sequence(p: &Progress, snapshot: &Snapshot) -> bool {
 /// every start) and the revision are not part of it, nor are layout positions, which
 /// describe panning rather than the acoustic path and are absent from older protocols.
 pub fn same_installation(a: &Snapshot, b: &Snapshot) -> bool {
+    same_settings_within(a, b, 0.0001, 0.0001)
+}
+
+/// [`same_installation`] with explicit gain and delay tolerances, for settings that
+/// another program may have republished rounded (Studio keeps gains to 0.1 dB).
+pub fn same_settings_within(a: &Snapshot, b: &Snapshot, gain_db: f32, delay_ms: f32) -> bool {
     a.sample_rate == b.sample_rate
         && a.master_gain_db.to_bits() == b.master_gain_db.to_bits()
         && a.max_delay_ms.to_bits() == b.max_delay_ms.to_bits()
@@ -614,8 +620,8 @@ pub fn same_installation(a: &Snapshot, b: &Snapshot) -> bool {
                 && x.freq_high_hz == y.freq_high_hz
                 && x.gain_db.is_finite()
                 && x.delay_ms.is_finite()
-                && (x.gain_db - y.gain_db).abs() <= 0.0001
-                && (x.delay_ms - y.delay_ms).abs() <= 0.0001
+                && (x.gain_db - y.gain_db).abs() <= gain_db
+                && (x.delay_ms - y.delay_ms).abs() <= delay_ms
         })
 }
 
