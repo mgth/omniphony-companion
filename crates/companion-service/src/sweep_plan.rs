@@ -300,6 +300,7 @@ mod tests {
             azimuth_deg: None,
             elevation_deg: None,
             distance_m: None,
+            filter: None,
         }
     }
     fn snapshot(outputs: Vec<Output>) -> Snapshot {
@@ -311,6 +312,7 @@ mod tests {
             max_delay_ms: 100.0,
             outputs,
             unavailable_reason: None,
+            output_filters_bypassed: false,
         }
     }
     fn settings(reference: &str) -> Settings {
@@ -501,6 +503,8 @@ mod tests {
             calibration: None,
             sweep: Settings::default().sweep,
             out_dir: dir.path().join("batch"),
+            bass_managed: false,
+            bypass_output_filters: false,
         };
         let outcome = measure_groups(
             &Flaky,

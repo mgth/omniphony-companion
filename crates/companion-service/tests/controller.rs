@@ -43,6 +43,7 @@ fn snapshot() -> Snapshot {
         master_gain_db: 0.0,
         max_delay_ms: 100.0,
         unavailable_reason: None,
+        output_filters_bypassed: false,
         outputs: ["Left", "Right", "Sub"]
             .iter()
             .enumerate()
@@ -58,6 +59,7 @@ fn snapshot() -> Snapshot {
                 azimuth_deg: None,
                 elevation_deg: None,
                 distance_m: None,
+                filter: None,
             })
             .collect(),
     }

@@ -58,6 +58,7 @@ fn snapshot() -> Snapshot {
         master_gain_db: 0.0,
         max_delay_ms: MAX_DELAY_MS,
         unavailable_reason: None,
+        output_filters_bypassed: false,
         outputs: vec![Output {
             id: "L".into(),
             name: "L".into(),
@@ -70,6 +71,7 @@ fn snapshot() -> Snapshot {
             azimuth_deg: None,
             elevation_deg: None,
             distance_m: None,
+            filter: None,
         }],
     }
 }
@@ -95,6 +97,7 @@ fn progress(state: SignalState, frames: u64) -> Progress {
         reference_output_id: None,
         signal_id: 1,
         output_id: "L".into(),
+        bass_managed: false,
         signal: spec(),
         state,
         rendered_frames: frames,
@@ -158,7 +161,8 @@ fn discovery_begin_render_progress_and_end_round_trip() {
         assert_eq!(
             r.command,
             Command::Begin {
-                expected_revision: "test:1".into()
+                expected_revision: "test:1".into(),
+                bypass_output_filters: false,
             }
         );
         send(&mut stream, r.request_id, session(None));

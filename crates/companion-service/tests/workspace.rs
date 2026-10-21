@@ -23,6 +23,7 @@ fn fixture(root: &Path, name: &str, output: &str, accepted: bool) -> TakeReferen
         master_gain_db: 0.0,
         max_delay_ms: 250.0,
         unavailable_reason: None,
+        output_filters_bypassed: false,
         outputs: ["L", "R"]
             .iter()
             .enumerate()
@@ -38,6 +39,7 @@ fn fixture(root: &Path, name: &str, output: &str, accepted: bool) -> TakeReferen
                 azimuth_deg: None,
                 elevation_deg: None,
                 distance_m: None,
+                filter: None,
             })
             .collect(),
     };

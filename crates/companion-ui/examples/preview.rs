@@ -115,6 +115,7 @@ fn main() -> eframe::Result {
                             reference_output_id: Some(outputs[0].clone()),
                             sequence_outputs: outputs.clone(),
                             signal,
+                            bass_managed: false,
                             state: omniphony_adapter::SignalState::Rendering,
                             rendered_frames: 180000,
                             total_frames: signal.frames(48000) * (outputs.len() as u64 * 2 + 1),

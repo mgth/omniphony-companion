@@ -54,6 +54,17 @@ pub trait Backend: Send + Sync + 'static {
         let _ = endpoint;
         Err("Switching the output is unavailable in this backend.".into())
     }
+    /// Replace the room correction filters of some outputs at once (protocol 8),
+    /// revision-checked and live only: each named output gets its taps, or no filter.
+    fn set_output_filters(
+        &self,
+        endpoint: SocketAddr,
+        expected: Snapshot,
+        filters: Vec<OutputFilter>,
+    ) -> Result<Snapshot, String> {
+        let _ = (endpoint, expected, filters);
+        Err("Sending correction filters is unavailable in this backend.".into())
+    }
     fn measure_batch(
         &self,
         request: MeasureRequest,
@@ -77,6 +88,13 @@ pub trait Backend: Send + Sync + 'static {
         progress: &mut dyn FnMut(MeasureProgress),
     ) -> Result<TakeOutcome, String>;
 }
+/// One output's room correction filter to send: its taps at their rate, or none.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OutputFilter {
+    pub output_id: String,
+    pub taps: Option<(u32, Vec<f32>)>,
+}
+
 pub struct LiveBackend;
 impl Backend for LiveBackend {
     fn manual_levels(
@@ -129,6 +147,35 @@ impl Backend for LiveBackend {
     fn use_speaker_output(&self, endpoint: SocketAddr) -> Result<Snapshot, String> {
         Client::connect(endpoint, Duration::from_secs(2))
             .and_then(|mut client| client.use_speaker_output())
+            .map_err(|e| e.to_string())
+    }
+    fn set_output_filters(
+        &self,
+        endpoint: SocketAddr,
+        expected: Snapshot,
+        filters: Vec<OutputFilter>,
+    ) -> Result<Snapshot, String> {
+        let mut client =
+            Client::connect(endpoint, Duration::from_secs(2)).map_err(|e| e.to_string())?;
+        // Discovery agrees on the protocol version before anything is uploaded.
+        client.discover().map_err(|e| e.to_string())?;
+        let mut settings = Vec::with_capacity(filters.len());
+        for filter in filters {
+            let upload = match &filter.taps {
+                Some((rate, taps)) => Some(
+                    client
+                        .upload_filter(*rate, taps)
+                        .map_err(|e| e.to_string())?,
+                ),
+                None => None,
+            };
+            settings.push(omniphony_adapter::protocol::OutputFilterSetting {
+                output_id: filter.output_id,
+                filter: upload,
+            });
+        }
+        client
+            .set_output_filters(&expected, settings)
             .map_err(|e| e.to_string())
     }
     fn measure(
@@ -980,6 +1027,8 @@ impl Controller {
                 .then(|| PathBuf::from(&settings.calibration_path)),
             sweep: settings.sweep,
             out_dir,
+            bass_managed: false,
+            bypass_output_filters: false,
         };
         self.cancelled = Arc::new(AtomicBool::new(false));
         self.state.job = Some(Job::Measure {
@@ -1642,6 +1691,8 @@ impl Controller {
             sweep: settings.sweep,
             out_dir: PathBuf::from(&settings.output_root)
                 .join(format!("batch-{stamp}-{}", self.sequence)),
+            bass_managed: false,
+            bypass_output_filters: false,
         };
         self.cancelled = Arc::new(AtomicBool::new(false));
         self.state.job = Some(Job::Batch {

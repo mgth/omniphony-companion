@@ -40,6 +40,7 @@ impl Backend for UiBench {
             master_gain_db: 0.0,
             max_delay_ms: 100.0,
             unavailable_reason: None,
+            output_filters_bypassed: false,
             outputs: [
                 "Front left",
                 "Front right",
@@ -64,6 +65,7 @@ impl Backend for UiBench {
                 azimuth_deg: Some([-30.0, 30.0, 0.0, -110.0, 110.0, 25.0][index]),
                 elevation_deg: Some([0.0, 0.0, 0.0, 15.0, 15.0, -20.0][index]),
                 distance_m: [Some(2.6), Some(2.6), Some(2.4), Some(1.9), Some(2.1), None][index],
+                filter: None,
             })
             .collect(),
         })
@@ -863,6 +865,7 @@ pub fn bench_alignment(controller: &mut Controller) -> companion_service::alignm
                 azimuth_deg: Some(az),
                 elevation_deg: Some(el),
                 distance_m: Some(d),
+                filter: None,
             },
         )
         .collect();

@@ -1900,6 +1900,8 @@ pub fn request(
             .then(|| PathBuf::from(&s.calibration_path)),
         sweep: s.sweep,
         out_dir,
+        bass_managed: false,
+        bypass_output_filters: false,
     })
 }
 pub fn save(a: &Alignment) -> Result<(), String> {

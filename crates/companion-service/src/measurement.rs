@@ -30,6 +30,11 @@ pub struct MeasureRequest {
     pub calibration: Option<PathBuf>,
     pub sweep: Sweep,
     pub out_dir: PathBuf,
+    /// Protocol 8: each target plays as a source at its layout position, through the
+    /// crossover and bass management (the reference stays direct). Sequences only.
+    pub bass_managed: bool,
+    /// Protocol 8: every output plays without its room correction filter meanwhile.
+    pub bypass_output_filters: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -461,6 +466,7 @@ mod tests {
             azimuth_deg: None,
             elevation_deg: None,
             distance_m: None,
+            filter: None,
         };
         MeasureRequest {
             endpoint: "127.0.0.1:1".parse().unwrap(),
@@ -472,6 +478,7 @@ mod tests {
                 max_delay_ms: 100.0,
                 outputs: vec![output("C", 0), output("FL", 1)],
                 unavailable_reason: None,
+                output_filters_bypassed: false,
             },
             device: "test".into(),
             input_channel: 1,
@@ -483,6 +490,8 @@ mod tests {
             calibration: Some(PathBuf::from("/somewhere/umik-1 7101234.txt")),
             sweep,
             out_dir: directory.to_owned(),
+            bass_managed: false,
+            bypass_output_filters: false,
         }
     }
     fn recording(samples: Vec<f32>) -> measurement_capture::Recording {
@@ -514,6 +523,7 @@ mod tests {
             output_id: args.output.clone(),
             reference_output_id: Some(args.reference_output.clone()),
             sequence_outputs: vec![],
+            bass_managed: false,
             signal: args.sweep,
             state: SignalState::Completed,
             rendered_frames: frames,

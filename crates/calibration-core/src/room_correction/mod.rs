@@ -16,9 +16,10 @@
 //! sessions. Outputs whose positions disagree too much are refused.
 //!
 //! Pure and offline: no file, device or network access, never in an audio callback.
-mod filter;
+pub(crate) mod filter;
 mod reflections;
-mod spectrum;
+pub(crate) mod spectrum;
+mod subwoofer;
 
 use crate::{Error, Result, require};
 pub use reflections::{FLOOR_DB as REFLECTION_FLOOR_DB, Reflection, SPEED_OF_SOUND_M_S};
@@ -27,6 +28,7 @@ pub use spectrum::{POINTS_PER_OCTAVE, grid};
 use spectrum::{
     band_mean, decibels, interpolate, rms_difference, rms_shape_difference, smooth, smooth_db,
 };
+pub use subwoofer::{SUBWOOFER_METHOD, SubwooferSettings, design_subwoofer};
 
 pub const METHOD: &str = "fdw-spatial-average-minimum-phase-v1";
 /// The band every curve is levelled at (mean power, 0 dB), the alignment's level band.
@@ -270,11 +272,15 @@ impl Measurement {
     }
     /// The median signal-to-noise ratio over 500 Hz–2 kHz, the alignment's level band.
     fn level_snr_db(&self) -> Option<f64> {
+        self.median_snr_db(LEVEL_BAND_HZ)
+    }
+    /// The median signal-to-noise ratio over `band`.
+    fn median_snr_db(&self, band: [f64; 2]) -> Option<f64> {
         let mut values: Vec<f64> = self
             .snr_db
             .as_ref()?
             .iter()
-            .filter(|p| (LEVEL_BAND_HZ[0]..=LEVEL_BAND_HZ[1]).contains(&p[0]))
+            .filter(|p| (band[0]..=band[1]).contains(&p[0]))
             .map(|p| p[1])
             .collect();
         if values.is_empty() {
@@ -286,6 +292,11 @@ impl Measurement {
     /// The swept band, narrowed to where the signal-to-noise ratio (a third-octave
     /// mean) stays at least [`MIN_BAND_SNR_DB`] on either side of 1 kHz.
     fn usable_band(&self) -> [f64; 2] {
+        self.usable_band_around(1000.0)
+    }
+    /// The swept band, narrowed to where the signal-to-noise ratio (a third-octave
+    /// mean) stays at least [`MIN_BAND_SNR_DB`] on either side of `centre`.
+    fn usable_band_around(&self, centre: f64) -> [f64; 2] {
         let Some(points) = self.snr_db.as_ref().filter(|p| p.len() >= 2) else {
             return self.band_hz;
         };
@@ -307,7 +318,7 @@ impl Measurement {
             })
             .collect();
         let centre = frequencies
-            .partition_point(|&f| f < 1000.0)
+            .partition_point(|&f| f < centre)
             .min(frequencies.len() - 1);
         let mut first = centre;
         while first > 0 && smoothed[first - 1] >= MIN_BAND_SNR_DB {
@@ -341,7 +352,15 @@ impl Measurement {
     /// Calibrated power in the frequency-dependent window at each of `frequencies`;
     /// `NaN` outside the swept band or where the signal-to-noise ratio is too low.
     fn power(&self, settings: &DesignSettings, frequencies: &[f64]) -> Vec<f64> {
-        let [low, high] = self.usable_band();
+        self.power_in(settings, frequencies, self.usable_band())
+    }
+    /// [`Self::power`] over `band` instead of the band around 1 kHz.
+    fn power_in(
+        &self,
+        settings: &DesignSettings,
+        frequencies: &[f64],
+        [low, high]: [f64; 2],
+    ) -> Vec<f64> {
         let high = high.min(0.45 * self.rate);
         let inside: Vec<f64> = frequencies
             .iter()
