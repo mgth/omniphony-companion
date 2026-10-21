@@ -458,7 +458,16 @@ fn state(measured: &Snapshot, plan: &Plan, part: Part, reference: &str) -> Snaps
 /// starts from, so each part plays it at one level. `None` when nothing is left.
 fn part_group(group: &Group, part: Part, measured: &Snapshot, capture_rate: u32) -> Option<Group> {
     if part == Part::Direct {
-        return Some(group.clone());
+        // A direct sweep stays under each of its outputs' own ceilings.
+        let mut group = group.clone();
+        group.sweep.peak_dbfs = group
+            .outputs
+            .iter()
+            .chain(std::iter::once(&group.reference))
+            .filter_map(|id| measured.outputs.iter().find(|o| &o.id == id))
+            .map(|o| sweep_plan::ceiling(measured, o))
+            .fold(group.sweep.peak_dbfs, f32::min);
+        return Some(group);
     }
     let outputs: Vec<String> = group
         .outputs
@@ -659,7 +668,15 @@ pub fn measure<B: Backend + ?Sized>(
     let mut steps: Vec<(Part, Group)> = vec![];
     for part in Part::ALL {
         if part == Part::Direct {
-            steps.push((part, bass.plan.direct.clone()));
+            steps.extend(
+                part_group(
+                    &bass.plan.direct,
+                    part,
+                    &bass.snapshot,
+                    a.settings.sample_rate,
+                )
+                .map(|g| (part, g)),
+            );
             continue;
         }
         for group in &bass.plan.groups {
