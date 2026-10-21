@@ -10,7 +10,7 @@ use calibration_core::{
     repeatability::{QualifiedEstimate, RepeatEstimate},
 };
 use measurement_capture::{clipping, level};
-use omniphony_adapter::{Snapshot, protocol::OutputSetting};
+use omniphony_adapter::{Snapshot, Sweep, protocol::OutputSetting};
 use serde::{Deserialize, Serialize};
 use std::{
     net::SocketAddr,
@@ -37,6 +37,14 @@ pub struct Row {
     /// The user chose to align to this speaker although the policy sets it aside.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub include_anyway: bool,
+    /// The sweep this speaker was measured with (see [`crate::sweep_plan`]); absent in
+    /// sessions from before, which measured every speaker with `settings.sweep`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sweep: Option<Sweep>,
+    /// The speaker its sequence used as timing reference, when not
+    /// `settings.reference_output`: a subwoofer the reference cannot play is its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_output: Option<String>,
 }
 impl Row {
     fn new(output_id: String) -> Self {
@@ -49,7 +57,23 @@ impl Row {
             reason: None,
             reason_code: None,
             include_anyway: false,
+            sweep: None,
+            reference_output: None,
         }
+    }
+    /// The sweep its takes were measured with.
+    pub fn sweep(&self, settings: &Settings) -> Sweep {
+        self.sweep.unwrap_or(settings.sweep)
+    }
+    /// The reference its takes were measured against.
+    pub fn reference<'a>(&'a self, settings: &'a Settings) -> Option<&'a str> {
+        self.reference_output
+            .as_deref()
+            .or(settings.reference_output.as_deref())
+    }
+    /// A subwoofer or LFE: no timing or level is measured for it here.
+    pub fn bass_only(&self, settings: &Settings) -> bool {
+        crate::sweep_plan::bass_only(self.sweep(settings))
     }
     /// Why this speaker receives no target, typed also for sessions saved as text.
     pub fn exclusion(&self) -> Option<ExclusionReason> {
@@ -131,6 +155,9 @@ pub struct Alignment {
     /// passes refined the settings `snapshot` holds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub zeroed_snapshot: Option<Snapshot>,
+    /// The automatic level probe the passes' sweep levels come from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level_probe: Option<crate::level_probe::Probe>,
 }
 /// How an alignment treats the gains and delays the renderer has when it starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -174,7 +201,30 @@ fn stamp() -> u128 {
 /// after a rejected capture) are not repeated as separate causes. `gain_offset_db` is how
 /// far the speaker's output gain was lowered for the take: it is added back to its level
 /// and to a clipping overdrive, so both read at the speaker's original setting.
-fn estimate(take: &TakeOutcome, gain_offset_db: f64) -> RepeatEstimate {
+///
+/// For a bass-only speaker no timing or level is measured, and the take says so instead
+/// of failing, unless the capture itself failed.
+fn estimate(take: &TakeOutcome, gain_offset_db: f64, bass_only: bool) -> RepeatEstimate {
+    if bass_only {
+        let mut result = estimate(take, gain_offset_db, false);
+        let failed = result.codes.iter().find(|c| {
+            matches!(
+                c,
+                ExclusionReason::Cancelled
+                    | ExclusionReason::NoSignal
+                    | ExclusionReason::MissingTimingReferences
+                    | ExclusionReason::CaptureFailed { .. }
+                    | ExclusionReason::Clipped { .. }
+            )
+        });
+        let reason = failed.cloned().unwrap_or(ExclusionReason::BassOnly);
+        result.arrival_ms = None;
+        result.level_db = None;
+        result.reasons.clear();
+        result.codes.clear();
+        result.reject(reason);
+        return result;
+    }
     let mut result = RepeatEstimate {
         arrival_ms: None,
         level_db: None,
@@ -292,8 +342,19 @@ pub fn capture<B: Backend + ?Sized>(
     if !request.endpoint.ip().is_loopback() {
         return Err("Alignment requires a local renderer.".into());
     }
-    if request.sweep.start_hz > 450.0 || request.sweep.end_hz < 5000.0 {
-        return Err("Alignment requires a sweep covering 500–2000 Hz levels and broadband arrival analysis.".into());
+    // The ranges and references do not depend on gains: check them before any change.
+    let planned = crate::sweep_plan::plan(&settings, &request.snapshot, &outputs, None)?;
+    let broadband = planned
+        .iter()
+        .filter(|g| !g.bass_only())
+        .map(|g| g.outputs.len())
+        .sum::<usize>();
+    if broadband < 2
+        || planned
+            .iter()
+            .any(|g| !g.bass_only() && (g.sweep.start_hz > 450.0 || g.sweep.end_hz < 5000.0))
+    {
+        return Err("Alignment requires at least two broadband speakers and a sweep covering 500–2000 Hz levels and broadband arrival analysis.".into());
     }
     std::fs::create_dir_all(crate::files::parent(&request.out_dir)).map_err(err)?;
     std::fs::create_dir(&request.out_dir).map_err(err)?;
@@ -318,6 +379,7 @@ pub fn capture<B: Backend + ?Sized>(
         physical_levels_changed: false,
         retake_snapshots: vec![],
         zeroed_snapshot: None,
+        level_probe: None,
     };
     let mut takes = vec![];
     // Preserve one calibration file for both passes, even if its source is edited.
@@ -354,75 +416,143 @@ pub fn capture<B: Backend + ?Sized>(
             })?;
         alignment.zeroed_snapshot = Some(current.clone());
     }
+    let calibration_copy = calibration
+        .as_ref()
+        .map(|_| request.out_dir.join("microphone-calibration.txt"));
+    let row_of = |id: &str| outputs.iter().position(|o| o == id).unwrap_or(0);
+    // Sweep levels come from a quiet probe of every output, in the passes' state.
+    let groups = if alignment.settings.automatic_level && !cancel.load(Ordering::Relaxed) {
+        let mut probe_request = request.clone();
+        probe_request.snapshot = current.clone();
+        probe_request.calibration = calibration_copy.clone();
+        let order: Vec<_> = planned
+            .iter()
+            .flat_map(|g| g.outputs.iter().map(|id| row_of(id)))
+            .collect();
+        crate::level_probe::run(
+            backend,
+            &probe_request,
+            &planned,
+            &request.out_dir.join("level-probe"),
+            alignment.settings.sweep.peak_dbfs,
+            cancel,
+            &mut |i, p| progress(0, order[i.min(order.len() - 1)], p),
+        )
+        .and_then(|probe| {
+            let groups = crate::sweep_plan::plan(
+                &alignment.settings,
+                &current,
+                &outputs,
+                Some(&probe.peaks()),
+            );
+            alignment.level_probe = Some(probe);
+            groups
+        })
+        .unwrap_or_else(|detail| {
+            alignment.block(if cancel.load(Ordering::Relaxed) {
+                Blocker::Cancelled
+            } else {
+                Blocker::Capture {
+                    detail: format!("Level probe failed: {detail}"),
+                }
+            });
+            vec![]
+        })
+    } else {
+        crate::sweep_plan::plan(&alignment.settings, &current, &outputs, None)?
+    };
+    for row in &mut alignment.rows {
+        if let Some(group) = crate::sweep_plan::group_of(&groups, &row.output_id) {
+            row.sweep = Some(group.sweep);
+            row.reference_output = (alignment.settings.reference_output.as_ref()
+                != Some(&group.reference))
+            .then(|| group.reference.clone());
+        }
+    }
     for pass in 0..2 {
+        if !alignment.blockers.is_empty() {
+            break;
+        }
         if cancel.load(Ordering::Relaxed) {
             alignment.block(Blocker::Cancelled);
             break;
         }
-        let mut child = request.clone();
-        child.snapshot = current.clone();
-        child.output = outputs[0].clone();
-        child.out_dir = request.out_dir.join(format!("pass-{}", pass + 1));
-        child.calibration = calibration
-            .as_ref()
-            .map(|_| request.out_dir.join("microphone-calibration.txt"));
-        let batch =
-            match backend.measure_batch(child.clone(), outputs.clone(), cancel, &mut |i, p| {
-                progress(pass, i, p)
-            }) {
+        let pass_dir = request.out_dir.join(format!("pass-{}", pass + 1));
+        if groups.len() > 1 {
+            std::fs::create_dir(&pass_dir).map_err(err)?;
+        }
+        let mut analyzed = 0;
+        let mut pass_error = None;
+        // One sequence per group of speakers sharing a sweep, in order.
+        for (index, group) in groups.iter().enumerate() {
+            let mut base = request.clone();
+            base.snapshot = current.clone();
+            base.out_dir = pass_dir.clone();
+            base.calibration = calibration_copy.clone();
+            let child = crate::sweep_plan::group_request(&base, group, index, groups.len());
+            let rows: Vec<_> = group.outputs.iter().map(|id| row_of(id)).collect();
+            let batch = match backend.measure_batch(
+                child.clone(),
+                group.outputs.clone(),
+                cancel,
+                &mut |i, p| progress(pass, rows[i.min(rows.len() - 1)], p),
+            ) {
                 Ok(batch) => batch,
                 Err(error) => {
-                    alignment.pass_reports.as_mut().unwrap().push(PassReport {
-                        analyzed_speakers: 0,
-                        error: Some(error.clone()),
-                    });
-                    alignment.block(Blocker::Capture { detail: error });
+                    pass_error = Some(Blocker::Capture { detail: error });
                     break;
                 }
             };
-        let incomplete = batch.takes.len() != outputs.len()
-            || batch
-                .takes
-                .iter()
-                .zip(&outputs)
-                .any(|((id, _), expected)| id != expected);
-        let pass_error = batch
-            .error
-            .clone()
-            .map(|detail| Blocker::Capture { detail })
-            .or_else(|| batch.cancelled.then_some(Blocker::Cancelled))
-            .or_else(|| incomplete.then_some(Blocker::IncompleteBatch));
+            let incomplete = batch.takes.len() != group.outputs.len()
+                || batch
+                    .takes
+                    .iter()
+                    .zip(&group.outputs)
+                    .any(|((id, _), expected)| id != expected);
+            let error = batch
+                .error
+                .clone()
+                .map(|detail| Blocker::Capture { detail })
+                .or_else(|| batch.cancelled.then_some(Blocker::Cancelled))
+                .or_else(|| incomplete.then_some(Blocker::IncompleteBatch));
+            analyzed += batch.takes.len();
+            if !incomplete {
+                for (&row, (_, take)) in rows.iter().zip(&batch.takes) {
+                    let row = &mut alignment.rows[row];
+                    row.take_folders.push(take.directory.clone());
+                    row.repeats.push(estimate(take, 0.0, group.bass_only()));
+                    row.quality.push(take.quality());
+                }
+                if error.is_none() && alignment.blockers.is_empty() {
+                    let lower_gain = alignment.settings.retake_clipped;
+                    retakes.extend(retake(
+                        backend,
+                        &child,
+                        &mut alignment,
+                        &mut current,
+                        pass,
+                        &batch.takes,
+                        lower_gain,
+                        cancel,
+                        progress,
+                    ));
+                }
+            }
+            takes.extend(batch.takes);
+            if error.is_some() {
+                pass_error = error;
+                break;
+            }
+            if !alignment.blockers.is_empty() {
+                break;
+            }
+        }
         alignment.pass_reports.as_mut().unwrap().push(PassReport {
-            analyzed_speakers: batch.takes.len(),
+            analyzed_speakers: analyzed,
             error: pass_error.as_ref().map(ToString::to_string),
         });
         if let Some(error) = pass_error {
             alignment.block(error);
-        }
-        if !incomplete {
-            for (row, (_, take)) in alignment.rows.iter_mut().zip(&batch.takes) {
-                row.take_folders.push(take.directory.clone());
-                row.repeats.push(estimate(take, 0.0));
-                row.quality.push(take.quality());
-            }
-            if alignment.blockers.is_empty() {
-                let lower_gain = alignment.settings.retake_clipped;
-                retakes.extend(retake(
-                    backend,
-                    &child,
-                    &mut alignment,
-                    &mut current,
-                    pass,
-                    &batch.takes,
-                    lower_gain,
-                    cancel,
-                    progress,
-                ));
-            }
-        }
-        takes.extend(batch.takes);
-        if !alignment.blockers.is_empty() {
-            break;
         }
     }
     // Stopped or failed, the outputs go back to their settings all the same.
@@ -623,7 +753,14 @@ fn retake<B: Backend + ?Sized>(
         let mut retake = pass_request.clone();
         retake.snapshot = renderer.clone();
         retake.output = ids[0].clone();
-        retake.out_dir = a.directory.join(format!("pass-{}-retake", pass + 1));
+        let name = pass_request
+            .out_dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| format!("pass-{}", pass + 1));
+        retake.out_dir = pass_request
+            .out_dir
+            .with_file_name(format!("{name}-retake"));
         backend.measure_batch(retake, ids.clone(), cancel, &mut |i, p| {
             progress(pass, rows[i.min(rows.len() - 1)], p)
         })
@@ -668,7 +805,11 @@ fn retake<B: Backend + ?Sized>(
         let gain_offset_db = (high.gain_db - low.gain_db) as f64;
         let row = &mut a.rows[row];
         row.take_folders[pass] = take.directory.clone();
-        row.repeats[pass] = estimate(&take, gain_offset_db);
+        row.repeats[pass] = estimate(
+            &take,
+            gain_offset_db,
+            crate::sweep_plan::bass_only(pass_request.sweep),
+        );
         row.quality[pass] = take.quality();
         retakes.push(Retake {
             output_id: id,
@@ -780,6 +921,12 @@ pub fn remeasure<B: Backend + ?Sized>(
     request.calibration = request
         .calibration
         .map(|_| a.directory.join("microphone-calibration.txt"));
+    // The sweep and reference the speaker was measured with in the passes.
+    let bass_only = a.rows[row].bass_only(&a.settings);
+    request.sweep = a.rows[row].sweep(&a.settings);
+    if let Some(reference) = a.rows[row].reference(&a.settings) {
+        request.reference_output = reference.to_owned();
+    }
     let mut updated = a.clone();
     let mut current = live;
     // Measured from zero: the speaker is measured again in the state the passes were.
@@ -817,7 +964,7 @@ pub fn remeasure<B: Backend + ?Sized>(
             };
             let r = &mut updated.rows[row];
             r.take_folders[pass] = take.directory.clone();
-            r.repeats[pass] = estimate(take, 0.0);
+            r.repeats[pass] = estimate(take, 0.0, bass_only);
             r.quality[pass] = take.quality();
             let lower_gain = updated.settings.retake_clipped;
             retakes.extend(retake(
@@ -1006,6 +1153,9 @@ pub fn reanalyze(original: &Alignment) -> Result<Alignment, String> {
         if row.take_folders.len() > 2 {
             return Err("unexpected repeat count".into());
         }
+        let sweep = row.sweep(&original.settings);
+        let reference = row.reference(&original.settings).map(str::to_owned);
+        let bass_only = row.bass_only(&original.settings);
         for folder in &mut row.take_folders {
             *folder = crate::workspace::absolute(folder);
             let analyze = || -> Result<(crate::review::SavedReview, f64), String> {
@@ -1016,9 +1166,8 @@ pub fn reanalyze(original: &Alignment) -> Result<Alignment, String> {
                 if review.output_id != row.output_id
                     || review.microphone_id != original.settings.microphone_id
                     || review.position_id != original.settings.position_id
-                    || review.signal != original.settings.sweep
-                    || Some(&review.reference_output_id)
-                        != original.settings.reference_output.as_ref()
+                    || review.signal != sweep
+                    || Some(&review.reference_output_id) != reference.as_ref()
                 {
                     return Err("saved take identity differs from this alignment".into());
                 }
@@ -1041,7 +1190,7 @@ pub fn reanalyze(original: &Alignment) -> Result<Alignment, String> {
                         impulse_error: review.impulse_error,
                         deferred: false,
                     };
-                    row.repeats.push(estimate(&take, gain_offset_db));
+                    row.repeats.push(estimate(&take, gain_offset_db, bass_only));
                     let mut quality = take.quality();
                     if let Some(reason) = review.original_rejection_reason {
                         quality
@@ -1165,6 +1314,18 @@ fn make_session(a: &Alignment) -> Result<core::Session, String> {
     })
 }
 impl Alignment {
+    /// The settings `output_id`'s takes were measured with: its sweep and reference.
+    pub fn take_settings(&self, output_id: &str) -> Settings {
+        let row = self.rows.iter().find(|r| r.output_id == output_id);
+        Settings {
+            sweep: row.map_or(self.settings.sweep, |r| r.sweep(&self.settings)),
+            reference_output: row
+                .and_then(|r| r.reference(&self.settings))
+                .map(str::to_owned)
+                .or_else(|| self.settings.reference_output.clone()),
+            ..self.settings.clone()
+        }
+    }
     pub fn corrected_output_ids(&self) -> Vec<String> {
         self.profile
             .as_ref()

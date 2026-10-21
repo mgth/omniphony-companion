@@ -357,6 +357,8 @@ pub fn alignment(
                 details: vec!["Synthetic presentation fixture".into()],
             };
             Row {
+                sweep: None,
+                reference_output: None,
                 output_id: o.id.clone(),
                 take_folders: vec![
                     format!("synthetic-pass-1-{i}").into(),
@@ -402,6 +404,7 @@ pub fn alignment(
         })
         .collect();
     Alignment {
+        level_probe: None,
         schema_version: 1,
         directory: "synthetic-alignment".into(),
         endpoint: "127.0.0.1:9000".parse().unwrap(),
@@ -515,6 +518,8 @@ pub fn room_alignment(controller: &Controller) -> companion_service::alignment::
                 details: vec!["Synthetic presentation fixture".into()],
             };
             Row {
+                sweep: None,
+                reference_output: None,
                 output_id: o.id.clone(),
                 take_folders: vec![
                     format!("synthetic-room-pass-1-{i}").into(),
@@ -556,6 +561,7 @@ pub fn room_alignment(controller: &Controller) -> companion_service::alignment::
         })
         .collect();
     Alignment {
+        level_probe: None,
         schema_version: 1,
         directory: "synthetic-room-alignment".into(),
         endpoint: "127.0.0.1:9000".parse().unwrap(),
@@ -634,6 +640,8 @@ pub fn late_device_alignment(
                 .collect::<Vec<_>>();
             let qualified = calibration_core::repeatability::qualify(&repeats).ok();
             let mut row = Row {
+                sweep: None,
+                reference_output: None,
                 output_id: o.id.clone(),
                 take_folders: vec![
                     format!("synthetic-late-pass-1-{i}").into(),
@@ -658,6 +666,7 @@ pub fn late_device_alignment(
         })
         .collect();
     Alignment {
+        level_probe: None,
         schema_version: 1,
         directory: directory.to_owned(),
         endpoint: "127.0.0.1:9000".parse().unwrap(),
@@ -879,6 +888,8 @@ pub fn bench_alignment(controller: &mut Controller) -> companion_service::alignm
                 })
                 .collect();
             Some(Row {
+                sweep: None,
+                reference_output: None,
                 output_id: id.into(),
                 take_folders: vec![
                     format!("synthetic-bench-pass-1-{id}").into(),
@@ -901,6 +912,7 @@ pub fn bench_alignment(controller: &mut Controller) -> companion_service::alignm
         })
         .collect();
     Alignment {
+        level_probe: None,
         schema_version: 1,
         directory: "synthetic-bench-alignment".into(),
         endpoint: "127.0.0.1:9000".parse().unwrap(),

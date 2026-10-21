@@ -337,6 +337,18 @@ fn estimates_follow_the_checked_speakers_and_the_running_job() {
     use companion_service::duration;
     let b = Arc::new(Bench::new());
     let mut c = ready(b);
+    // Room-correction sweeps: the planned groups, and the level probe before alignment.
+    let groups = c.plan(&["Left".into(), "Right".into()]).unwrap();
+    assert_eq!(
+        c.batch_estimate(),
+        Some(duration::planned(&groups, 1, false))
+    );
+    let alignment = c.alignment_estimate().unwrap();
+    assert_eq!(alignment, duration::planned(&groups, 2, true));
+    assert!(alignment.probe > Duration::ZERO && alignment.total > alignment.per_pass * 2);
+    // The manual sweep, which the rest of this test follows.
+    c.settings.sweep_mode = companion_service::sweep_plan::SweepMode::Custom;
+    c.settings.automatic_level = false;
     let sweep = c.settings.sweep;
     assert_eq!(c.batch_estimate(), Some(duration::batch(sweep, 2)));
     assert_eq!(c.alignment_estimate(), Some(duration::alignment(sweep, 2)));
@@ -358,7 +370,7 @@ fn estimates_follow_the_checked_speakers_and_the_running_job() {
         output_id: "Right".into(),
     });
     c.state.progress = Some(MeasureProgress::OpeningInput);
-    assert_eq!(c.remaining(), Some(c.take_estimate().total));
+    assert_eq!(c.remaining(), Some(c.take_estimate("Right").total));
     c.state.job = None;
     c.state.progress = None;
 }

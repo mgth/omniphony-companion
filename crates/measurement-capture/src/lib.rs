@@ -224,7 +224,8 @@ impl Capture {
         max_frames: usize,
     ) -> Result<Self> {
         if max_frames == 0
-            || max_frames > 4_000_000.max(sample_rate as usize * MAX_SECONDS as usize)
+            || max_frames
+                > sequence::MAX_BATCH_FRAMES.max(sample_rate as usize * MAX_SECONDS as usize)
         {
             return Err("capture exceeds the frame budget".into());
         }

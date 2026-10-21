@@ -110,7 +110,17 @@ pub fn input_settings(settings: &mut Settings, inputs: &[InputDevice], applied: 
 /// Choose a timing reference when none was ever chosen.
 pub fn reference_settings(settings: &mut Settings, snapshot: &Snapshot, applied: &mut Applied) {
     if settings.reference_output.is_none() {
-        settings.reference_output = reference(snapshot, settings.sweep);
+        // A room-correction plan only needs a reference that carries the arrival review
+        // and the level band; each speaker's range follows from its own limits.
+        let sweep = match settings.sweep_mode {
+            crate::sweep_plan::SweepMode::Custom => settings.sweep,
+            crate::sweep_plan::SweepMode::RoomCorrection => Sweep {
+                start_hz: 450.0,
+                end_hz: crate::sweep_plan::BROADBAND_END_HZ,
+                ..settings.sweep
+            },
+        };
+        settings.reference_output = reference(snapshot, sweep);
         applied.reference = settings.reference_output.is_some();
     }
 }

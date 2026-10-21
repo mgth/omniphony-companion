@@ -34,6 +34,13 @@ Reference levels must agree within 0.50 dB within and across takes. These gates 
 prototype sensitivity/repeatability tests, not statistical accuracy bounds. A
 reproducible reflection can still pass: no algorithm here proves direct-path identity.
 
+Sweeps and levels follow [room-correction measurements](room-correction-measurement.md)
+by default: each speaker is swept over its own range, speakers sharing a sweep share
+one sequence per pass, and a quiet level probe before the first pass sets the level.
+A subwoofer or LFE output gets its own bass sweep; it stays out of timing and level
+with the reason "Bass only" and keeps its response. **Measurement settings → Sweeps
+→ Custom** and the automatic-level switch restore the single manual sweep.
+
 The pure core qualifies repeated estimates and proposes settings. Relative times
 may be signed, and transfer gains may exceed 0 dB. The legacy observation field
 `level_dbfs` stores relative transfer dB for this method; its method identifier,

@@ -204,26 +204,32 @@ impl Backend for Rig {
             for x in &mut samples {
                 *x = x.clamp(-1.0, 1.0);
             }
-            let (timing, mut response) = if clipped {
-                let timing = timing::inspect(&samples, 48000, 48000, args.sweep).unwrap();
-                let response =
-                    impulse::inspect(&samples, 48000, 48000, args.sweep, &timing).unwrap();
-                (timing, response)
+            let timing = timing::inspect(&samples, 48000, 48000, args.sweep).unwrap();
+            // The arrival review refuses a subwoofer's bass-only sweep, as in a real take.
+            let response = if clipped {
+                impulse::inspect(&samples, 48000, 48000, args.sweep, &timing)
             } else {
-                let timing = timing::analyze(&samples, 48000, 48000, args.sweep).unwrap();
-                let response =
-                    impulse::analyze(&samples, 48000, 48000, args.sweep, &timing).unwrap();
-                (timing, response)
+                impulse::analyze(&samples, 48000, 48000, args.sweep, &timing)
             };
-            if self.bad_repeat.load(Ordering::Relaxed) && pass % 2 == 1 && id == "R" {
-                response.relative_arrival_ms = response.relative_arrival_ms.map(|v| v + 2.0);
+            let (mut response, impulse_error) = match response {
+                Ok(r) => (Some(r), None),
+                Err(e) => (None, Some(e)),
+            };
+            if self.bad_repeat.load(Ordering::Relaxed)
+                && pass % 2 == 1
+                && id == "R"
+                && let Some(r) = &mut response
+            {
+                r.relative_arrival_ms = r.relative_arrival_ms.map(|v| v + 2.0);
             }
             let directory = args.out_dir.join(id);
             std::fs::create_dir(&directory).unwrap();
             let rejection = self.rejected.lock().unwrap().get(id).cloned();
             let rejection = rejection.or_else(|| clipped.then(|| "clipped recording".into()));
-            let diagnostics =
-                clipped.then(|| diagnostics::analyze(&samples, 48000, 48000, args.sweep).unwrap());
+            // The level probe reads its peaks from the diagnostics.
+            let probe = args.sweep.duration_ms == companion_service::level_probe::PROBE_MS;
+            let diagnostics = (clipped || probe)
+                .then(|| diagnostics::analyze(&samples, 48000, 48000, args.sweep).unwrap());
             takes.push((
                 id.clone(),
                 TakeOutcome {
@@ -234,8 +240,8 @@ impl Backend for Rig {
                     rejection_reason: rejection,
                     diagnostics,
                     timing: Some(timing),
-                    impulse: Some(Arc::new(response)),
-                    impulse_error: None,
+                    impulse: response.map(Arc::new),
+                    impulse_error,
                 },
             ));
         }
@@ -245,6 +251,15 @@ impl Backend for Rig {
             cancelled: false,
             error: None,
         })
+    }
+}
+/// The single 1 s sweep and manual level these tests were written for; the
+/// room-correction plan and the level probe have their own tests.
+fn manual() -> Settings {
+    Settings {
+        sweep_mode: companion_service::sweep_plan::SweepMode::Custom,
+        automatic_level: false,
+        ..Settings::default()
     }
 }
 fn acquire(rig: &Rig, root: &std::path::Path) -> alignment::Alignment {
@@ -259,7 +274,7 @@ fn acquire_with(
         device: Some("test microphone".into()),
         reference_output: Some("L".into()),
         output_root: root.display().to_string(),
-        ..Settings::default()
+        ..manual()
     };
     let endpoint = "127.0.0.1:9000".parse().unwrap();
     let mut sweep = settings.sweep;
@@ -606,7 +621,7 @@ fn reason_codes_round_trip_and_text_only_sessions_still_load() {
             duration_ms: 200,
             ..Settings::default().sweep
         },
-        ..Settings::default()
+        ..manual()
     };
     let request = alignment::request(
         "127.0.0.1:9000".parse().unwrap(),
@@ -726,7 +741,7 @@ fn capture_loud_with(
             ..Settings::default().sweep
         },
         retake_clipped,
-        ..Settings::default()
+        ..manual()
     };
     let request = alignment::request(
         "127.0.0.1:9000".parse().unwrap(),
@@ -848,7 +863,7 @@ fn capture_pair(rig: &Rig, root: &std::path::Path) -> alignment::Outcome {
         device: Some("test microphone".into()),
         reference_output: Some("L".into()),
         output_root: root.display().to_string(),
-        ..Settings::default()
+        ..manual()
     };
     settings.sweep.duration_ms = 200;
     let request = alignment::request(
@@ -1086,7 +1101,7 @@ fn partial_proposal_preserves_excluded_outputs_through_apply_verify_reload_and_r
             duration_ms: 200,
             ..Settings::default().sweep
         },
-        ..Settings::default()
+        ..manual()
     };
     let request = alignment::request(
         "127.0.0.1:9000".parse().unwrap(),
@@ -1734,7 +1749,7 @@ fn outputs_that_cannot_be_zeroed_are_not_measured() {
         device: Some("test microphone".into()),
         reference_output: Some("L".into()),
         output_root: root.path().display().to_string(),
-        ..Settings::default()
+        ..manual()
     };
     let endpoint = "127.0.0.1:9000".parse().unwrap();
     let request = alignment::request(
@@ -1857,7 +1872,7 @@ fn acquire_with_rejected(
             duration_ms: 200,
             ..Settings::default().sweep
         },
-        ..Settings::default()
+        ..manual()
     };
     let endpoint = "127.0.0.1:9000".parse().unwrap();
     let request = alignment::request(
@@ -1926,4 +1941,133 @@ fn a_speaker_left_out_at_zero_or_while_refining_does_not_block_apply() {
     let mut a = acquire_with_rejected(&rig, root.path(), alignment::Basis::Refine);
     assert_eq!(a.apply_blocker(), None);
     alignment::apply(&rig, &mut a, false).unwrap();
+}
+
+fn room_settings(automatic_level: bool) -> Settings {
+    Settings {
+        device: Some("test microphone".into()),
+        reference_output: Some("L".into()),
+        automatic_level,
+        ..Settings::default()
+    }
+}
+fn room_capture(
+    rig: &Rig,
+    root: &std::path::Path,
+    settings: Settings,
+    outputs: &[&str],
+) -> alignment::Outcome {
+    let snapshot = rig.snapshot.lock().unwrap().clone();
+    let request = alignment::request(
+        "127.0.0.1:9000".parse().unwrap(),
+        snapshot,
+        &settings,
+        outputs[0].into(),
+        root.join("room"),
+    )
+    .unwrap();
+    alignment::capture(
+        rig,
+        request,
+        settings,
+        outputs.iter().map(|s| s.to_string()).collect(),
+        alignment::Basis::Refine,
+        &AtomicBool::new(false),
+        &mut |_, _, _| {},
+    )
+    .unwrap()
+}
+
+#[test]
+fn room_correction_passes_sweep_each_range_and_keep_the_subwoofer_out_of_timing() {
+    let root = tempfile::tempdir().unwrap();
+    let rig = Rig::new();
+    rig.snapshot.lock().unwrap().outputs.push(Output {
+        id: "Sub".into(),
+        name: "Sub".into(),
+        index: 3,
+        gain_db: 0.0,
+        delay_ms: 0.0,
+        muted: false,
+        freq_low_hz: None,
+        freq_high_hz: Some(120.0),
+        azimuth_deg: None,
+        elevation_deg: None,
+        distance_m: None,
+    });
+    let outcome = room_capture(&rig, root.path(), room_settings(false), &["L", "R", "Sub"]);
+    let a = &outcome.alignment;
+    // One sequence per range and pass: the mains, then the subwoofer.
+    assert_eq!(
+        *rig.batches.lock().unwrap(),
+        [vec!["L", "R"], vec!["Sub"], vec!["L", "R"], vec!["Sub"]]
+    );
+    let main = a.rows[0].sweep.unwrap();
+    assert_eq!(
+        (main.start_hz, main.end_hz, main.duration_ms),
+        (20.0, 20000.0, 3000)
+    );
+    let sub = a.rows[2].sweep.unwrap();
+    assert_eq!((sub.start_hz, sub.end_hz), (20.0, 120.0));
+    // The full-range reference plays the subwoofer's sweep too.
+    assert!(a.rows.iter().all(|r| r.reference_output.is_none()));
+    assert!(a.rows[0].take_folders[0].starts_with(root.path().join("room/pass-1/sweep-1")));
+    assert!(a.rows[2].take_folders[1].starts_with(root.path().join("room/pass-2/sweep-2")));
+    // The mains are aligned; the subwoofer is not measured here, and says so.
+    assert_eq!(a.corrected_output_ids(), ["L", "R"]);
+    assert_eq!(a.rows[2].exclusion(), Some(ExclusionReason::BassOnly));
+    assert!(
+        a.rows[2]
+            .repeats
+            .iter()
+            .all(|r| r.codes == [ExclusionReason::BassOnly])
+    );
+    assert_eq!(a.take_settings("Sub").sweep, sub);
+    assert!(a.level_probe.is_none());
+    // A saved session reads back with its sweeps.
+    let loaded = alignment::load(&a.directory).unwrap();
+    assert_eq!(loaded.rows[2].sweep, Some(sub));
+}
+
+#[test]
+fn the_level_probe_sets_each_group_near_minus_6_dbfs_at_the_microphone() {
+    let root = tempfile::tempdir().unwrap();
+    let rig = Rig::new();
+    // At the microphone, L is 0.5 × 10 (−6 + 20 dB) and R 0.25 × 40 (−12 + 32 dB) of
+    // the playback level: probed at −40 dBFS, about −26 and −20 dBFS.
+    rig.loud.lock().unwrap().insert("L".into(), 10.0);
+    rig.loud.lock().unwrap().insert("R".into(), 40.0);
+    let outcome = room_capture(&rig, root.path(), room_settings(true), &["L", "R"]);
+    let a = &outcome.alignment;
+    assert_eq!(
+        *rig.batches.lock().unwrap(),
+        [vec!["L", "R"], vec!["L", "R"], vec!["L", "R"]]
+    );
+    let probe = a.level_probe.as_ref().unwrap();
+    assert!(probe.directory.join("level-probe.json").is_file());
+    let level = |id: &str| probe.level(id).unwrap();
+    assert_eq!(
+        level("L").probe_peak_dbfs,
+        companion_service::level_probe::PROBE_PEAK_DBFS
+    );
+    for (id, heard, chosen) in [("L", -26.0, -20.0), ("R", -20.0, -26.0)] {
+        let l = level(id);
+        assert!(
+            (l.microphone_peak_dbfs.unwrap() - heard).abs() < 0.5,
+            "{l:?}"
+        );
+        assert!((f64::from(l.peak_dbfs) - chosen).abs() < 0.5, "{l:?}");
+        assert!(l.note.is_none() && !l.clipped);
+    }
+    // One sequence plays both at R's level: R peaks near −6 dBFS, nothing clips.
+    let sweep = a.rows[0].sweep.unwrap();
+    assert_eq!(sweep, a.rows[1].sweep.unwrap());
+    assert!((f64::from(sweep.peak_dbfs) + 26.0).abs() < 0.5, "{sweep:?}");
+    assert!(outcome.retakes.is_empty());
+    assert!(
+        outcome.takes.iter().all(|(_, t)| t.accepted),
+        "{:?}",
+        a.rows[1].exclusion()
+    );
+    assert_eq!(a.corrected_output_ids(), ["L", "R"]);
 }

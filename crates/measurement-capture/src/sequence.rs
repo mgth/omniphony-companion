@@ -4,7 +4,10 @@ use crate::timing::{Peak, correlation_scores, peak_candidates_bounded, resample}
 use omniphony_osc_contract::measurement::{Sweep, sequence_frames};
 use std::ops::Range;
 
-pub const MAX_BATCH_FRAMES: usize = 4_000_000;
+/// About 146 s at 48 kHz: the renderer's 120 s sequence limit with 3 s room-correction
+/// sweeps. With its correlation template it stays inside the 8 Mi-point FFT bound of
+/// [`crate::timing`]; the recording itself is 28 MB of float samples.
+pub const MAX_BATCH_FRAMES: usize = 7_000_000;
 
 pub fn capture_budget(
     sweep: Sweep,
@@ -186,6 +189,42 @@ mod tests {
                 .unwrap_err()
                 .contains("inconsistent timing")
         );
+    }
+    #[test]
+    fn bass_only_sequences_keep_their_windows_and_responses() {
+        // A subwoofer measured against itself: the arrival review refuses the band,
+        // but the windows, the timing anchors and the stored response remain.
+        let sweep = Sweep {
+            duration_ms: 3000,
+            peak_dbfs: -20.0,
+            start_hz: 20.0,
+            end_hz: 120.0,
+        };
+        let source = sweep.samples(48000).unwrap();
+        let mut audio = vec![0.0; source.len() * 5 + 48000];
+        for i in 0..5 {
+            let start = 24000 + i * source.len();
+            for (dst, src) in audio[start..].iter_mut().zip(&source) {
+                *dst += src * 0.5;
+            }
+        }
+        let ranges = windows(&audio, 48000, 48000, sweep, 2).unwrap();
+        for range in ranges {
+            let samples = &audio[range];
+            let timing = crate::timing::inspect(samples, 48000, 48000, sweep).unwrap();
+            assert!(crate::impulse::analyze(samples, 48000, 48000, sweep, &timing).is_err());
+            let full =
+                crate::impulse::full_response(samples, 48000, 48000, sweep, &timing).unwrap();
+            let magnitude = crate::response::magnitude(&full, sweep, None).unwrap();
+            for (i, &hz) in magnitude.frequency_hz.iter().enumerate() {
+                if (25.0..=100.0).contains(&hz) {
+                    let db = f64::from(magnitude.magnitude_db[1][i]);
+                    assert!((db - 20.0 * 0.5_f64.log10()).abs() < 0.2, "{hz}: {db}");
+                }
+            }
+            let band = timing.band_noise.unwrap();
+            assert_eq!(band.band_hz, [20.0, 120.0]);
+        }
     }
     #[test]
     fn zero_batch_is_reported_as_missing_input_not_missing_references() {

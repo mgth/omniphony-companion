@@ -28,6 +28,8 @@ pub struct Estimate {
     pub analysis_per_take: Duration,
     /// One pass: input opening, lead-in, sequence, status latency, tail and analysis.
     pub per_pass: Duration,
+    /// The automatic level probe before the first pass, if any.
+    pub probe: Duration,
     pub total: Duration,
 }
 
@@ -45,7 +47,46 @@ pub fn estimate(sweep: Sweep, outputs: usize, passes: usize) -> Estimate {
         sequence,
         analysis_per_take,
         per_pass,
+        probe: Duration::ZERO,
         total: per_pass * passes as u32,
+    }
+}
+
+/// A run of `passes` over planned groups, one sequence each per pass, after the level
+/// probe when `probe` is set (one quiet sequence per group, retries not counted).
+pub fn planned(groups: &[crate::sweep_plan::Group], passes: usize, probe: bool) -> Estimate {
+    let parts: Vec<_> = groups
+        .iter()
+        .map(|g| estimate(g.sweep, g.outputs.len(), 1))
+        .collect();
+    let outputs = parts.iter().map(|e| e.outputs).sum::<usize>();
+    let per_pass = parts.iter().map(|e| e.per_pass).sum::<Duration>();
+    let analysis = parts
+        .iter()
+        .map(|e| e.analysis_per_take * e.outputs as u32)
+        .sum::<Duration>();
+    let probe = if probe {
+        groups
+            .iter()
+            .map(|g| {
+                let sweep = Sweep {
+                    duration_ms: crate::level_probe::PROBE_MS,
+                    ..g.sweep
+                };
+                estimate(sweep, g.outputs.len(), 1).per_pass
+            })
+            .sum()
+    } else {
+        Duration::ZERO
+    };
+    Estimate {
+        passes,
+        outputs,
+        sequence: parts.iter().map(|e| e.sequence).sum(),
+        analysis_per_take: analysis / outputs.max(1) as u32,
+        per_pass,
+        probe,
+        total: per_pass * passes as u32 + probe,
     }
 }
 pub fn batch(sweep: Sweep, outputs: usize) -> Estimate {
@@ -99,6 +140,29 @@ mod tests {
             start_hz: 200.0,
             end_hz: 10000.0,
         }
+    }
+
+    #[test]
+    fn a_planned_run_adds_its_groups_and_the_level_probe() {
+        use crate::sweep_plan::Group;
+        let group = |duration_ms, outputs: &[&str]| Group {
+            sweep: sweep(duration_ms),
+            reference: "C".into(),
+            outputs: outputs.iter().map(|s| s.to_string()).collect(),
+        };
+        let groups = [group(3000, &["FL", "FR"]), group(3000, &["LFE"])];
+        let run = planned(&groups, 2, true);
+        let mains = estimate(sweep(3000), 2, 1);
+        let sub = estimate(sweep(3000), 1, 1);
+        assert_eq!(run.outputs, 3);
+        assert_eq!(run.per_pass, mains.per_pass + sub.per_pass);
+        assert_eq!(run.sequence, mains.sequence + sub.sequence);
+        let probe = estimate(sweep(1000), 2, 1).per_pass + estimate(sweep(1000), 1, 1).per_pass;
+        assert_eq!(run.probe, probe);
+        assert_eq!(run.total, run.per_pass * 2 + probe);
+        assert_eq!(planned(&groups, 2, false).probe, Duration::ZERO);
+        // One group without a probe is the plain estimate.
+        assert_eq!(planned(&groups[..1], 2, false), estimate(sweep(3000), 2, 2));
     }
 
     #[test]

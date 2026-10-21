@@ -42,6 +42,11 @@ The Rust/egui desktop window lets you:
 - Check the wired speakers and use **Align levels and delays**, the main action, for
   two passes leading to a proposal. In Lab, **Measure selected speakers** runs one
   continuous diagnostic capture with shared reference sweeps. **Stop** cancels the complete run.
+- Measure for room correction by default: each speaker swept over its own range up
+  to 20 kHz for 3 s, a subwoofer over its bass range (kept out of timing and level),
+  the alignment's level set from a quiet probe so the microphone peaks near −6 dBFS,
+  and every take's unweighted response stored with a calibrated magnitude when a
+  microphone calibration file is chosen. See `docs/room-correction-measurement.md`.
 - Restore input/channel/rate, renderer address, reference, microphone/position,
   sweep settings, recording/calibration paths and speaker checkboxes on startup.
 - On a first run, the setup rail is already filled in: the first microphone input

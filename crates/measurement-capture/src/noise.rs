@@ -40,8 +40,33 @@ impl Biquad {
     }
 }
 
+/// Broadband sweeps are graded over this band, where the arrival and level analyses
+/// work: a full-range room-correction sweep is then graded like the 200 Hz–10 kHz
+/// alignment sweep, not on the room's rumble below 200 Hz or the hiss above 10 kHz.
+pub const BROADBAND_HZ: [f64; 2] = [200.0, 10000.0];
+
+/// The band an acquisition's signal/noise is graded over, and the part of the sweep
+/// body, as fractions of its duration, during which the sweep is inside it. A sweep
+/// that does not reach 5 kHz, such as a subwoofer's, is graded over its whole range.
+pub fn graded_band(sweep: Sweep, rate: f64) -> ([f64; 2], [f64; 2]) {
+    let (start, end) = (
+        f64::from(sweep.start_hz),
+        f64::from(sweep.end_hz).min(rate * 0.45),
+    );
+    let band = if end >= 5000.0 {
+        [start.max(BROADBAND_HZ[0]), end.min(BROADBAND_HZ[1])]
+    } else {
+        [start, end]
+    };
+    // An exponential sweep is at `f` after ln(f / start) / ln(end / start) of its body.
+    let span = (f64::from(sweep.end_hz) / start).ln();
+    let at = |hz: f64| ((hz / start).ln() / span).clamp(0.0, 1.0);
+    (band, [at(band[0]), at(band[1])])
+}
+
 /// Fourth-order Butterworth high/low passes. This filtered copy is used only
 /// for energy ratios; correlation and impulse analysis use the original PCM.
+/// `windows` are the sweep bodies; only their part inside the graded band counts.
 pub(crate) fn estimate(
     samples: &[f32],
     rate: f64,
@@ -49,10 +74,14 @@ pub(crate) fn estimate(
     reference: f64,
     windows: [(usize, usize); 3],
 ) -> Result<BandNoise, String> {
-    let band = [
-        f64::from(sweep.start_hz),
-        f64::from(sweep.end_hz).min(rate * 0.45),
-    ];
+    let (band, part) = graded_band(sweep, rate);
+    let windows = windows.map(|(start, end)| {
+        let length = end.saturating_sub(start) as f64;
+        (
+            start + (length * part[0]).round() as usize,
+            start + (length * part[1]).round() as usize,
+        )
+    });
     if !rate.is_finite()
         || !(7900.0..=193000.0).contains(&rate)
         || !reference.is_finite()
@@ -131,6 +160,66 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_full_range_sweep_is_graded_like_the_alignment_sweep() {
+        // The same rumble and hiss under a 1 s 200 Hz–10 kHz sweep and a 3 s full-range
+        // one at the same peak: the graded band and its part of the body make them agree.
+        let grade = |sweep: Sweep| {
+            let source = sweep.samples(48000).unwrap();
+            let lead = 24000;
+            let mut samples = vec![0.0_f32; lead + 3 * source.len() + 24000];
+            for segment in 0..3 {
+                for (dst, &src) in samples[lead + segment * source.len()..]
+                    .iter_mut()
+                    .zip(&source)
+                {
+                    *dst += src;
+                }
+            }
+            let mut state = 9_u32;
+            for (i, x) in samples.iter_mut().enumerate() {
+                let t = i as f64 / 48000.0;
+                state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+                *x += (0.05 * (std::f64::consts::TAU * 35.0 * t).sin()
+                    + (state as f64 / u32::MAX as f64 - 0.5) * 2e-4) as f32;
+            }
+            let padding = 12000;
+            let body = source.len() - 2 * padding;
+            let windows = [0, 1, 2].map(|k| {
+                let start = lead + k * source.len() + padding;
+                (start, start + body)
+            });
+            estimate(&samples, 48000.0, sweep, lead as f64, windows).unwrap()
+        };
+        let alignment = grade(Sweep {
+            duration_ms: 1000,
+            peak_dbfs: -20.0,
+            start_hz: 200.0,
+            end_hz: 10000.0,
+        });
+        let full = grade(Sweep {
+            duration_ms: 3000,
+            peak_dbfs: -20.0,
+            start_hz: 20.0,
+            end_hz: 20000.0,
+        });
+        assert_eq!(full.band_hz, [200.0, 10000.0]);
+        for (a, b) in alignment
+            .signal_to_noise_db
+            .iter()
+            .zip(full.signal_to_noise_db)
+        {
+            assert!(*a > 20.0 && (a - b).abs() < 0.5, "{a} vs {b}");
+        }
+        // A subwoofer's sweep is graded over its own range.
+        let sub = Sweep {
+            duration_ms: 3000,
+            peak_dbfs: -20.0,
+            start_hz: 20.0,
+            end_hz: 120.0,
+        };
+        assert_eq!(graded_band(sub, 48000.0), ([20.0, 120.0], [0.0, 1.0]));
+    }
     #[test]
     fn out_of_band_rumble_does_not_hide_an_in_band_signal() {
         let rate = 48000.0;
