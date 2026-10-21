@@ -219,7 +219,9 @@ outside this mission. No tonal EQ or spatial sensor work should displace this pr
 The following work is retained for after mission 1:
 
 1. Apply explicitly defined microphone amplitude calibration; early/full response
-   windows and phase plots with a common time reference.
+   windows and phase plots with a common time reference. Takes now keep their
+   unweighted response and a calibrated magnitude for the design step
+   (`docs/room-correction-measurement.md`); plots still use the review response.
 2. Extend captures and impulse windows for bass decay, noise-aware decay fits and
    reflection timing diagnostics (without claiming arrival directions).
 3. Guide successive microphone positions, show individual responses and spatial

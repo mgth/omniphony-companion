@@ -337,6 +337,8 @@ pub struct Controller {
     /// The basis the user chose for the next alignment; `None` follows
     /// [`Controller::default_alignment_basis`].
     pub chosen_alignment_basis: Option<alignment::Basis>,
+    /// The calibration file last read, by path: re-read only when the path changes.
+    calibration: Option<(String, Result<crate::room_response::CalibrationUse, String>)>,
 }
 impl Default for Controller {
     fn default() -> Self {
@@ -357,7 +359,25 @@ impl Controller {
             sequence: 0,
             startup_endpoint: None,
             chosen_alignment_basis: None,
+            calibration: None,
         }
+    }
+    /// The microphone calibration the next takes will use: `None` without a file,
+    /// else what identifies it or why it cannot be read. Takes measure either way;
+    /// a calibration only corrects the magnitude stored for room correction.
+    pub fn calibration_status(
+        &mut self,
+    ) -> Option<&Result<crate::room_response::CalibrationUse, String>> {
+        let path = self.settings.calibration_path.trim();
+        if path.is_empty() {
+            self.calibration = None;
+            return None;
+        }
+        if self.calibration.as_ref().is_none_or(|(p, _)| p != path) {
+            let status = crate::room_response::summarize(std::path::Path::new(path));
+            self.calibration = Some((path.to_owned(), status));
+        }
+        self.calibration.as_ref().map(|(_, status)| status)
     }
     pub fn busy(&self) -> bool {
         self.state.job.is_some()

@@ -642,6 +642,13 @@ impl CompanionApp {
                 egui::TextEdit::singleline(&mut self.controller.settings.position_id)
                     .desired_width(f32::INFINITY),
             );
+            ui.add_space(8.0);
+            caption(ui, "Microphone calibration file");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.controller.settings.calibration_path)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("Path to the microphone's .txt calibration"),
+            );
             let complete = self.controller.selected_input().is_some()
                 && self.controller.input_channels() > 0
                 && !self.controller.settings.microphone_id.trim().is_empty()
@@ -657,6 +664,41 @@ impl CompanionApp {
         });
         if let Some(error) = &self.controller.state.input_error {
             ui.label(RichText::new(error).small().color(RED));
+        }
+        match self.controller.calibration_status() {
+            None => {
+                ui.label(
+                    RichText::new("No microphone calibration. Alignment does not need one; room correction will.")
+                        .small()
+                        .color(WARM),
+                );
+            }
+            Some(Ok(calibration)) => {
+                ui.label(
+                    RichText::new(format!(
+                        "Calibration: {} · {} points · {:.0}–{:.0} Hz",
+                        calibration.source_name.as_deref().unwrap_or("file"),
+                        calibration.points,
+                        calibration.coverage_hz[0],
+                        calibration.coverage_hz[1]
+                    ))
+                    .small()
+                    .color(MUTED),
+                )
+                .on_hover_text(format!(
+                    "Applied to the room responses each take stores; levels and delays do not use it.\nSHA-256 {}",
+                    calibration.sha256
+                ));
+            }
+            Some(Err(error)) => {
+                ui.label(
+                    RichText::new(format!(
+                        "Calibration file unreadable: {error}. Fix or clear it to measure."
+                    ))
+                    .small()
+                    .color(RED),
+                );
+            }
         }
         ui.label(
             RichText::new(
@@ -808,19 +850,6 @@ impl CompanionApp {
                     ui.label(
                         RichText::new(
                             "Lowers that speaker's output gain by its overdrive plus 3 dB for one more take, then restores it. Its level counts the change back.",
-                        )
-                        .small()
-                        .color(MUTED),
-                    );
-                    caption(ui, "Calibration file (optional)");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.controller.settings.calibration_path)
-                            .desired_width(f32::INFINITY)
-                            .hint_text("Path to microphone calibration"),
-                    );
-                    ui.label(
-                        RichText::new(
-                            "Stored with the take; frequency corrections are not applied yet.",
                         )
                         .small()
                         .color(MUTED),

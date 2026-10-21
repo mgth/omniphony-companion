@@ -457,8 +457,12 @@ Each new take directory contains:
 - `capture-report.json`: input configuration, quality flags, raw level checks,
   timing diagnostics/warning or rejection reason, impulse analysis when available,
   and the frame origin for analysis;
-- `microphone-calibration.txt`, if supplied with `--calibration`: preserved
-  two-column frequency/relative-dB data. It is validated but **not applied**.
+- `response.wav` and `response.json`: the take's unweighted impulse response, kept
+  for room correction (see [room-correction measurements](docs/room-correction-measurement.md));
+- `microphone-calibration.txt`, if supplied with `--calibration` or chosen in the UI:
+  preserved frequency/relative-dB data. Only the magnitude stored in
+  `response.json` is corrected with it; the recording, the stored response, timing
+  and levels stay uncalibrated.
 
 PipeWire may resample to the chosen recording rate. Its metadata records that
 continuity checking uses chunk flags and callback cadence, not device timestamps;
