@@ -49,6 +49,13 @@ The Rust/egui desktop window lets you:
   microphone calibration file is chosen. After an alignment, the setup rail guides
   five more microphone positions around the main seat, stored for room correction
   only. See `docs/room-correction-measurement.md`.
+- Design one minimum-phase correction filter per speaker from those responses
+  (**Correction filters** in the setup rail, or `correction-filters` on the command
+  line): a gently tilted target up to 10 kHz, boosts of at most 3.5 dB and none below
+  the speaker's own roll-off, the 500 Hz–2 kHz level kept. They are exported as WAV
+  files for Studio's speaker editor, with the predicted response, how the positions
+  agree and the strong early reflections. Not yet sent to Omniphony nor verified by a
+  new measurement. See `docs/room-correction-design.md`.
 - Restore input/channel/rate, renderer address, reference, microphone/position,
   sweep settings, recording/calibration paths and speaker checkboxes on startup.
 - On a first run, the setup rail is already filled in: the first microphone input

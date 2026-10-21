@@ -235,7 +235,18 @@ impl Backend for Rig {
             let directory = args.out_dir.join(id);
             std::fs::create_dir(&directory).unwrap();
             if !self.no_response.load(Ordering::Relaxed) {
-                std::fs::write(directory.join("response.json"), "{}").unwrap();
+                // Stored as a real take stores it, for the room-correction design.
+                let request = MeasureRequest {
+                    out_dir: directory.clone(),
+                    output: id.clone(),
+                    ..args.clone()
+                };
+                impulse::full_response(&samples, 48000, 48000, args.sweep, &timing)
+                    .map_err(Into::into)
+                    .and_then(|full| {
+                        companion_service::room_response::store(&request, &full, 48000, !clipped, 0)
+                    })
+                    .unwrap();
             }
             let rejection = self.rejected.lock().unwrap().get(id).cloned();
             let rejection = rejection.or_else(|| clipped.then(|| "clipped recording".into()));
@@ -2252,4 +2263,66 @@ fn a_lost_reply_while_zeroing_for_a_position_puts_the_settings_back() {
     assert!(error.contains("could not be confirmed"), "{error}");
     assert!(a.application_uncertain);
     assert!(alignment::load(&a.directory).unwrap().application_uncertain);
+}
+
+#[test]
+fn correction_filters_are_designed_from_the_main_seat_and_the_positions_and_exported() {
+    use companion_service::{positions, room_correction};
+    let root = tempfile::tempdir().unwrap();
+    let rig = Rig::new();
+    let mut a = acquire_with(&rig, root.path(), alignment::Basis::FromZero);
+    for step in 0..2 {
+        positions::measure(&rig, &mut a, step, &AtomicBool::new(false), &mut |_, _| {}).unwrap();
+    }
+    let measured = room_correction::measurements(&a);
+    assert_eq!(measured.len(), 2);
+    for (output, left_out) in &measured {
+        assert!(left_out.is_empty(), "{left_out:?}");
+        // Both passes at the main seat, one take at each position.
+        assert_eq!(output.measurements.len(), 4);
+        assert_eq!(
+            output.measurements.iter().filter(|m| m.main_seat).count(),
+            2
+        );
+        assert!(
+            output
+                .measurements
+                .iter()
+                .any(|m| m.position_id == "main-seat/right-30cm")
+        );
+    }
+    let settings = room_correction::settings(&a);
+    assert_eq!(settings.sample_rate, 48000);
+    let design = room_correction::design(&a, &settings).unwrap();
+    let (folder, summary) = room_correction::export(&a, &design).unwrap();
+    assert!(folder.starts_with(companion_service::workspace::absolute(&a.directory)));
+    assert_eq!(summary.outputs.len(), 2);
+    for (output, designed) in summary.outputs.iter().zip(&design.outputs) {
+        assert!(output.refusal.is_none(), "{output:?}");
+        assert_eq!(output.positions.len(), 3);
+        assert!(output.warnings.iter().any(|w| w.contains("calibration")));
+        let file = output.file.as_deref().unwrap();
+        assert_eq!(file, format!("{}.wav", output.output_id));
+        let mut wav = hound::WavReader::open(folder.join(file)).unwrap();
+        let spec = wav.spec();
+        assert_eq!(
+            (spec.channels, spec.sample_rate, spec.bits_per_sample),
+            (1, 48000, 32)
+        );
+        assert_eq!(spec.sample_format, hound::SampleFormat::Float);
+        let taps: Vec<f32> = wav.samples::<f32>().map(Result::unwrap).collect();
+        assert_eq!(taps, designed.filter.as_ref().unwrap().taps);
+        assert_eq!(output.taps, Some(8192));
+        assert!(output.headroom_db.unwrap() <= 3.6);
+    }
+    let read: room_correction::Summary =
+        companion_service::files::read_json(&folder.join(room_correction::SUMMARY)).unwrap();
+    assert_eq!(read, summary);
+    assert!(folder.join(room_correction::CURVES).is_file());
+    // Takes without a stored response leave nothing to design from.
+    let rig = Rig::new();
+    rig.no_response.store(true, Ordering::Relaxed);
+    let old = acquire(&rig, &root.path().join("old"));
+    assert!(room_correction::readiness(&old).is_err());
+    assert!(room_correction::design(&old, &settings).is_err());
 }

@@ -213,6 +213,8 @@ pub enum Job {
         output_ids: Vec<String>,
         current: usize,
     },
+    /// Designing the current alignment's room-correction filters and exporting them.
+    RoomCorrection,
     ApplyAlignment,
     LoadAlignment,
     RestoreWorkspace,
@@ -227,6 +229,9 @@ pub enum Job {
         current: usize,
     },
 }
+
+/// Where an alignment's correction filters were exported, and what was exported.
+pub type RoomCorrectionExport = (PathBuf, crate::room_correction::Summary);
 
 /// A take with the settings it was measured with and its speaker.
 type RecordedTake = (Settings, String, TakeOutcome);
@@ -259,6 +264,9 @@ pub struct State {
     pub manual_run: Option<manual_level::Run>,
     pub manual_reference: Option<manual_level::Reference>,
     pub alignment: Option<alignment::Alignment>,
+    /// The last room-correction export, with the folder of the alignment it was
+    /// designed from: its folder and summary, or why it failed.
+    pub room_correction: Option<(PathBuf, Result<RoomCorrectionExport, String>)>,
     pub review: Option<SavedReview>,
     pub review_error: Option<String>,
     pub inputs: Vec<InputDevice>,
@@ -330,6 +338,7 @@ enum Event {
     ),
     AlignmentLoaded(Box<Result<LoadedAlignment, String>>),
     PositionMeasured(Box<alignment::Alignment>, Result<(), String>),
+    RoomCorrectionExported(PathBuf, Box<Result<RoomCorrectionExport, String>>),
     Reviewed(Box<Result<SavedReview, String>>),
     SavedTakeLoaded(PathBuf, Box<Result<TakeOutcome, String>>),
     OutputSwitched(Result<Snapshot, String>),
@@ -1350,6 +1359,49 @@ impl Controller {
             let _ = sender.send(Event::PositionMeasured(Box::new(a), result));
         });
     }
+    /// Whether the current alignment's correction filters can be designed now; the
+    /// error says why not. No renderer is needed: only stored responses are read.
+    pub fn room_correction_readiness(&self) -> Result<(), String> {
+        if self.busy() {
+            return Err("Wait for the current operation to finish.".into());
+        }
+        let a = self
+            .state
+            .alignment
+            .as_ref()
+            .ok_or("Align levels and delays at the main seat first.")?;
+        crate::room_correction::readiness(a)
+    }
+    /// Design one correction filter per speaker of the current alignment and export them
+    /// as WAV files in a new folder of the alignment. Nothing is sent to Omniphony.
+    pub fn export_room_correction(&mut self) {
+        if let Err(error) = self.room_correction_readiness() {
+            self.state.error = Some(error);
+            return;
+        }
+        let Some(a) = self.state.alignment.clone() else {
+            return;
+        };
+        self.state.job = Some(Job::RoomCorrection);
+        self.state.error = None;
+        let sender = self.sender.clone();
+        std::thread::spawn(move || {
+            let result = catch_job(|| crate::room_correction::design_and_export(&a));
+            let _ = sender.send(Event::RoomCorrectionExported(
+                a.directory.clone(),
+                Box::new(result),
+            ));
+        });
+    }
+    /// The last export of the current alignment's filters, if any.
+    pub fn room_correction(&self) -> Option<&Result<RoomCorrectionExport, String>> {
+        let a = self.state.alignment.as_ref()?;
+        self.state
+            .room_correction
+            .as_ref()
+            .filter(|(directory, _)| *directory == a.directory)
+            .map(|(_, result)| result)
+    }
     pub fn refresh_alignment_proposal(&mut self) {
         if self.busy() {
             return;
@@ -1858,6 +1910,10 @@ impl Controller {
                         *current = index.min(output_ids.len().saturating_sub(1));
                     }
                     self.state.progress = Some(progress);
+                }
+                Event::RoomCorrectionExported(directory, result) => {
+                    self.state.room_correction = Some((directory, *result));
+                    self.state.job = None;
                 }
                 Event::PositionMeasured(a, result) => {
                     if let Err(e) = result {

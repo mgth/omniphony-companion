@@ -895,6 +895,107 @@ impl CompanionApp {
         });
         ui.add_space(23.0);
         self.positions(ui);
+        ui.add_space(23.0);
+        self.correction_filters(ui);
+    }
+
+    /// Room-correction filters designed from the stored responses, exported as WAV files
+    /// for Studio's speaker editor. Nothing is sent to Omniphony from here.
+    fn correction_filters(&mut self, ui: &mut egui::Ui) {
+        section(ui, "05", "Correction filters");
+        ui.add_space(10.0);
+        ui.label(
+            RichText::new(
+                "One filter per speaker from the main seat and the other positions, up to 10 kHz, saved as WAV files to load in Studio's speaker editor (Choose filter…).",
+            )
+            .small()
+            .color(MUTED),
+        );
+        ui.add_space(6.0);
+        let running = matches!(self.controller.state.job, Some(Job::RoomCorrection));
+        let ready = self.controller.room_correction_readiness();
+        if ui
+            .add_enabled(
+                ready.is_ok(),
+                egui::Button::new(if running {
+                    "Designing filters…"
+                } else {
+                    "Design and export filters"
+                }),
+            )
+            .on_hover_text("A minimum-phase filter per speaker: 8192 taps at the renderer's rate, boosts up to 3.5 dB, a gentle downward tilt above 1 kHz, the 500 Hz–2 kHz level kept. Saved with a summary in a new folder of the alignment; nothing changes in Omniphony.")
+            .on_disabled_hover_text(ready.as_ref().err().map(String::as_str).unwrap_or(""))
+            .clicked()
+        {
+            self.controller.export_room_correction();
+        }
+        let name = |id: &str| {
+            self.controller
+                .state
+                .snapshot
+                .as_ref()
+                .and_then(|s| s.outputs.iter().find(|o| o.id == id))
+                .map_or(id.to_owned(), |o| o.name.clone())
+        };
+        match self.controller.room_correction() {
+            None => {}
+            Some(Err(error)) => {
+                ui.label(RichText::new(error).small().color(RED));
+            }
+            Some(Ok((folder, summary))) => {
+                let saved = summary.outputs.iter().filter(|o| o.file.is_some()).count();
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(format!(
+                        "{saved} of {} filters saved in",
+                        summary.outputs.len()
+                    ))
+                    .small(),
+                );
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(folder.display().to_string())
+                            .small()
+                            .monospace()
+                            .color(MUTED),
+                    )
+                    .truncate(),
+                )
+                .on_hover_text(folder.display().to_string());
+                for output in &summary.outputs {
+                    let (status, color, mut hover) = match (&output.refusal, output.deviation_db) {
+                        (Some(reason), _) => ("not corrected".to_owned(), WARM, reason.clone()),
+                        (None, Some([before, after])) => (
+                            format!("{before:.1} → {after:.1} dB"),
+                            if output.warnings.is_empty() {
+                                ACCENT
+                            } else {
+                                WARM
+                            },
+                            format!(
+                                "Distance from the target's shape at the measured positions, before → after (predicted). Largest boost {:.1} dB.",
+                                output.headroom_db.unwrap_or(0.0)
+                            ),
+                        ),
+                        (None, None) => ("saved".to_owned(), ACCENT, String::new()),
+                    };
+                    for warning in &output.warnings {
+                        hover.push('\n');
+                        hover.push_str(warning);
+                    }
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::Label::new(RichText::new(name(&output.output_id)).small())
+                                .truncate(),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(RichText::new(status).small().color(color))
+                                .on_hover_text(hover);
+                        });
+                    });
+                }
+            }
+        }
     }
 
     /// Guided microphone positions around the main seat, for room correction.

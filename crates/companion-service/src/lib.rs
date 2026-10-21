@@ -14,6 +14,7 @@ pub mod positions;
 pub mod preferences;
 pub mod review;
 pub mod room;
+pub mod room_correction;
 pub mod room_response;
 pub mod sweep_plan;
 pub mod workspace;
