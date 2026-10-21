@@ -663,12 +663,12 @@ pub fn measure<B: Backend + ?Sized>(
         }
     }
     // Stopped or failed, the outputs go back to their settings all the same.
-    if let Err(e) = alignment::move_outputs(backend, a.endpoint, &current, &bass.snapshot) {
-        if !settle(backend, a, &bass.snapshot) {
-            return Err(format!(
-                "The outputs silenced for the subwoofer measurement could not be put back ({e}): check their gains in Studio, then refresh."
-            ));
-        }
+    if let Err(e) = alignment::move_outputs(backend, a.endpoint, &current, &bass.snapshot)
+        && !settle(backend, a, &bass.snapshot)
+    {
+        return Err(format!(
+            "The outputs silenced for the subwoofer measurement could not be put back ({e}): check their gains in Studio, then refresh."
+        ));
     }
     let capture = Capture {
         step: step.map(|s| GUIDE[s].id.to_owned()),

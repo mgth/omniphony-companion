@@ -897,6 +897,269 @@ impl CompanionApp {
         self.positions(ui);
         ui.add_space(23.0);
         self.correction_filters(ui);
+        ui.add_space(23.0);
+        self.subwoofer(ui);
+    }
+
+    /// The subwoofer's integration with the speakers around their crossover: measured,
+    /// proposed, applied live and confirmed.
+    fn subwoofer(&mut self, ui: &mut egui::Ui) {
+        use companion_service::positions::GUIDE;
+        section(ui, "06", "Subwoofer");
+        ui.add_space(10.0);
+        let snapshot = self.controller.state.snapshot.clone();
+        let name = |id: &str| {
+            snapshot
+                .as_ref()
+                .and_then(|s| s.outputs.iter().find(|o| o.id == id))
+                .map_or(id.to_owned(), |o| o.name.clone())
+        };
+        let Some(a) = self.controller.state.alignment.clone() else {
+            ui.label(
+                RichText::new("After an alignment, measure how the subwoofer adds up with each speaker around their crossover, then set its delay, polarity, level and mode correction.")
+                    .small()
+                    .color(MUTED),
+            );
+            return;
+        };
+        let job = self.controller.state.job.clone();
+        let running =
+            |step: Option<usize>| matches!(&job, Some(Job::Bass { step: s, .. }) if *s == step);
+        let bass = a.bass.as_ref();
+        ui.label(
+            RichText::new("Each speaker with a low limit plays through bass management with the subwoofer silenced, the speakers silenced and both, at the main seat and around it; the room correction filters are held off meanwhile.")
+                .small()
+                .color(MUTED),
+        );
+        ui.add_space(6.0);
+        // Where it was measured.
+        let steps = std::iter::once(None).chain((0..GUIDE.len()).map(Some));
+        for step in steps {
+            let label = step.map_or("Main seat", |s| GUIDE[s].label);
+            let capture = bass.and_then(|b| b.capture(step.map(|s| GUIDE[s].id)));
+            let (status, color) = match capture {
+                _ if running(step) => ("measuring…".to_owned(), ACCENT),
+                Some(c) if bass.is_some_and(|b| c.complete(&b.plan)) => {
+                    ("measured".to_owned(), ACCENT)
+                }
+                Some(c) => (
+                    c.error
+                        .as_deref()
+                        .map_or("partly measured", |_| "stopped")
+                        .to_owned(),
+                    WARM,
+                ),
+                None => ("not yet".to_owned(), MUTED),
+            };
+            if step.is_some() && bass.is_none() {
+                break;
+            }
+            ui.horizontal(|ui| {
+                ui.add(egui::Label::new(RichText::new(label).small()).truncate());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let response = ui.label(RichText::new(status).small().color(color));
+                    if let Some(error) = capture.and_then(|c| c.error.as_deref()) {
+                        response.on_hover_text(error);
+                    }
+                });
+            });
+        }
+        ui.add_space(4.0);
+        let next = bass.and_then(|b| {
+            (0..GUIDE.len()).find(|&s| {
+                b.capture(Some(GUIDE[s].id))
+                    .is_none_or(|c| !c.complete(&b.plan))
+            })
+        });
+        ui.horizontal_wrapped(|ui| {
+            let ready = self.controller.bass_readiness(None);
+            let label = if bass.is_some() {
+                "Main seat again"
+            } else {
+                "Measure the subwoofer"
+            };
+            if ui
+                .add_enabled(ready.is_ok(), egui::Button::new(label))
+                .on_hover_text("With the microphone at the main seat: a quiet level probe, then every speaker with a low limit through bass management in three states, and the subwoofer's own sweep. Starts the subwoofer measurements over.")
+                .on_disabled_hover_text(ready.as_ref().err().map(String::as_str).unwrap_or(""))
+                .clicked()
+            {
+                self.controller.measure_bass(None);
+            }
+            if let Some(step) = next {
+                let ready = self.controller.bass_readiness(Some(step));
+                if ui
+                    .add_enabled(ready.is_ok(), egui::Button::new(format!("Position {}", step + 1)))
+                    .on_hover_text(GUIDE[step].instruction)
+                    .on_disabled_hover_text(ready.as_ref().err().map(String::as_str).unwrap_or(""))
+                    .clicked()
+                {
+                    self.controller.measure_bass(Some(step));
+                }
+            }
+        });
+        let Some(bass) = bass else {
+            return;
+        };
+        for (id, reason) in &bass.plan.skipped {
+            ui.label(
+                RichText::new(format!("{}: {reason}", name(id)))
+                    .small()
+                    .color(MUTED),
+            );
+        }
+        if let Some(error) = &bass.analysis_error {
+            ui.label(RichText::new(error).small().color(RED));
+        }
+        let Some(analysis) = &bass.analysis else {
+            return;
+        };
+        let proposal = &analysis.proposal;
+        ui.add_space(6.0);
+        if let Some(reason) = &proposal.refusal {
+            ui.label(RichText::new(reason).small().color(WARM));
+        } else {
+            let sub = &proposal.subwoofer;
+            let mut text = format!(
+                "{}: delay {:.1} → {:.1} ms, level {:+.1} dB{}",
+                name(&sub.output_id),
+                sub.delay_ms,
+                proposal.subwoofer_delay_ms,
+                proposal.setting.gain_change_db,
+                if proposal.setting.inverted {
+                    ", polarity inverted"
+                } else {
+                    ""
+                }
+            );
+            if proposal.others_delay_ms > 0.0 {
+                text.push_str(&format!(
+                    ", every other output +{:.1} ms",
+                    proposal.others_delay_ms
+                ));
+            }
+            ui.label(RichText::new(text).small().strong());
+            if let Some(mode) = &analysis.mode_correction {
+                let line = match (&mode.filter, &mode.refusal) {
+                    (Some(f), _) => {
+                        format!("Mode correction: cuts down to {:.1} dB.", f.deepest_cut_db)
+                    }
+                    (None, Some(reason)) => format!("No mode correction: {reason}"),
+                    (None, None) => String::new(),
+                };
+                ui.label(RichText::new(line).small().color(MUTED));
+            }
+        }
+        for speaker in &proposal.speakers {
+            let (status, color, mut hover) = match (&speaker.excluded, speaker.summation_db) {
+                (Some(reason), _) => ("left out".to_owned(), WARM, reason.clone()),
+                (None, Some([before, _, after])) => (
+                    format!("{before:.1} → {after:.1} dB"),
+                    if speaker.warnings.is_empty() { ACCENT } else { WARM },
+                    "How far the sum around the crossover falls below the two adding in phase, measured → with the proposal (0 dB: perfect).".to_owned(),
+                ),
+                _ => ("—".to_owned(), MUTED, String::new()),
+            };
+            if let Some(delay) = speaker.phase_delay_ms {
+                hover.push_str(&format!(
+                    "\nFrom the phase: the subwoofer arrives {delay:.1} ms after it{}.",
+                    if speaker.phase_inverted == Some(true) {
+                        ", in opposite polarity"
+                    } else {
+                        ""
+                    }
+                ));
+            }
+            if let Some([before, after]) = speaker.balance_db {
+                hover.push_str(&format!(
+                    "\nBelow against above the {:.0} Hz crossover: {before:+.1} → {after:+.1} dB.",
+                    speaker.crossover_hz
+                ));
+            }
+            for warning in &speaker.warnings {
+                hover.push('\n');
+                hover.push_str(warning);
+            }
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::Label::new(RichText::new(name(&speaker.output_id)).small()).truncate(),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(RichText::new(status).small().color(color))
+                        .on_hover_text(hover);
+                });
+            });
+        }
+        for warning in proposal.warnings.iter().chain(&analysis.notes) {
+            ui.label(RichText::new(warning).small().color(WARM));
+        }
+        ui.add_space(6.0);
+        let applying = matches!(job, Some(Job::ApplyBass { .. }));
+        ui.horizontal_wrapped(|ui| {
+            let applied = bass.is_applied();
+            let ready = self.controller.bass_apply_readiness(applied);
+            let label = match (applying, applied) {
+                (true, _) => "Working…",
+                (false, true) => "Undo",
+                (false, false) => "Apply",
+            };
+            if ui
+                .add_enabled(ready.is_ok(), egui::Button::new(label))
+                .on_hover_text(if applied {
+                    "Put the subwoofer (and the other outputs' delays) back as they were measured, without its filter."
+                } else {
+                    "Send the subwoofer's delay, level and filter to Omniphony, live: they reach its configuration only through Studio's Save."
+                })
+                .on_disabled_hover_text(ready.as_ref().err().map(String::as_str).unwrap_or(""))
+                .clicked()
+            {
+                self.controller.apply_bass(applied);
+            }
+            let ready = self.controller.bass_verify_readiness();
+            let label = if matches!(job, Some(Job::VerifyBass { .. })) {
+                "Confirming…"
+            } else {
+                "Confirm"
+            };
+            if ui
+                .add_enabled(ready.is_ok(), egui::Button::new(label))
+                .on_hover_text("With the microphone back at the main seat: measure every speaker's sum with the subwoofer again, through the filters, and compare it with the prediction.")
+                .on_disabled_hover_text(ready.as_ref().err().map(String::as_str).unwrap_or(""))
+                .clicked()
+            {
+                self.controller.verify_bass();
+            }
+        });
+        if let Some(note) = &bass.verification_note {
+            ui.label(RichText::new(note).small().color(MUTED));
+        }
+        if let Some(verification) = &bass.verification {
+            for check in &verification.speakers {
+                let [before, predicted, measured] = check.balance_db;
+                let color = if check.deviation_db <= 1.5 {
+                    ACCENT
+                } else {
+                    WARM
+                };
+                ui.horizontal(|ui| {
+                    ui.add(egui::Label::new(RichText::new(name(&check.output_id)).small()).truncate());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(format!("{:.1} dB from prediction", check.deviation_db))
+                                .small()
+                                .color(color),
+                        )
+                        .on_hover_text(format!(
+                            "Measured again: {:.1} dB from the predicted sum (RMS over the band). Below against above the crossover: {before:+.1} dB before, {predicted:+.1} dB predicted, {measured:+.1} dB now.",
+                            check.deviation_db
+                        ));
+                    });
+                });
+            }
+            for warning in &verification.warnings {
+                ui.label(RichText::new(warning).small().color(WARM));
+            }
+        }
     }
 
     /// Room-correction filters designed from the stored responses, exported as WAV files
@@ -1163,6 +1426,24 @@ impl CompanionApp {
                     companion_service::positions::GUIDE.len(),
                     current + 1,
                     output_ids.len()
+                ),
+                Some(Job::Bass {
+                    step,
+                    output_ids,
+                    current,
+                }) => format!(
+                    "Subwoofer · {} · Speaker {} / {}",
+                    step.map_or("main seat", |s| companion_service::positions::GUIDE[s].label),
+                    current + 1,
+                    output_ids.len().max(1)
+                ),
+                Some(Job::VerifyBass {
+                    output_ids,
+                    current,
+                }) => format!(
+                    "Subwoofer · confirming · Speaker {} / {}",
+                    current + 1,
+                    output_ids.len().max(1)
                 ),
                 _ => self
                     .controller

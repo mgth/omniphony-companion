@@ -95,6 +95,9 @@ struct Position {
     arrival_ms: BTreeMap<&'static str, f64>,
 }
 
+/// One batch: its outputs' gains, whether it was bass-managed and bypassed the filters.
+type Batch = (BTreeMap<String, f32>, bool, bool);
+
 struct Rig {
     snapshot: Mutex<Snapshot>,
     filters: Mutex<BTreeMap<String, Vec<f32>>>,
@@ -102,8 +105,7 @@ struct Rig {
     /// The subwoofer's acoustic level and polarity (wiring, amplifier).
     sub_gain: f64,
     writes: Mutex<usize>,
-    /// Each batch: its outputs' gains, whether it was bass-managed and bypassed the filters.
-    batches: Mutex<Vec<(BTreeMap<String, f32>, bool, bool)>>,
+    batches: Mutex<Vec<Batch>>,
 }
 
 fn output(index: u32, id: &str, low: Option<f32>, high: Option<f32>, delay_ms: f32) -> Output {
