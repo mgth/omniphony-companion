@@ -1,7 +1,8 @@
 # Room-correction measurements
 
-Measurements for a future room-correction design step: the take keeps the response
-a correction filter can be designed from. Nothing here designs, sends or applies a
+Measurements for a future room-correction design step: full-range sweeps at a level
+chosen from a probe, and takes that keep the response a correction filter can be
+designed from. Nothing here designs, sends or applies a
 filter, and nothing changes timing, levels, alignment proposals or a take's verdict.
 
 ## The stored response
@@ -47,6 +48,67 @@ window, from the 80 ms before the anchor: `magnitude_db − noise_db` approximat
 signal-to-noise ratio per frequency. Fractional-octave smoothing, frequency-dependent
 windowing and spatial averaging are left to the design step, which can recompute
 them from `response.wav`.
+
+## Sweeps
+
+**Measurement settings → Sweeps → Room correction** is the default. Each speaker is
+swept from its declared low limit (`freq_low_hz`, at least 20 Hz) to 20 kHz, its
+declared high limit or 0.45 times the lower of the render and capture rates, for
+3 s. The renderer refuses a sweep that starts below `freq_low_hz`, so the roll-off
+below it cannot be measured until the protocol allows it (bass-managed sweep, phase
+2). **Custom** keeps the duration and range typed below it, for every speaker.
+
+The renderer plays one sweep for the reference and every target of a sequence, so
+speakers are grouped by the sweep they share: one sequence per group in each pass,
+in a `sweep-N` folder of the pass when there are several. The reference plays every
+group's sweep, so a broadband speaker's range is narrowed to what the reference
+plays (a full-range front left starts at 80 Hz behind an 80 Hz centre). The sweep is
+shortened in 100 ms steps, down to 1 s, when a group's sequence would exceed the
+renderer's 120 s or the recording budget (now 7 million frames, 146 s at 48 kHz):
+3 s fits 16 speakers in one sequence.
+
+A broadband sweep covers the arrival review (300–9000 Hz) and the 500–2000 Hz level
+band exactly as the old 200 Hz–10 kHz sweep did; the arrival and level methods do
+not change. Its acquisition signal/noise is graded over 200 Hz–10 kHz, only over the
+part of the sweep that is in that band, so room rumble below 200 Hz and hiss above
+10 kHz do not lower the grade and a 3 s full-range sweep grades like the 1 s
+alignment sweep. Clipping estimates follow the sweep's instantaneous frequency and
+need no change. The per-take window stays within the 30 s analysis bound (about
+11 s for 3 s sweeps) and the deconvolution FFT within its bound at 192 kHz.
+
+A subwoofer or LFE output (`freq_high_hz` below 5 kHz) is swept over its own range,
+20–120 Hz for example. The reference plays it when its range covers it; otherwise
+the subwoofer is its own reference. The arrival review and the level band cannot use
+such a sweep, so the alignment records it as **Bass only** (`bass_only` code): its
+timing and level are not measured here, its response is kept, and the take is not a
+failure. A cancelled, failed or clipped capture keeps that reason instead. Its
+signal/noise is graded over its own range. Measuring from zero leaves its gain and
+delay as they were, since it receives no correction. A custom sweep that misses
+200 Hz–10 kHz, a treble-only one for example, is graded over its own range too.
+
+Each alignment row records its `sweep` and, when it differs from the settings, its
+`reference_output`; reanalysis and **Measure again** use them. Saved takes are
+recorded with the sweep and reference they were measured with.
+
+## Automatic sweep level
+
+With **Set the alignment's sweep level automatically** (the default), the alignment
+first plays every group once more as a probe: 1 s sweeps at −40 dBFS, in the state
+the passes measure under, saved in `level-probe/` with `level-probe.json`. The
+acquisition diagnostics give each interval's microphone peak; the reference's peak
+is its loudest interval. A group nothing was heard from is probed once more 18 dB
+louder. Each speaker's level is then the probe's plus the distance from its heard
+peak to −6 dBFS, rounded to 0.1 dB, between −60 and the contract's −12 dBFS and under
+its output-gain ceiling. A clipped probe uses its overdrive estimate (20 dB lower if
+unknown); a speaker never heard keeps the manual level. Notes in `level-probe.json`
+say when the microphone stays quiet even at −12 dBFS or would clip even at −60.
+
+A group plays at its quietest member's level, the reference included, so nothing in
+it clips; the others lose a little signal/noise. A 3 s sweep lets room modes build up
+a little more than the 1 s probe; the 6 dB below full scale covers that. Clipped
+retakes remain as a fallback. Verification probes again, under the applied gains.
+Single takes and **Measure checked** use the manual level, which stays editable as
+**Manual playback level**. The probe adds about 5 s per speaker, playback and analysis together.
 
 ## Microphone calibration
 

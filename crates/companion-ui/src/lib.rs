@@ -813,35 +813,72 @@ impl CompanionApp {
             egui::CollapsingHeader::new("Measurement settings")
                 .id_salt("advanced")
                 .show(ui, |ui| {
-                    caption(ui, "Sweep duration");
-                    ui.add(
-                        egui::DragValue::new(&mut self.controller.settings.sweep.duration_ms)
-                            .range(100..=5000)
-                            .suffix(" ms"),
+                    use companion_service::sweep_plan::SweepMode;
+                    caption(ui, "Sweeps");
+                    ui.horizontal(|ui| {
+                        ui.radio_value(
+                            &mut self.controller.settings.sweep_mode,
+                            SweepMode::RoomCorrection,
+                            "Room correction",
+                        )
+                        .on_hover_text("Each speaker over its own range, up to 20 kHz, 3 s long: the response is kept for room correction. A subwoofer gets its own bass sweep.");
+                        ui.radio_value(
+                            &mut self.controller.settings.sweep_mode,
+                            SweepMode::Custom,
+                            "Custom",
+                        );
+                    });
+                    let custom = self.controller.settings.sweep_mode == SweepMode::Custom;
+                    if !custom {
+                        ui.label(
+                            RichText::new("Each speaker from its own low limit to 20 kHz, 3 s, shorter only when many speakers share a sequence.")
+                                .small()
+                                .color(MUTED),
+                        );
+                    }
+                    ui.add_enabled_ui(custom, |ui| {
+                        caption(ui, "Sweep duration");
+                        ui.add(
+                            egui::DragValue::new(&mut self.controller.settings.sweep.duration_ms)
+                                .range(100..=5000)
+                                .suffix(" ms"),
+                        );
+                        caption(ui, "Frequency range");
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::DragValue::new(&mut self.controller.settings.sweep.start_hz)
+                                    .range(20.0..=80000.0)
+                                    .speed(10.0)
+                                    .suffix(" Hz"),
+                            );
+                            ui.label("to");
+                            ui.add(
+                                egui::DragValue::new(&mut self.controller.settings.sweep.end_hz)
+                                    .range(20.0..=86000.0)
+                                    .speed(50.0)
+                                    .suffix(" Hz"),
+                            );
+                        });
+                    });
+                    ui.add_space(4.0);
+                    ui.checkbox(
+                        &mut self.controller.settings.automatic_level,
+                        "Set the alignment's sweep level automatically",
                     );
-                    caption(ui, "Playback level");
+                    ui.label(
+                        RichText::new(
+                            "A quiet probe of each speaker first, then each plays so the microphone peaks near −6 dBFS (at most −12 dBFS). Single takes use the manual level.",
+                        )
+                        .small()
+                        .color(MUTED),
+                    );
+                    caption(ui, "Manual playback level");
                     ui.add(
                         egui::DragValue::new(&mut self.controller.settings.sweep.peak_dbfs)
                             .range(-60.0..=-12.0)
                             .speed(0.5)
                             .suffix(" dBFS"),
                     );
-                    caption(ui, "Frequency range");
-                    ui.horizontal(|ui| {
-                        ui.add(
-                            egui::DragValue::new(&mut self.controller.settings.sweep.start_hz)
-                                .range(20.0..=80000.0)
-                                .speed(10.0)
-                                .suffix(" Hz"),
-                        );
-                        ui.label("to");
-                        ui.add(
-                            egui::DragValue::new(&mut self.controller.settings.sweep.end_hz)
-                                .range(20.0..=86000.0)
-                                .speed(50.0)
-                                .suffix(" Hz"),
-                        );
-                    });
                     ui.add_space(4.0);
                     ui.checkbox(
                         &mut self.controller.settings.retake_clipped,
@@ -1463,7 +1500,6 @@ impl CompanionApp {
         summary: Option<&alignment_view::Summary>,
         scale: Option<&(f64, room_map::Scale)>,
     ) -> Vec<room_map::Chip<'a>> {
-        let sweep = self.controller.settings.sweep;
         let measured = |id: &str| {
             let (anchor, _) = scale?;
             let distances = self.room_distances.as_ref()?;
@@ -1481,8 +1517,13 @@ impl CompanionApp {
                     Some("Set aside: unchecked for capture".to_owned())
                 } else if o.muted {
                     Some("Set aside: muted in Omniphony".to_owned())
-                } else if sweep.start_hz < o.freq_low_hz.unwrap_or(20.0)
-                    || sweep.end_hz > o.freq_high_hz.unwrap_or(f32::MAX)
+                } else if self
+                    .controller
+                    .plan(std::slice::from_ref(&o.id))
+                    .map_or(true, |g| {
+                        g[0].sweep.start_hz < o.freq_low_hz.unwrap_or(20.0)
+                            || g[0].sweep.end_hz > o.freq_high_hz.unwrap_or(f32::MAX)
+                    })
                 {
                     Some("Set aside: the sweep does not fit its frequency range".to_owned())
                 } else {
@@ -1646,7 +1687,7 @@ impl CompanionApp {
                         .min_size(Vec2::new(70.0, 26.0));
                         let take_hint = format!(
                             "One diagnostic take of this speaker, {}. Does not change any setting.",
-                            about(self.controller.take_estimate().total)
+                            about(self.controller.take_estimate(output.id).total)
                         );
                         let button = if session {
                             let again = self.controller.can_remeasure(output.id);
@@ -1654,7 +1695,13 @@ impl CompanionApp {
                                 "Two takes of this speaker, one per pass, replace its takes in the alignment and the proposal is rebuilt; the other speakers keep theirs. {}. Does not change any setting.",
                                 capitalized(&about(
                                     companion_service::duration::alignment(
-                                        self.controller.settings.sweep,
+                                        self.controller
+                                            .state
+                                            .alignment
+                                            .as_ref()
+                                            .map_or(self.controller.settings.sweep, |a| {
+                                                a.take_settings(output.id).sweep
+                                            }),
                                         1
                                     )
                                     .total
@@ -2069,7 +2116,7 @@ impl CompanionApp {
     /// Why a take no longer describes Omniphony as it is, if it does not: what
     /// changed, not just that something did.
     fn earlier_take_note(&self, take: &Take) -> Option<&'static str> {
-        if self.controller.settings != take.settings {
+        if !self.controller.measures_like(take) {
             return Some("Previous measurement · the capture settings have changed since");
         }
         if self

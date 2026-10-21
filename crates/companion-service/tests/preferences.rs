@@ -42,6 +42,8 @@ fn autosave_and_immediate_exit_restore_all_choices_and_the_latest_edit() {
             start_hz: 120.0,
             end_hz: 18000.0,
         },
+        sweep_mode: companion_service::sweep_plan::SweepMode::Custom,
+        automatic_level: false,
         retake_clipped: false,
     };
     let excluded = BTreeSet::from(["Rear".into(), "Height".into()]);

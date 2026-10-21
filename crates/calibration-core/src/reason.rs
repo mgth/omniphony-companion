@@ -123,6 +123,10 @@ pub enum ExclusionReason {
     FarArrival {
         ms: f64,
     },
+    /// A bass-only output (a subwoofer or LFE): its sweep cannot carry the broadband
+    /// arrival review or the 500–2000 Hz level band. Timing and level are not measured
+    /// by the alignment; its response is kept for room correction and bass integration.
+    BassOnly,
     Other {
         detail: String,
     },
@@ -136,7 +140,9 @@ impl ExclusionReason {
         let lower = text.to_ascii_lowercase();
         let has = |needle: &str| lower.contains(needle);
         let detail = || text.to_owned();
-        if has("digital silence") || has("no microphone signal") {
+        if has("bass-only") {
+            Self::BassOnly
+        } else if has("digital silence") || has("no microphone signal") {
             Self::NoSignal
         } else if has("timing references were not found")
             || has("no target sweep")
@@ -270,6 +276,9 @@ impl ExclusionReason {
                 ms.abs(),
                 if *ms > 0.0 { "later" } else { "earlier" }
             ),
+            Self::BassOnly => {
+                "Bass only: timing and level are not measured here. Its response is kept.".into()
+            }
             Self::Other { .. } => "Not reliable enough to correct.".into(),
         }
     }
@@ -358,6 +367,10 @@ impl fmt::Display for ExclusionReason {
             Self::FarArrival { ms } => write!(
                 f,
                 "repeatable arrival is {ms:+.1} ms from the median of the repeatable speakers (limit ±{FAR_ARRIVAL_MS:.0} ms); set aside, settings unchanged"
+            ),
+            Self::BassOnly => write!(
+                f,
+                "bass-only output: timing and level are not measured here (arrival review needs a broadband sweep); its response is kept for room correction"
             ),
             Self::NoClearArrival { detail }
             | Self::CaptureFailed { detail }
@@ -636,6 +649,7 @@ mod tests {
             R::RepeatSpread { ms: 0.0, db: 0.62 },
             R::NotMeasuredTwice,
             R::Cancelled,
+            R::BassOnly,
         ] {
             let text = code.to_string();
             let back = R::from_message(&text);
@@ -657,6 +671,13 @@ mod tests {
                 _ => assert_eq!(back, code, "{text}"),
             }
         }
+        // The arrival review's own refusal of a subwoofer sweep reads as bass-only.
+        assert_eq!(
+            R::from_message(
+                "arrival review needs a broadband sweep starting at or below 960 Hz and ending at or above 5000 Hz; bass-only timing is unsupported"
+            ),
+            R::BassOnly
+        );
         let far = R::FarArrival { ms: 176.9 };
         assert_eq!(far.severity(), Severity::SetAside);
         assert_eq!(far.human(), "Set aside: 177 ms later than the others.");

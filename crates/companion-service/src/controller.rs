@@ -152,7 +152,14 @@ pub struct Settings {
     pub reference_output: Option<String>,
     pub calibration_path: String,
     pub output_root: String,
+    /// The manual sweep: its level is used without [`Settings::automatic_level`], and
+    /// its duration and range in [`crate::sweep_plan::SweepMode::Custom`].
     pub sweep: Sweep,
+    /// How each output's sweep is chosen; see [`crate::sweep_plan`].
+    pub sweep_mode: crate::sweep_plan::SweepMode,
+    /// Before an alignment, probe each speaker at a low level and play it so that the
+    /// microphone peaks near −6 dBFS; see [`crate::level_probe`].
+    pub automatic_level: bool,
     /// During an alignment, measure a speaker whose own interval clipped again in the
     /// same pass, with its output gain lowered by the overdrive plus margin; its level
     /// adds that gain back. The gain is restored right after.
@@ -175,6 +182,8 @@ impl Default for Settings {
                 start_hz: 200.0,
                 end_hz: 10000.0,
             },
+            sweep_mode: Default::default(),
+            automatic_level: true,
             retake_clipped: true,
         }
     }
@@ -211,6 +220,9 @@ pub enum Job {
         current: usize,
     },
 }
+
+/// A take with the settings it was measured with and its speaker.
+type RecordedTake = (Settings, String, TakeOutcome);
 
 #[derive(Debug, Clone)]
 pub struct Take {
@@ -307,7 +319,7 @@ enum Event {
     Remeasured(Box<alignment::Alignment>, Result<NewTakes, String>),
     AlignmentUpdated(
         Box<alignment::Alignment>,
-        Result<(Snapshot, Vec<(String, TakeOutcome)>), String>,
+        Result<(Snapshot, Vec<RecordedTake>), String>,
     ),
     AlignmentLoaded(Box<Result<LoadedAlignment, String>>),
     Reviewed(Box<Result<SavedReview, String>>),
@@ -322,7 +334,11 @@ enum Event {
     Progress(MeasureProgress),
     Measured(Box<Take>),
     BatchProgress(usize, MeasureProgress),
-    Batched(Settings, String, Result<BatchOutcome, String>),
+    Batched(
+        Vec<(String, Settings)>,
+        String,
+        Result<BatchOutcome, String>,
+    ),
 }
 pub struct Controller {
     pub state: State,
@@ -847,14 +863,6 @@ impl Controller {
         if self.settings.output_root.trim().is_empty() {
             return Err("Choose a folder for recordings.".into());
         }
-        self.settings.sweep.validate(snapshot.sample_rate)?;
-        if !(8000..=192000).contains(&self.settings.sample_rate)
-            || self.settings.sweep.end_hz > self.settings.sample_rate as f32 * 0.45
-        {
-            return Err(
-                "The sweep's upper frequency is too high for the input sample rate.".into(),
-            );
-        }
         let reference = self
             .settings
             .reference_output
@@ -872,15 +880,39 @@ impl Controller {
                     output.name
                 ));
             }
-            if self.settings.sweep.start_hz < output.freq_low_hz.unwrap_or(20.0)
-                || self.settings.sweep.end_hz > output.freq_high_hz.unwrap_or(f32::MAX)
+        }
+        let groups = crate::sweep_plan::plan(&self.settings, snapshot, &[output_id.into()], None)?;
+        let group = &groups[0];
+        let sweep = group.sweep;
+        sweep.validate(snapshot.sample_rate)?;
+        if !(8000..=192000).contains(&self.settings.sample_rate)
+            || sweep.end_hz > self.settings.sample_rate as f32 * 0.45
+        {
+            return Err(
+                "The sweep's upper frequency is too high for the input sample rate.".into(),
+            );
+        }
+        for id in [output_id, group.reference.as_str()] {
+            let output = snapshot
+                .outputs
+                .iter()
+                .find(|o| o.id == id)
+                .ok_or("Speaker is absent from this configuration. Refresh the connection.")?;
+            if output.muted {
+                return Err(format!(
+                    "{} is muted. Unmute it in Omniphony and refresh.",
+                    output.name
+                ));
+            }
+            if sweep.start_hz < output.freq_low_hz.unwrap_or(20.0)
+                || sweep.end_hz > output.freq_high_hz.unwrap_or(f32::MAX)
             {
                 return Err(format!(
                     "The sweep must fit {}'s frequency range.",
                     output.name
                 ));
             }
-            if self.settings.sweep.peak_dbfs + snapshot.master_gain_db + output.gain_db > -6.0 {
+            if sweep.peak_dbfs + snapshot.master_gain_db + output.gain_db > -6.0 {
                 return Err(format!(
                     "Lower the sweep level for {}'s current gain.",
                     output.name
@@ -890,13 +922,24 @@ impl Controller {
         Ok(())
     }
 
+    /// The groups the next capture of `outputs` measures, with the manual level.
+    pub fn plan(&self, outputs: &[String]) -> Result<Vec<crate::sweep_plan::Group>, String> {
+        let snapshot = self
+            .state
+            .snapshot
+            .as_ref()
+            .ok_or("Connect to Omniphony first.")?;
+        crate::sweep_plan::plan(&self.settings, snapshot, outputs, None)
+    }
+
     pub fn start(&mut self, output_id: &str) {
         if let Err(error) = self.can_measure(output_id) {
             self.state.error = Some(error);
             return;
         }
         let snapshot = self.state.snapshot.as_ref().expect("validated").clone();
-        let settings = self.settings.clone();
+        let groups = self.plan(&[output_id.into()]).expect("validated");
+        let settings = crate::sweep_plan::take_settings(&self.settings, &groups[0]);
         self.sequence += 1;
         // Output names never become paths. create_dir refuses any collision.
         let stamp = SystemTime::now()
@@ -973,11 +1016,24 @@ impl Controller {
         if self.selected_input().is_some_and(|i| i.is_monitor) {
             return Err("Choose an acoustic microphone, not a sink monitor.".into());
         }
-        if self.settings.sweep.start_hz > 450.0 || self.settings.sweep.end_hz < 5000.0 {
+        let groups = self.plan(&outputs)?;
+        if groups
+            .iter()
+            .any(|g| !g.bass_only() && (g.sweep.start_hz > 450.0 || g.sweep.end_hz < 5000.0))
+        {
             return Err(
                 "Alignment needs broadband arrival analysis and the full 500–2000 Hz level band."
                     .into(),
             );
+        }
+        if groups
+            .iter()
+            .filter(|g| !g.bass_only())
+            .map(|g| g.outputs.len())
+            .sum::<usize>()
+            < 2
+        {
+            return Err("Select at least two broadband speakers.".into());
         }
         // An applied alignment can be refined: the next one starts from its corrections.
         if self
@@ -1124,9 +1180,14 @@ impl Controller {
                         alignment::verify(backend.as_ref(), &mut a, &cancel, &mut |pass, i, p| {
                             let _ = sender.send(Event::AlignmentProgress(pass, i, p));
                         })?;
+                    let measured = &outcome.alignment;
                     Ok((
                         a.applied_snapshot.clone().ok_or("missing applied state")?,
-                        outcome.takes,
+                        outcome
+                            .takes
+                            .into_iter()
+                            .map(|(id, take)| (measured.take_settings(&id), id, take))
+                            .collect(),
                     ))
                 } else {
                     alignment::apply(backend.as_ref(), &mut a, action == "restore")
@@ -1293,17 +1354,27 @@ impl Controller {
             let _ = sender.send(Event::AlignmentLoaded(Box::new(result)));
         });
     }
+    /// Takes of `a`, each recorded with the sweep and reference it was measured with.
     fn append_alignment_takes(
         &mut self,
-        settings: Settings,
+        a: &alignment::Alignment,
         revision: String,
         takes: Vec<(String, TakeOutcome)>,
     ) {
-        for (output_id, outcome) in takes {
+        self.append_takes(
+            revision,
+            takes
+                .into_iter()
+                .map(|(id, take)| (a.take_settings(&id), id, take))
+                .collect(),
+        );
+    }
+    fn append_takes(&mut self, revision: String, takes: Vec<RecordedTake>) {
+        for (settings, output_id, outcome) in takes {
             self.state.takes.push(Take {
                 output_id,
                 revision: revision.clone(),
-                settings: settings.clone(),
+                settings,
                 outcome: Ok(outcome),
             });
         }
@@ -1329,39 +1400,53 @@ impl Controller {
     /// Expected duration of an alignment over the checked speakers, when one can start.
     pub fn alignment_estimate(&self) -> Option<crate::duration::Estimate> {
         let outputs = self.alignment_readiness().ok()?;
-        Some(crate::duration::alignment(
-            self.settings.sweep,
-            outputs.len(),
+        let groups = self.plan(&outputs).ok()?;
+        Some(crate::duration::planned(
+            &groups,
+            2,
+            self.settings.automatic_level,
         ))
     }
     /// Expected duration of one diagnostic pass over the checked speakers.
     pub fn batch_estimate(&self) -> Option<crate::duration::Estimate> {
         let outputs = self.batch_outputs().ok()?;
-        Some(crate::duration::batch(self.settings.sweep, outputs.len()))
+        Some(crate::duration::planned(
+            &self.plan(&outputs).ok()?,
+            1,
+            false,
+        ))
     }
     /// Expected duration of one take of a single speaker.
-    pub fn take_estimate(&self) -> crate::duration::Estimate {
-        crate::duration::batch(self.settings.sweep, 1)
+    pub fn take_estimate(&self, output_id: &str) -> crate::duration::Estimate {
+        self.plan(&[output_id.into()]).map_or_else(
+            |_| crate::duration::batch(self.settings.sweep, 1),
+            |groups| crate::duration::planned(&groups, 1, false),
+        )
     }
     /// Time left in the running capture, from its job and latest progress.
     pub fn remaining(&self) -> Option<Duration> {
-        let sweep = self.settings.sweep;
+        let planned = |ids: &[String], passes, probe| {
+            self.plan(ids).map_or_else(
+                |_| crate::duration::estimate(self.settings.sweep, ids.len(), passes),
+                |groups| crate::duration::planned(&groups, passes, probe),
+            )
+        };
         let (estimate, pass, target) = match &self.state.job {
-            Some(Job::Measure { .. }) => (crate::duration::batch(sweep, 1), 0, 0),
-            Some(Job::Remeasure { pass, .. }) => (crate::duration::alignment(sweep, 1), *pass, 0),
+            Some(Job::Measure { output_id }) => {
+                (planned(std::slice::from_ref(output_id), 1, false), 0, 0)
+            }
+            Some(Job::Remeasure { output_id, pass }) => {
+                (planned(std::slice::from_ref(output_id), 2, false), *pass, 0)
+            }
             Some(Job::Batch {
                 output_ids,
                 current,
-            }) => (crate::duration::batch(sweep, output_ids.len()), 0, *current),
+            }) => (planned(output_ids, 1, false), 0, *current),
             Some(Job::Alignment {
                 output_ids,
                 current,
                 pass,
-            }) => (
-                crate::duration::alignment(sweep, output_ids.len()),
-                *pass,
-                *current,
-            ),
+            }) => (planned(output_ids, 2, false), *pass, *current),
             _ => return None,
         };
         Some(estimate.remaining(pass, target, self.state.progress.as_ref()))
@@ -1384,12 +1469,14 @@ impl Controller {
         if outputs.is_empty() {
             return Err("Check at least one speaker with compatible measurement settings.".into());
         }
-        measurement_capture::sequence::capture_budget(
-            self.settings.sweep,
-            snapshot.sample_rate,
-            self.settings.sample_rate,
-            outputs.len(),
-        )?;
+        for group in self.plan(&outputs)? {
+            measurement_capture::sequence::capture_budget(
+                group.sweep,
+                snapshot.sample_rate,
+                self.settings.sample_rate,
+                group.outputs.len(),
+            )?;
+        }
         Ok(outputs)
     }
     pub fn start_batch(&mut self) {
@@ -1434,12 +1521,27 @@ impl Controller {
         let backend = self.backend.clone();
         let sender = self.sender.clone();
         let cancel = self.cancelled.clone();
+        let groups = self.plan(&outputs).expect("validated");
         std::thread::spawn(move || {
             let result = catch_job(|| {
-                backend.measure_batch(request, outputs, &cancel, &mut |i, p| {
-                    let _ = sender.send(Event::BatchProgress(i, p));
-                })
+                crate::sweep_plan::measure_groups(
+                    &*backend,
+                    &request,
+                    &groups,
+                    &cancel,
+                    &mut |i, p| {
+                        let _ = sender.send(Event::BatchProgress(i, p));
+                    },
+                )
             });
+            let settings: Vec<_> = groups
+                .iter()
+                .flat_map(|g| {
+                    g.outputs
+                        .iter()
+                        .map(|id| (id.clone(), crate::sweep_plan::take_settings(&settings, g)))
+                })
+                .collect();
             let _ = sender.send(Event::Batched(settings, snapshot.revision, result));
         });
     }
@@ -1549,10 +1651,10 @@ impl Controller {
                                 .unwrap_or(&a.snapshot)
                                 .revision
                                 .clone();
-                            self.append_alignment_takes(a.settings.clone(), revision, takes);
+                            self.append_alignment_takes(&a, revision, takes);
                             for retake in retakes {
                                 self.append_alignment_takes(
-                                    a.settings.clone(),
+                                    &a,
                                     retake.revision,
                                     vec![(retake.output_id, retake.take)],
                                 );
@@ -1577,16 +1679,15 @@ impl Controller {
                 Event::Aligned(result) => {
                     match *result {
                         Ok(outcome) => {
-                            let settings = outcome.alignment.settings.clone();
                             self.append_alignment_takes(
-                                settings.clone(),
+                                &outcome.alignment,
                                 outcome.alignment.snapshot.revision.clone(),
                                 outcome.takes,
                             );
                             // Takes at a lowered gain stay previous measurements.
                             for retake in outcome.retakes {
                                 self.append_alignment_takes(
-                                    settings.clone(),
+                                    &outcome.alignment,
                                     retake.revision,
                                     vec![(retake.output_id, retake.take)],
                                 );
@@ -1607,11 +1708,7 @@ impl Controller {
                 Event::AlignmentUpdated(a, result) => {
                     match result {
                         Ok((snapshot, takes)) => {
-                            self.append_alignment_takes(
-                                a.settings.clone(),
-                                snapshot.revision.clone(),
-                                takes,
-                            );
+                            self.append_takes(snapshot.revision.clone(), takes);
                             self.state.saved_snapshot = Some(snapshot.clone());
                             self.state.snapshot = Some(snapshot);
                         }
@@ -1684,10 +1781,14 @@ impl Controller {
                                 ));
                             }
                             for (output_id, outcome) in batch.takes {
+                                let settings = settings
+                                    .iter()
+                                    .find(|(id, _)| *id == output_id)
+                                    .map_or_else(|| self.settings.clone(), |(_, s)| s.clone());
                                 self.state.takes.push(Take {
                                     output_id,
                                     revision: revision.clone(),
-                                    settings: settings.clone(),
+                                    settings,
                                     outcome: Ok(outcome),
                                 });
                             }
@@ -1854,9 +1955,28 @@ impl Controller {
     }
     pub fn current_take(&self, output_id: &str) -> Option<&Take> {
         let revision = &self.state.snapshot.as_ref()?.revision;
-        self.state.takes.iter().rev().find(|t| {
-            t.output_id == output_id && t.revision == *revision && t.settings == self.settings
-        })
+        self.state
+            .takes
+            .iter()
+            .rev()
+            .find(|t| t.output_id == output_id && t.revision == *revision && self.measures_like(t))
+    }
+    /// The settings a take of `output_id` records now: its planned sweep and reference.
+    pub fn take_settings(&self, output_id: &str) -> Settings {
+        self.plan(&[output_id.into()]).map_or_else(
+            |_| self.settings.clone(),
+            |groups| crate::sweep_plan::take_settings(&self.settings, &groups[0]),
+        )
+    }
+    /// Whether the current settings would measure `take`'s speaker as it was: the same
+    /// settings, with the sweep and reference the plan gives it now. With automatic
+    /// levels its playback level is the probe's, not a setting.
+    pub fn measures_like(&self, take: &Take) -> bool {
+        let mut expected = self.take_settings(&take.output_id);
+        if self.settings.automatic_level {
+            expected.sweep.peak_dbfs = take.settings.sweep.peak_dbfs;
+        }
+        take.settings == expected
     }
 }
 impl Drop for Controller {

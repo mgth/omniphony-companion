@@ -363,6 +363,7 @@ fn whole_alignment_reanalysis_retains_originals_and_cannot_apply_a_profile() {
         .unwrap()["signal"]
         .clone();
     let original = Alignment {
+        level_probe: None,
         schema_version: 1,
         directory: original_dir,
         endpoint: "127.0.0.1:9000".parse().unwrap(),
@@ -375,6 +376,8 @@ fn whole_alignment_reanalysis_retains_originals_and_cannot_apply_a_profile() {
         },
         snapshot,
         rows: vec![Row {
+            sweep: None,
+            reference_output: None,
             output_id: "R".into(),
             take_folders: folders.clone(),
             repeats: vec![],

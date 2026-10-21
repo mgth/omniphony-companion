@@ -473,7 +473,7 @@ fn captured_sweeps_with_ambiguous_arrivals_show_levels_and_withhold_timing() {
     controller.state.takes.push(Take {
         output_id: "Front left".into(),
         revision: "ui-preview:1".into(),
-        settings: controller.settings.clone(),
+        settings: controller.take_settings("Front left"),
         outcome: Ok(TakeOutcome {
             deferred: false,
             directory: "sessions/synthetic-review".into(),
@@ -775,6 +775,7 @@ fn alignment_session_stays_above_individual_results_and_unqualified_actions_stay
         let ctx = egui::Context::default();
         let (mut controller, starts) = support::ready();
         controller.state.alignment = Some(companion_service::alignment::Alignment {
+            level_probe: None,
             schema_version: 1,
             directory: "preview-alignment".into(),
             endpoint: "127.0.0.1:9000".parse().unwrap(),
@@ -1346,12 +1347,15 @@ fn loaded_alignment_pass_opens_its_latest_analysis_and_labels_the_original_verdi
         })
         .collect();
     let alignment = Alignment {
+        level_probe: None,
         schema_version: 1,
         directory: dir.path().to_owned(),
         endpoint: "127.0.0.1:9000".parse().unwrap(),
         settings: controller.settings.clone(),
         snapshot: controller.state.snapshot.clone().unwrap(),
         rows: vec![Row {
+            sweep: None,
+            reference_output: None,
             output_id: "Front right".into(),
             take_folders: vec![
                 first.outcome.as_ref().unwrap().directory.clone(),
@@ -2004,6 +2008,8 @@ fn partial_alignment_names_exclusions_and_displays_only_eligible_targets() {
         let (mut controller, starts) = support::ready();
         let mut alignment = support::alignment(&controller, true);
         alignment.rows.push(Row {
+            sweep: None,
+            reference_output: None,
             output_id: "Center".into(),
             take_folders: vec![],
             repeats: vec![],
@@ -2243,7 +2249,10 @@ fn measure_actions_show_their_expected_duration_and_running_captures_the_time_le
     let mut app = CompanionApp::preview(&ctx, controller);
     let size = Vec2::new(1160.0, 800.0);
     frame(&mut app, &ctx, vec![], size);
-    let expected = companion_service::duration::alignment(app.controller.settings.sweep, 5);
+    // The planned room-correction sweeps of the five speakers and their level probe.
+    let expected = app.controller.alignment_estimate().unwrap();
+    assert_eq!(expected.outputs, 5);
+    assert!(expected.probe > Duration::ZERO);
     let minutes = (expected.total.as_secs_f64().ceil() as u64 + 30) / 60;
     find_speaker_text(
         &mut app,
@@ -2252,7 +2261,7 @@ fn measure_actions_show_their_expected_duration_and_running_captures_the_time_le
         &format!("5 selected · about {minutes} min"),
     );
     app.lab = true;
-    find_speaker_text(&mut app, &ctx, size, "s · One diagnostic pass.");
+    find_speaker_text(&mut app, &ctx, size, " · One diagnostic pass.");
     app.lab = false;
     app.controller.state.job = Some(Job::Alignment {
         output_ids: vec!["Front left".into(), "Front right".into()],
