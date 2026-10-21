@@ -39,6 +39,8 @@ struct Rig {
     /// Outputs whose next take gets noise of this amplitude during the reference sweep
     /// after them, once: a passing disturbance in the room.
     disturb: Mutex<std::collections::BTreeMap<String, f32>>,
+    /// Outputs heard through noise of this amplitude during their own sweep, every take.
+    noisy: Mutex<std::collections::BTreeMap<String, f32>>,
     batches: Mutex<Vec<Vec<String>>>,
     /// The microphone position of each batch.
     position_ids: Mutex<Vec<String>>,
@@ -87,6 +89,7 @@ impl Rig {
             rejected: Mutex::new(Default::default()),
             loud: Mutex::new(Default::default()),
             disturb: Mutex::new(Default::default()),
+            noisy: Mutex::new(Default::default()),
             batches: Mutex::new(vec![]),
             position_ids: Mutex::new(vec![]),
             no_response: AtomicBool::new(false),
@@ -206,6 +209,14 @@ impl Backend for Rig {
                 let start = 24000 + source.len() * 2 + 144 + padding;
                 let mut seed = 7_u32;
                 for x in &mut samples[start..start + body] {
+                    seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                    *x += noise * (seed as f32 / u32::MAX as f32 - 0.5) * 2.0;
+                }
+            }
+            if let Some(&noise) = self.noisy.lock().unwrap().get(id) {
+                let start = 24000 + source.len() + 288;
+                let mut seed = 11_u32;
+                for x in &mut samples[start..start + source.len()] {
                     seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
                     *x += noise * (seed as f32 / u32::MAX as f32 - 0.5) * 2.0;
                 }
@@ -2325,4 +2336,23 @@ fn correction_filters_are_designed_from_the_main_seat_and_the_positions_and_expo
     let old = acquire(&rig, &root.path().join("old"));
     assert!(room_correction::readiness(&old).is_err());
     assert!(room_correction::design(&old, &settings).is_err());
+}
+
+#[test]
+fn a_speaker_heard_through_noise_gets_no_correction_filter() {
+    use companion_service::room_correction;
+    let root = tempfile::tempdir().unwrap();
+    let rig = Rig::new();
+    rig.noisy.lock().unwrap().insert("R".into(), 0.008);
+    let a = acquire(&rig, root.path());
+    let design = room_correction::design(&a, &room_correction::settings(&a)).unwrap();
+    let left = &design.outputs[0];
+    let right = &design.outputs[1];
+    assert!(left.filter.is_some(), "{left:?}");
+    assert!(right.filter.is_none());
+    assert!(
+        right.refusal.as_deref().unwrap().contains("too noisy"),
+        "{:?}",
+        right.refusal
+    );
 }

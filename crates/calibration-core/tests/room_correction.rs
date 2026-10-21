@@ -84,6 +84,7 @@ fn measurement(position: &str, main: bool, samples: Vec<f32>, band: [f64; 2]) ->
         anchor: ANCHOR,
         band_hz: band,
         calibration: None,
+        snr_db: None,
     }
 }
 
@@ -458,4 +459,96 @@ fn settings_and_responses_are_validated() {
     let d = design(&positions(), &settings).unwrap();
     assert_eq!(d.filter.as_ref().unwrap().taps.len(), 4096);
     assert_eq!(d.filter.as_ref().unwrap().sample_rate, 96000);
+}
+
+#[test]
+fn noisy_takes_are_left_out_and_a_band_ends_where_the_noise_takes_over() {
+    let settings = DesignSettings::default();
+    let snr = |db: &dyn Fn(f64) -> f64| -> Vec<[f64; 2]> {
+        calibration_core::room_correction::grid(20.0, 20000.0)
+            .into_iter()
+            .map(|f| [f, db(f)])
+            .collect()
+    };
+    let mut output = positions();
+    // One position heard through noise: 11 dB over the level band.
+    output.measurements[3].snr_db = Some(snr(&|_| 11.0));
+    // Another loses its treble in hiss above 5 kHz.
+    output.measurements[4].snr_db = Some(snr(&|f| if f > 5000.0 { 5.0 } else { 40.0 }));
+    let d = design(&output, &settings).unwrap();
+    assert!(d.refusal.is_none());
+    assert!(
+        d.warnings
+            .iter()
+            .any(|w| w.contains("too noisy") && w.contains("seat/1 (11 dB)")),
+        "{:?}",
+        d.warnings
+    );
+    assert_eq!(d.positions.len(), 4);
+    // The average is only kept where every take is: the band stops near 5 kHz.
+    let band = d.band_hz.unwrap();
+    assert!(band[1] < 5000.0 && band[1] > 4000.0, "{band:?}");
+    // Every take noisy: nothing to design from.
+    let mut output = positions();
+    for m in &mut output.measurements {
+        m.snr_db = Some(snr(&|_| 12.0));
+    }
+    let d = design(&output, &settings).unwrap();
+    assert!(d.filter.is_none());
+    assert!(d.refusal.as_deref().unwrap().contains("too noisy"));
+}
+
+#[test]
+fn a_short_filter_never_boosts_below_the_speaker_roll_off() {
+    // A 4th-order 80 Hz speaker with a +10 dB peak at 600 Hz: with 256 taps, truncating
+    // the minimum-phase cut used to bring back a boost below the roll-off.
+    let speaker = Room {
+        speaker: vec![
+            Biquad::HighPass { hz: 80.0, q: 0.541 },
+            Biquad::HighPass { hz: 80.0, q: 1.307 },
+            Biquad::Peak {
+                hz: 600.0,
+                q: 2.0,
+                db: 10.0,
+            },
+        ],
+        reflections: vec![],
+        mode: None,
+    };
+    let output = OutputMeasurements {
+        output_id: "TBL".into(),
+        measurements: vec![measurement(
+            "seat",
+            true,
+            speaker.response(),
+            [20.0, 20000.0],
+        )],
+    };
+    for taps in [256, 512, 1024, 8192] {
+        let settings = DesignSettings {
+            taps,
+            ..Default::default()
+        };
+        let d = design(&output, &settings).unwrap();
+        let limit = d.low_limit_hz.unwrap();
+        match &d.filter {
+            Some(_) => {
+                let c = d.curves.as_ref().unwrap();
+                for (f, v) in c.frequency_hz.iter().zip(&c.filter_db) {
+                    assert!(
+                        *f > limit || f64::from(*v) <= 0.11,
+                        "{taps} taps: {f} Hz boosted by {v}"
+                    );
+                }
+            }
+            None => assert!(
+                d.refusal.as_deref().unwrap().contains("use more taps"),
+                "{taps}: {:?}",
+                d.refusal
+            ),
+        }
+        if taps == 8192 {
+            assert!(d.filter.is_some());
+        }
+    }
 }

@@ -13,7 +13,7 @@ use calibration_core::room_correction::{
     smoothed_response,
 };
 use companion_service::{alignment::Alignment, files::read_json};
-use measurement_capture::{impulse, timing};
+use measurement_capture::{impulse, response, timing};
 use omniphony_adapter::{Snapshot, Sweep};
 use std::{
     collections::BTreeMap,
@@ -37,6 +37,13 @@ fn response(take: &Path, position: &str) -> companion_service::AppResult<Measure
     let samples = samples.get(start..).ok_or("analysis start past the end")?;
     let timing = timing::inspect(samples, rate, snapshot.sample_rate, sweep)?;
     let full = impulse::full_response(samples, rate, snapshot.sample_rate, sweep, &timing)?;
+    let magnitude = response::magnitude(&full, sweep, None)?;
+    let snr_db = magnitude
+        .frequency_hz
+        .iter()
+        .zip(magnitude.magnitude_db[1].iter().zip(&magnitude.noise_db[1]))
+        .map(|(&hz, (&signal, &noise))| [hz, f64::from(signal) - f64::from(noise)])
+        .collect();
     let [_, speaker, _] = full.segments;
     Ok(Measurement {
         position_id: position.into(),
@@ -46,6 +53,7 @@ fn response(take: &Path, position: &str) -> companion_service::AppResult<Measure
         anchor: full.anchor,
         band_hz: [f64::from(sweep.start_hz), f64::from(sweep.end_hz)],
         calibration: None,
+        snr_db: Some(snr_db),
     })
 }
 

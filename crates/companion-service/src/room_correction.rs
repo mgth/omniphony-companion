@@ -130,6 +130,14 @@ fn read(folder: &Path, output_id: &str, main_seat: bool) -> Result<Measurement, 
                 .map(|p| [p.frequency_hz, p.correction_db])
                 .collect(),
         });
+    // The stored magnitude over its deconvolution noise, on the shared log grid.
+    let magnitude = &stored.magnitude;
+    let snr_db = magnitude
+        .frequency_hz
+        .iter()
+        .zip(magnitude.magnitude_db[1].iter().zip(&magnitude.noise_db[1]))
+        .map(|(&hz, (&signal, &noise))| [hz, f64::from(signal) - f64::from(noise)])
+        .collect();
     let [_, speaker, _] = full.segments;
     Ok(Measurement {
         position_id: stored.position_id,
@@ -142,6 +150,7 @@ fn read(folder: &Path, output_id: &str, main_seat: bool) -> Result<Measurement, 
             f64::from(stored.signal.end_hz),
         ],
         calibration,
+        snr_db: Some(snr_db),
     })
 }
 

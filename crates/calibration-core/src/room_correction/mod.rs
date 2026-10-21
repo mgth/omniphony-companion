@@ -41,13 +41,23 @@ pub const REPEATABILITY_WARNING_DB: f64 = 1.0;
 /// Boosts are reduced where the positions' spread exceeds the first value and removed
 /// where it reaches the second: a dip that moves is not filled.
 pub const BOOST_SPREAD_DB: [f64; 2] = [1.5, 4.0];
+/// A take whose median signal-to-noise ratio over 500 Hz–2 kHz is below this is left
+/// out: the alignment's level estimate counts such points as weak.
+pub const MIN_LEVEL_SNR_DB: f64 = 20.0;
+/// A take's band ends where its signal-to-noise ratio (third-octave mean) falls below
+/// this, on either side of 1 kHz.
+pub const MIN_BAND_SNR_DB: f64 = 10.0;
+/// The realised filter may exceed 0 dB below the speaker's −6 dB point by this much
+/// (truncation ripple) before it is redesigned, and refused when it still does.
+pub const PROTECTED_BOOST_TOLERANCE_DB: f64 = 0.1;
 /// Two or more reflections this close to the direct sound are named in a warning.
 pub const STRONG_REFLECTION_DB: f64 = -3.0;
 /// The correction fades to 0 dB over this many octaves outside its band.
 const FADE_OCTAVES: f64 = 0.5;
 /// The correction band starts and ends this far inside the measured range.
 const EDGE_OCTAVES: f64 = 1.0 / 6.0;
-/// Boosts ramp in over this many octaves above the speaker's −6 dB point.
+/// Boosts ramp in over this many octaves above the speaker's −6 dB point (or over two
+/// of the filter's frequency steps, when wider).
 const LOW_RAMP_OCTAVES: f64 = 1.0 / 3.0;
 /// Smoothing used to find the speaker's −6 dB point, wide enough to ride over modes.
 const LOW_LIMIT_SMOOTHING_OCTAVES: f64 = 1.0;
@@ -223,6 +233,10 @@ pub struct Measurement {
     /// The swept range: nothing outside it is used.
     pub band_hz: [f64; 2],
     pub calibration: Option<MicrophoneCalibration>,
+    /// `[frequency_hz, signal-to-noise dB]` on a log grid, sorted: the stored magnitude
+    /// over its deconvolution noise. Gates the take and narrows its band; `None` trusts
+    /// the whole sweep (offline studies only).
+    pub snr_db: Option<Vec<[f64; 2]>>,
 }
 impl Measurement {
     fn validate(&self) -> Result<()> {
@@ -241,9 +255,79 @@ impl Measurement {
             "swept band must be finite and ascending",
         )?;
         require(!self.position_id.is_empty(), "response needs a position id")?;
+        require(
+            self.snr_db.as_ref().is_none_or(|points| {
+                points
+                    .iter()
+                    .all(|p| p[0].is_finite() && p[0] > 0.0 && !p[1].is_nan())
+                    && points.windows(2).all(|w| w[0][0] < w[1][0])
+            }),
+            "signal-to-noise points must be sorted and finite",
+        )?;
         self.calibration
             .as_ref()
             .map_or(Ok(()), MicrophoneCalibration::validate)
+    }
+    /// The median signal-to-noise ratio over 500 Hz–2 kHz, the alignment's level band.
+    fn level_snr_db(&self) -> Option<f64> {
+        let mut values: Vec<f64> = self
+            .snr_db
+            .as_ref()?
+            .iter()
+            .filter(|p| (LEVEL_BAND_HZ[0]..=LEVEL_BAND_HZ[1]).contains(&p[0]))
+            .map(|p| p[1])
+            .collect();
+        if values.is_empty() {
+            return Some(f64::NEG_INFINITY);
+        }
+        values.sort_by(f64::total_cmp);
+        Some(values[values.len() / 2])
+    }
+    /// The swept band, narrowed to where the signal-to-noise ratio (a third-octave
+    /// mean) stays at least [`MIN_BAND_SNR_DB`] on either side of 1 kHz.
+    fn usable_band(&self) -> [f64; 2] {
+        let Some(points) = self.snr_db.as_ref().filter(|p| p.len() >= 2) else {
+            return self.band_hz;
+        };
+        let frequencies: Vec<f64> = points.iter().map(|p| p[0]).collect();
+        let snr: Vec<f64> = points.iter().map(|p| p[1].clamp(-300.0, 300.0)).collect();
+        let smoothed: Vec<f64> = (0..frequencies.len())
+            .map(|i| {
+                let (low, high) = (
+                    frequencies[i] * 2_f64.powf(-1.0 / 6.0),
+                    frequencies[i] * 2_f64.powf(1.0 / 6.0),
+                );
+                let near: Vec<f64> = frequencies
+                    .iter()
+                    .zip(&snr)
+                    .filter(|(f, _)| (low..=high).contains(*f))
+                    .map(|(_, v)| *v)
+                    .collect();
+                near.iter().sum::<f64>() / near.len().max(1) as f64
+            })
+            .collect();
+        let centre = frequencies
+            .partition_point(|&f| f < 1000.0)
+            .min(frequencies.len() - 1);
+        let mut first = centre;
+        while first > 0 && smoothed[first - 1] >= MIN_BAND_SNR_DB {
+            first -= 1;
+        }
+        let mut last = centre;
+        while last + 1 < frequencies.len() && smoothed[last + 1] >= MIN_BAND_SNR_DB {
+            last += 1;
+        }
+        let low = if first == 0 {
+            self.band_hz[0]
+        } else {
+            frequencies[first]
+        };
+        let high = if last + 1 == frequencies.len() {
+            self.band_hz[1]
+        } else {
+            frequencies[last]
+        };
+        [self.band_hz[0].max(low), self.band_hz[1].min(high)]
     }
     /// The direct sound: the largest sample within [`PEAK_SEARCH_MS`] of the anchor.
     fn peak(&self) -> usize {
@@ -255,13 +339,14 @@ impl Measurement {
             .unwrap_or(self.anchor)
     }
     /// Calibrated power in the frequency-dependent window at each of `frequencies`;
-    /// `NaN` outside the swept band.
+    /// `NaN` outside the swept band or where the signal-to-noise ratio is too low.
     fn power(&self, settings: &DesignSettings, frequencies: &[f64]) -> Vec<f64> {
-        let high = self.band_hz[1].min(0.45 * self.rate);
+        let [low, high] = self.usable_band();
+        let high = high.min(0.45 * self.rate);
         let inside: Vec<f64> = frequencies
             .iter()
             .copied()
-            .filter(|f| (self.band_hz[0]..=high).contains(f))
+            .filter(|f| (low..=high).contains(f))
             .collect();
         let power = spectrum::fdw_power(
             &self.samples,
@@ -275,7 +360,7 @@ impl Measurement {
         frequencies
             .iter()
             .map(|&f| {
-                if !(self.band_hz[0]..=high).contains(&f) {
+                if !(low..=high).contains(&f) {
                     return f64::NAN;
                 }
                 let p = values.next().unwrap_or(f64::NAN);
@@ -504,11 +589,36 @@ pub fn design(output: &OutputMeasurements, settings: &DesignSettings) -> Result<
         result.refusal = Some(reason.into());
         Ok(result)
     };
-    let measurements = &output.measurements;
+    // Takes too noisy to be correction evidence are left out, named.
+    let mut noisy = vec![];
+    let measurements: Vec<&Measurement> = output
+        .measurements
+        .iter()
+        .filter(|m| match m.level_snr_db() {
+            Some(snr) if snr < MIN_LEVEL_SNR_DB => {
+                noisy.push(format!("{} ({snr:.0} dB)", m.position_id));
+                false
+            }
+            _ => true,
+        })
+        .collect();
+    if !noisy.is_empty() {
+        result.warnings.push(format!(
+            "Takes too noisy to design from (signal/noise over 500 Hz–2 kHz below {MIN_LEVEL_SNR_DB:.0} dB) left out: {}.",
+            noisy.join(", ")
+        ));
+    }
+    if measurements.is_empty() && !noisy.is_empty() {
+        return refuse(
+            result,
+            "Every take is too noisy to design from: measure it again in a quieter room or louder.",
+        );
+    }
     let Some(first) = measurements
         .iter()
         .find(|m| m.main_seat)
         .or(measurements.first())
+        .copied()
     else {
         return refuse(
             result,
@@ -748,11 +858,15 @@ pub fn design(output: &OutputMeasurements, settings: &DesignSettings) -> Result<
     let target_raw: Vec<f64> = frequencies.iter().map(|&f| settings.tilt_db(f)).collect();
     let target_level = power_level(&target_raw, &frequencies).unwrap_or(0.0);
     let target: Vec<f64> = target_raw.iter().map(|v| v - target_level).collect();
+    let resolution_hz = f64::from(settings.sample_rate) / settings.taps as f64;
+    let low_ramp_octaves =
+        |limit: f64| LOW_RAMP_OCTAVES.max(((limit + 2.0 * resolution_hz) / limit).log2());
     let boost_cap = |k: usize| -> f64 {
         let f = frequencies[k];
         let low_ramp = match result.low_limit_hz {
             Some(limit) if f <= limit => 0.0,
-            Some(limit) => 1.0 - fade((f / limit).log2(), LOW_RAMP_OCTAVES),
+            // Over a third of an octave, or wider when the taps resolve less.
+            Some(limit) => 1.0 - fade((f / limit).log2(), low_ramp_octaves(limit)),
             None => 1.0,
         };
         let confidence = if spread[k].is_finite() {
@@ -806,7 +920,6 @@ pub fn design(output: &OutputMeasurements, settings: &DesignSettings) -> Result<
         .collect();
     // Round the corners the limits leave, no finer than the taps can realise, then
     // hold the limits again.
-    let resolution_hz = f64::from(settings.sample_rate) / settings.taps as f64;
     correction = smooth_db(&correction, &frequencies, |hz| {
         let realisable = 2.0 * ((hz + resolution_hz / 2.0) / hz).log2();
         spectrum::smoothing_width(
@@ -831,15 +944,57 @@ pub fn design(output: &OutputMeasurements, settings: &DesignSettings) -> Result<
     // The filter, normalised so the averaged response keeps its level over
     // 500 Hz–2 kHz (it is levelled at 0 dB there).
     let rate = f64::from(settings.sample_rate);
-    let mut taps = filter::minimum_phase(&frequencies, &correction, rate, settings.taps);
-    let (realised, largest) = filter::realised_db(&taps, rate, &frequencies);
-    let corrected: Vec<f64> = measured.iter().zip(&realised).map(|(m, r)| m + r).collect();
-    let normalisation = -power_level(&corrected, &frequencies).unwrap_or(0.0);
-    let scale = 10_f64.powf(normalisation / 20.0);
-    for tap in &mut taps {
-        *tap *= scale;
+    let realise = |asked: &[f64]| {
+        let mut taps = filter::minimum_phase(&frequencies, asked, rate, settings.taps);
+        let (realised, largest) = filter::realised_db(&taps, rate, &frequencies);
+        let corrected: Vec<f64> = measured.iter().zip(&realised).map(|(m, r)| m + r).collect();
+        let normalisation = -power_level(&corrected, &frequencies).unwrap_or(0.0);
+        let scale = 10_f64.powf(normalisation / 20.0);
+        for tap in &mut taps {
+            *tap *= scale;
+        }
+        let realised: Vec<f64> = realised.iter().map(|v| v + normalisation).collect();
+        (taps, realised, largest + normalisation, normalisation)
+    };
+    // Truncation and normalisation can bring back a boost below the speaker's −6 dB
+    // point: ask for less there and design again, a few times, then refuse.
+    let protected: Vec<bool> = frequencies
+        .iter()
+        .map(|&f| result.low_limit_hz.is_some_and(|limit| f <= limit))
+        .collect();
+    let excess = |realised: &[f64]| -> Vec<f64> {
+        realised
+            .iter()
+            .zip(&protected)
+            .map(|(v, &p)| if p { v.max(0.0) } else { 0.0 })
+            .collect()
+    };
+    let mut asked = correction.clone();
+    let (mut taps, mut realised, mut largest, mut normalisation) = realise(&asked);
+    for _ in 0..6 {
+        let over = excess(&realised);
+        if over.iter().all(|&v| v <= PROTECTED_BOOST_TOLERANCE_DB) {
+            break;
+        }
+        for (a, o) in asked.iter_mut().zip(&over) {
+            *a -= 1.5 * o;
+        }
+        (taps, realised, largest, normalisation) = realise(&asked);
     }
-    let realised: Vec<f64> = realised.iter().map(|v| v + normalisation).collect();
+    if let Some((k, worst)) = excess(&realised)
+        .into_iter()
+        .enumerate()
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .filter(|(_, v)| *v > PROTECTED_BOOST_TOLERANCE_DB)
+    {
+        return refuse(
+            result,
+            &format!(
+                "{} taps cannot keep the filter from boosting below the speaker's roll-off ({worst:.1} dB at {:.0} Hz): use more taps.",
+                settings.taps, frequencies[k]
+            ),
+        );
+    }
     let predicted: Vec<f64> = measured.iter().zip(&realised).map(|(m, r)| m + r).collect();
     let deepest = frequencies
         .iter()
@@ -865,7 +1020,7 @@ pub fn design(output: &OutputMeasurements, settings: &DesignSettings) -> Result<
         filter_db: curve(&realised, &measured_indices),
         predicted_db: curve(&predicted, &measured_indices),
     });
-    let headroom = largest + normalisation;
+    let headroom = largest;
     if headroom > settings.max_boost_db + 0.5 {
         result.warnings.push(format!(
             "The filter boosts up to {headroom:.1} dB, more than the {:.1} dB asked.",

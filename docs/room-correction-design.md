@@ -44,9 +44,13 @@ For each speaker:
 
 1. **Responses.** Every accepted, unclipped take with a stored response: the main
    seat's two passes and each guided position's take. A take without a stored response
-   (measured before they were kept) is left out and named in a warning. Each take is
-   corrected by its own copy of the microphone calibration; takes with different
-   calibrations, or some with and some without, are refused.
+   (measured before they were kept) is left out and named in a warning. A take being
+   accepted only means its timing analysis completed, so each one is also gated on its
+   stored signal-to-noise ratio (its magnitude over its deconvolution noise): a take
+   below 20 dB over 500 Hz–2 kHz (median) is left out and named, and a take's band
+   ends where its third-octave signal-to-noise ratio falls below 10 dB on either side
+   of 1 kHz. Each take is corrected by its own copy of the microphone calibration;
+   takes with different calibrations, or some with and some without, are refused.
 2. **Frequency-dependent window.** The response is read from 1.5 ms before its direct
    sound (the largest sample within 2 ms of the stored anchor) for 8 periods of each
    frequency above about 500 Hz, so later reflections, which no filter corrects for
@@ -70,7 +74,8 @@ For each speaker:
    an octave above the sweep's start to 10 kHz (or a sixth of an octave below the
    sweep's end). Cuts reach −15 dB; boosts reach +3.5 dB, but none below the
    speaker's own −6 dB point (from the averaged response on a one-octave smoothing,
-   going down from 500 Hz), ramping in over a third of an octave above it, and less
+   going down from 500 Hz), ramping in over a third of an octave above it (wider when
+   the taps resolve less than two steps of the filter's frequency grid), and less
    where the positions disagree (full below 1.5 dB of spread, none from 4 dB): a dip
    that moves with the microphone is not filled. The limited correction is offset so
    the corrected response keeps its 500 Hz–2 kHz level, faded to 0 dB over half an
@@ -78,7 +83,10 @@ For each speaker:
 8. **Filter.** Minimum phase by the real cepstrum on a 65536-point grid, truncated to
    8192 taps with a raised-cosine fade over the last quarter, then scaled so the
    averaged response keeps its 500 Hz–2 kHz level: the level alignment stays valid.
-   Its realised magnitude gives the predicted response and the headroom.
+   Its realised magnitude gives the predicted response and the headroom. Truncation
+   and normalisation can bring back a boost below the speaker's −6 dB point, so the
+   final taps are checked there: up to six redesigns ask for less where they exceed
+   0 dB by more than 0.1 dB, and a length that still cannot hold is refused.
 
 The excess phase above the bass and the reflections' combs are never corrected: the
 feasibility study on the bench found the excess phase moving 40–180° between sessions,
@@ -88,9 +96,11 @@ five centimetres away.
 A speaker is **not corrected** when its sweep misses 500 Hz–2 kHz (a subwoofer, left
 to bass integration), when its band is too narrow, when calibrations differ, or when
 its positions disagree too much: the median position more than 3 dB from the average
-above 300 Hz. **Warnings** name positions more than 2 dB from the average, main-seat
+above 300 Hz, when every take is too noisy, or when its filter length cannot keep it
+from boosting below the speaker's roll-off. **Warnings** name positions more than 2 dB from the average, main-seat
 takes more than 1 dB apart, two or more reflections within 3 dB of the direct sound,
-a design from one position only, a missing calibration and takes left out.
+a design from one position only, a missing calibration, noisy takes and takes left
+out.
 
 ## Validation
 
@@ -103,8 +113,11 @@ stops at it; it is minimum phase (its energy builds up faster than the same taps
 reversed); it keeps the 500 Hz–2 kHz power level; nothing is boosted below a 4th-order
 speaker's −6 dB point (found within 10 %) and nothing changes outside the band;
 disagreeing positions, a subwoofer and mixed calibrations are refused; the calibration
-is subtracted. A service test runs the simulated rig through an alignment and two
-positions into exported WAV and JSON files.
+is subtracted; noisy takes are left out and a band stops where the noise takes over;
+256 to 8192 taps never boost below a 4th-order speaker's roll-off (redesigned or
+refused). Service tests run the simulated rig through an alignment and two positions
+into exported WAV and JSON files, and refuse a speaker heard through noise during its
+own sweep.
 
 ### Cross-validation on the bench
 
