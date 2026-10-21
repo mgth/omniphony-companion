@@ -2271,7 +2271,7 @@ dependencies = [
 [[package]]
 name = "omniphony-osc-contract"
 version = "0.1.0"
-source = "git+https://github.com/mgth/Omniphony?rev=a65ae6b1d95f8c3762c113041859eaec83fcaa17#a65ae6b1d95f8c3762c113041859eaec83fcaa17"
+source = "git+https://github.com/mgth/Omniphony?rev=38439cff9e707a4051f462eca466e9ce24931a76#38439cff9e707a4051f462eca466e9ce24931a76"
 dependencies = [
  "serde",
 ]
