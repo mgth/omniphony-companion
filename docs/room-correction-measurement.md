@@ -82,7 +82,9 @@ the subwoofer is its own reference. The arrival review and the level band cannot
 such a sweep, so the alignment records it as **Bass only** (`bass_only` code): its
 timing and level are not measured here, its response is kept, and the take is not a
 failure. A cancelled, failed or clipped capture keeps that reason instead. Its
-signal/noise is graded over its own range.
+signal/noise is graded over its own range. Measuring from zero leaves its gain and
+delay as they were, since it receives no correction. A custom sweep that misses
+200 Hz–10 kHz, a treble-only one for example, is graded over its own range too.
 
 Each alignment row records its `sweep` and, when it differs from the settings, its
 `reference_output`; reanalysis and **Measure again** use them. Saved takes are

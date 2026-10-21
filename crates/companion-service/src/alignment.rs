@@ -397,8 +397,14 @@ pub fn capture<B: Backend + ?Sized>(
     // A retake leaves the renderer in the original configuration under a newer revision.
     let mut current = request.snapshot.clone();
     if basis == Basis::FromZero {
-        // The reference speaker plays in every take: it is measured from zero too.
-        let mut ids = outputs.clone();
+        // The reference speaker plays in every take: it is measured from zero too. A
+        // bass-only output gets no correction, so it keeps its settings: zeroing it
+        // would leave it at 0 dB and 0 ms after an Apply.
+        let mut ids: Vec<_> = outputs
+            .iter()
+            .filter(|id| crate::sweep_plan::group_of(&planned, id).is_none_or(|g| !g.bass_only()))
+            .cloned()
+            .collect();
         if let Some(reference) = &alignment.settings.reference_output
             && !ids.contains(reference)
         {

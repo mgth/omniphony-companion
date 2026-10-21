@@ -2071,3 +2071,51 @@ fn the_level_probe_sets_each_group_near_minus_6_dbfs_at_the_microphone() {
     );
     assert_eq!(a.corrected_output_ids(), ["L", "R"]);
 }
+
+#[test]
+fn measuring_from_zero_leaves_a_bass_only_output_as_it_was() {
+    let root = tempfile::tempdir().unwrap();
+    let rig = Rig::new();
+    rig.snapshot.lock().unwrap().outputs.push(Output {
+        id: "Sub".into(),
+        name: "Sub".into(),
+        index: 3,
+        gain_db: -3.0,
+        delay_ms: 4.0,
+        muted: false,
+        freq_low_hz: None,
+        freq_high_hz: Some(120.0),
+        azimuth_deg: None,
+        elevation_deg: None,
+        distance_m: None,
+    });
+    rig.snapshot.lock().unwrap().outputs[1].gain_db = -2.0;
+    let settings = room_settings(false);
+    let snapshot = rig.snapshot.lock().unwrap().clone();
+    let request = alignment::request(
+        "127.0.0.1:9000".parse().unwrap(),
+        snapshot,
+        &settings,
+        "L".into(),
+        root.path().join("room"),
+    )
+    .unwrap();
+    let a = alignment::capture(
+        &rig,
+        request,
+        settings,
+        vec!["L".into(), "R".into(), "Sub".into()],
+        alignment::Basis::FromZero,
+        &AtomicBool::new(false),
+        &mut |_, _, _| {},
+    )
+    .unwrap()
+    .alignment;
+    let zeroed = a.zeroed_snapshot.as_ref().unwrap();
+    let sub = zeroed.outputs.iter().find(|o| o.id == "Sub").unwrap();
+    assert_eq!((sub.gain_db, sub.delay_ms), (-3.0, 4.0));
+    assert_eq!(zeroed.outputs[1].gain_db, 0.0);
+    assert_eq!(a.rows[2].exclusion(), Some(ExclusionReason::BassOnly));
+    assert_eq!(a.corrected_output_ids(), ["L", "R"]);
+    assert_eq!(a.apply_blocker(), None);
+}
