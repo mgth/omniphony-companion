@@ -797,6 +797,7 @@ fn alignment_session_stays_above_individual_results_and_unqualified_actions_stay
             application_uncertain: false,
             physical_levels_changed: false,
             retake_snapshots: vec![],
+            zeroed_snapshot: None,
         });
         let mut app = CompanionApp::preview(&ctx, controller);
         for _ in 0..3 {
@@ -1376,6 +1377,7 @@ fn loaded_alignment_pass_opens_its_latest_analysis_and_labels_the_original_verdi
         application_uncertain: false,
         physical_levels_changed: false,
         retake_snapshots: vec![],
+        zeroed_snapshot: None,
     };
     write_json(&dir.path().join("alignment-state.json"), &alignment).unwrap();
     controller.state.takes = vec![first, second];
@@ -1816,6 +1818,14 @@ fn manual_level_panel_saves_a_fresh_reference_shows_direction_and_stops() {
     );
     assert!(text.iter().any(|(s, _)| s == "Noise · -3.0 dB"));
     assert!(!text.iter().any(|(s, _)| s.contains("This Omniphony build")));
+    // The noise skips Front right's -2.0 dB gain: it is said to play at 0 dB.
+    assert!(
+        text.iter()
+            .any(|(s, _)| s.ends_with(" · LIVE · turn its volume knob · at 0 dB in Omniphony"))
+    );
+    assert!(text.iter().any(|(s, _)| {
+        s.starts_with("Front right plays at 0 dB in Omniphony: its -2.0 dB gain is skipped")
+    }));
     // Check mode compares the speakers as corrected: Front right's -2.0 dB gain
     // against Front left's -1.5 dB adds -0.5 dB.
     let run = app.controller.state.manual_run.as_mut().unwrap();
@@ -1840,6 +1850,7 @@ fn manual_level_panel_saves_a_fresh_reference_shows_direction_and_stops() {
         text.iter()
             .any(|(s, _)| s.contains("This Omniphony build plays the noise through"))
     );
+    assert!(!text.iter().any(|(s, _)| s.contains("at 0 dB in Omniphony")));
     assert!(
         text.iter()
             .any(|(s, _)| s.contains("-3.0 dB relative to Front left"))
@@ -2857,4 +2868,43 @@ fn the_reference_distance_is_restored_and_fitting_again_is_saved_at_once() {
     drop(app);
     let store = PreferenceStore::open(path).unwrap();
     assert_eq!(store.preferences().view.room_reference_m, None);
+}
+
+#[test]
+fn from_zero_or_refine_is_picked_before_measuring_and_reset_after() {
+    use companion_service::alignment::Basis;
+    let size = Vec2::new(1160.0, 800.0);
+    let ctx = egui::Context::default();
+    let dir = tempfile::tempdir().unwrap();
+    let (mut controller, _) = support::ready();
+    controller.settings.output_root = dir.path().display().to_string();
+    // Before any alignment: from zero.
+    assert_eq!(controller.alignment_basis(), Basis::FromZero);
+    let mut app = CompanionApp::preview(&ctx, controller);
+    let refine = find_speaker_text(&mut app, &ctx, size, "Refine");
+    click(&mut app, &ctx, refine.center(), size);
+    assert_eq!(app.controller.alignment_basis(), Basis::Refine);
+    let from_zero = find_speaker_text(&mut app, &ctx, size, "From zero");
+    click(&mut app, &ctx, from_zero.center(), size);
+    assert_eq!(app.controller.alignment_basis(), Basis::FromZero);
+    click(&mut app, &ctx, refine.center(), size);
+    // The choice is for one alignment: starting it hands the default back.
+    let align = find_speaker_text(&mut app, &ctx, size, "Align levels and delays");
+    click(&mut app, &ctx, align.center(), size);
+    assert!(app.controller.busy(), "{:?}", app.controller.state.error);
+    assert_eq!(app.controller.chosen_alignment_basis, None);
+    finish_worker(&mut app, &ctx, size);
+}
+
+#[test]
+fn an_uncertain_application_blocks_a_new_baseline() {
+    let (mut controller, _) = support::ready();
+    let mut alignment = support::alignment(&controller, true);
+    alignment.application_uncertain = true;
+    controller.state.alignment = Some(alignment);
+    assert!(
+        controller
+            .alignment_readiness()
+            .is_err_and(|e| e.starts_with("The last application is uncertain"))
+    );
 }

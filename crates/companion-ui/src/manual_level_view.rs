@@ -241,6 +241,20 @@ pub fn band(
         .and_then(|r| r.output_gain_applied);
     let playing = noise_output(controller, pending).map(str::to_owned);
     let run = controller.state.manual_run.as_ref();
+    // The noise confirmed to skip the speaker's gain in Omniphony: it plays at
+    // 0 dB there, whatever that gain (still shown in Studio, struck through) says.
+    let skipped_gain = run
+        .filter(|_| !checking && played_with_gain == Some(false))
+        .and_then(|r| {
+            let output = r
+                .request
+                .context
+                .snapshot
+                .outputs
+                .iter()
+                .find(|o| o.id == r.request.output_id)?;
+            Some((r.request.output_id.clone(), output.gain_db))
+        });
 
     let status = if controller.state.stopping {
         "Stopping noise…".to_owned()
@@ -256,7 +270,13 @@ pub fn band(
                 None => "starting…",
             }
         };
-        format!("{id} · {what}")
+        let sounding =
+            reading.fresh && matches!(reading.phase, Some(Phase::Settling | Phase::Listening));
+        if sounding && skipped_gain.is_some() {
+            format!("{id} · {what} · at 0 dB in Omniphony")
+        } else {
+            format!("{id} · {what}")
+        }
     } else if let Some(id) = &playing {
         format!("{id} · starting…")
     } else if let Some(run) = run {
@@ -386,7 +406,16 @@ pub fn band(
 
     ui.add_space(6.0);
     ui.separator();
-    option_controls(ui, controller, options, reference_name);
+    option_controls(
+        ui,
+        controller,
+        options,
+        reference_name,
+        skipped_gain
+            .as_ref()
+            .filter(|_| reading.active)
+            .map(|(id, gain_db)| (id.as_str(), *gain_db)),
+    );
     response
 }
 
@@ -452,6 +481,7 @@ fn option_controls(
     controller: &mut Controller,
     options: &mut Options,
     reference_name: &str,
+    skipped_gain: Option<(&str, f32)>,
 ) {
     let peak = &mut options.peak;
     ui.scope(|ui| {
@@ -481,15 +511,23 @@ fn option_controls(
         .on_hover_text("Off: the noise skips each speaker’s gain in Omniphony, so you match the physical volume controls alone. On: it plays through that correction and the meter compares the speakers as corrected, to check the end result.")
         .on_disabled_hover_text("Stop the noise to change this.");
     });
-    ui.label(
-        RichText::new(if options.with_output_gain {
-            "Playing through each speaker’s gain in Omniphony: 0 dB means knobs and correction together match."
-        } else {
-            "Playing without each speaker’s gain in Omniphony (the master volume still applies)."
-        })
-        .small()
-        .color(super::MUTED),
-    );
+    let (text, color) = match skipped_gain {
+        Some((id, gain_db)) if !options.with_output_gain => (
+            format!(
+                "{id} plays at 0 dB in Omniphony: its {gain_db:+.1} dB gain is skipped (Studio strikes it through). The master volume still applies."
+            ),
+            super::TEXT,
+        ),
+        _ if options.with_output_gain => (
+            "Playing through each speaker’s gain in Omniphony: 0 dB means knobs and correction together match.".to_owned(),
+            super::MUTED,
+        ),
+        _ => (
+            "Playing without each speaker’s gain in Omniphony (the master volume still applies).".to_owned(),
+            super::MUTED,
+        ),
+    };
+    ui.label(RichText::new(text).small().color(color));
     ui.horizontal_wrapped(|ui| {
         let can_save = controller.can_set_manual_reference(*peak);
         let saved = controller.manual_reference(*peak).is_some();

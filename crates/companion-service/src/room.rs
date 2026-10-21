@@ -32,13 +32,19 @@ pub struct Distances {
 
 impl Distances {
     /// `Δd = c·[(arrival − delay) − (arrival_ref − delay_ref)]`, where arrivals include
-    /// the delays of the renderer state the takes were captured under. Retakes only
-    /// lower gains, so a row whose delay differs in any recorded retake state is left
-    /// out rather than guessed. None without a reference or a usable row.
+    /// the delays of the renderer state the takes were captured under: the alignment's
+    /// [`Alignment::measured_state`], zero for the outputs measured from zero. Retakes
+    /// only lower gains, so a row whose delay differs in any recorded retake state is
+    /// left out rather than guessed. None without a reference or a usable row.
     pub fn from_alignment(a: &Alignment) -> Option<Self> {
         let reference_id = a.settings.reference_output.clone()?;
         let delay = |id: &str| -> Option<f64> {
-            let delay = a.snapshot.outputs.iter().find(|o| o.id == id)?.delay_ms;
+            let delay = a
+                .measured_state()
+                .outputs
+                .iter()
+                .find(|o| o.id == id)?
+                .delay_ms;
             a.retake_snapshots
                 .iter()
                 .all(|s| {
@@ -274,6 +280,38 @@ mod tests {
         a.retake_snapshots = vec![retake];
         let d = Distances::from_alignment(&a).unwrap();
         assert!(d.outputs.iter().all(|(o, _)| o != "FR"));
+    }
+
+    #[test]
+    fn an_alignment_from_zero_reads_the_delays_it_measured_under() {
+        let refined = bench();
+        let mut a = bench();
+        // Measured at 0 ms: the arrivals carry only the acoustic paths and latency.
+        let mut zeroed = a.snapshot.clone();
+        for (o, r) in zeroed.outputs.iter_mut().zip(&mut a.rows) {
+            if let Some(q) = &mut r.qualified {
+                q.arrival_ms -= f64::from(o.delay_ms);
+            }
+            o.delay_ms = 0.0;
+        }
+        // The reference's own arrival is measured against itself.
+        let reference = a.rows[0].qualified.as_ref().unwrap().arrival_ms;
+        for r in &mut a.rows {
+            if let Some(q) = &mut r.qualified {
+                q.arrival_ms -= reference - 0.017;
+            }
+        }
+        a.zeroed_snapshot = Some(zeroed);
+        let from_zero = Distances::from_alignment(&a).unwrap();
+        let refine = Distances::from_alignment(&refined).unwrap();
+        for ((id, x), (_, y)) in from_zero.outputs.iter().zip(&refine.outputs) {
+            match (x, y) {
+                (Acoustic::Relative(x), Acoustic::Relative(y)) => {
+                    assert!((x - y).abs() < 1e-6, "{id}: {x} {y}")
+                }
+                _ => assert_eq!(x, y, "{id}"),
+            }
+        }
     }
 
     #[test]

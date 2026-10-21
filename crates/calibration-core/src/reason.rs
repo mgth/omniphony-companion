@@ -253,12 +253,13 @@ impl ExclusionReason {
             Self::UnstableReference => {
                 "Reference speaker level drifted. Keep the mic gain fixed.".into()
             }
-            Self::RepeatSpread { ms, .. } if *ms > ARRIVAL_REPEAT_LIMIT_MS => {
-                "Timing moved between runs. Keep still and measure again.".into()
-            }
-            Self::RepeatSpread { .. } => {
-                "Level moved between runs. Keep still and measure again.".into()
-            }
+            // How far it moved, against the limit: 0.2 ms reads differently from 2 ms.
+            Self::RepeatSpread { ms, .. } if *ms > ARRIVAL_REPEAT_LIMIT_MS => format!(
+                "Timing moved {ms:.2} ms between runs (limit {ARRIVAL_REPEAT_LIMIT_MS:.2} ms). Keep still and measure again."
+            ),
+            Self::RepeatSpread { db, .. } => format!(
+                "Level moved {db:.2} dB between runs (limit {LEVEL_REPEAT_LIMIT_DB:.2} dB). Keep still and measure again."
+            ),
             Self::NoClearArrival { .. } => "No clear arrival. Echoes or an obstacle?".into(),
             Self::NotMeasuredTwice => "Not measured twice. Measure again.".into(),
             Self::Cancelled => "Measurement was stopped before the end.".into(),
@@ -660,6 +661,19 @@ mod tests {
         assert_eq!(far.severity(), Severity::SetAside);
         assert_eq!(far.human(), "Set aside: 177 ms later than the others.");
         assert!(far.to_string().contains("+176.9 ms"));
+        // The figure the card shows, as the two HDMI outputs of 20 October moved.
+        assert_eq!(
+            R::RepeatSpread {
+                ms: 2.1452,
+                db: 0.004
+            }
+            .human(),
+            "Timing moved 2.15 ms between runs (limit 0.15 ms). Keep still and measure again."
+        );
+        assert_eq!(
+            R::RepeatSpread { ms: 0.0, db: 0.62 }.human(),
+            "Level moved 0.62 dB between runs (limit 0.50 dB). Keep still and measure again."
+        );
         let clipped = R::Clipped {
             overdrive_db: Some(4.2),
         };

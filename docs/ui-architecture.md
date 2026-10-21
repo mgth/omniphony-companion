@@ -177,8 +177,9 @@ are the layout's until an alignment measured the speaker. Then
 `companion_service::room::Distances` derives, for every qualified row, the acoustic
 distance relative to the timing reference,
 `Δd = c·[(arrival − delay) − (arrival_ref − delay_ref)]` with `c = 0.343 m/ms`, where
-`delay` is the output's delay in the alignment's snapshot (arrivals include it; a row
-whose delay differs in any recorded retake state is left out). A row whose
+`delay` is the output's delay in the state the passes measured under
+(`Alignment::measured_state`: zero for an alignment from zero; arrivals include it; a
+row whose delay differs in any recorded retake state is left out). A row whose
 delay-free arrival is more than 20 ms from the group's median is another output
 device: it is drawn on the rim, distance unknown. The distances are anchored on the
 reference by the least-squares fit to the layout's distances (the mean of
