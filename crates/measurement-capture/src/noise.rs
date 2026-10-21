@@ -47,14 +47,18 @@ pub const BROADBAND_HZ: [f64; 2] = [200.0, 10000.0];
 
 /// The band an acquisition's signal/noise is graded over, and the part of the sweep
 /// body, as fractions of its duration, during which the sweep is inside it. A sweep
-/// that does not reach 5 kHz, such as a subwoofer's, is graded over its whole range.
+/// that does not reach 5 kHz, such as a subwoofer's, or that starts at or above 10 kHz
+/// is graded over its whole range.
 pub fn graded_band(sweep: Sweep, rate: f64) -> ([f64; 2], [f64; 2]) {
     let (start, end) = (
         f64::from(sweep.start_hz),
         f64::from(sweep.end_hz).min(rate * 0.45),
     );
-    let band = if end >= 5000.0 {
-        [start.max(BROADBAND_HZ[0]), end.min(BROADBAND_HZ[1])]
+    let graded = [start.max(BROADBAND_HZ[0]), end.min(BROADBAND_HZ[1])];
+    // A sweep that misses part of that band, a treble-only one for example, keeps its
+    // own range.
+    let band = if end >= 5000.0 && graded[0] < graded[1] {
+        graded
     } else {
         [start, end]
     };
@@ -219,6 +223,18 @@ mod tests {
             end_hz: 120.0,
         };
         assert_eq!(graded_band(sub, 48000.0), ([20.0, 120.0], [0.0, 1.0]));
+        // Neither does a treble-only custom sweep, which misses 200 Hz–10 kHz.
+        for start_hz in [10000.0, 12000.0] {
+            let treble = Sweep {
+                start_hz,
+                end_hz: 18000.0,
+                ..sub
+            };
+            assert_eq!(
+                graded_band(treble, 48000.0),
+                ([f64::from(start_hz), 18000.0], [0.0, 1.0])
+            );
+        }
     }
     #[test]
     fn out_of_band_rumble_does_not_hide_an_in_band_signal() {

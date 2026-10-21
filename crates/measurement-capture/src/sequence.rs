@@ -227,6 +227,29 @@ mod tests {
         }
     }
     #[test]
+    fn a_treble_only_sweep_keeps_its_timing_anchors_and_response() {
+        let sweep = Sweep {
+            duration_ms: 1000,
+            peak_dbfs: -20.0,
+            start_hz: 12000.0,
+            end_hz: 18000.0,
+        };
+        let source = sweep.samples(48000).unwrap();
+        let mut audio = vec![0.0; source.len() * 3 + 48000];
+        for i in 0..3 {
+            let start = 24000 + i * source.len();
+            for (dst, src) in audio[start..].iter_mut().zip(&source) {
+                *dst += src * 0.5;
+            }
+        }
+        let timing = crate::timing::inspect(&audio, 48000, 48000, sweep).unwrap();
+        assert_eq!(
+            timing.band_noise.as_ref().unwrap().band_hz,
+            [12000.0, 18000.0]
+        );
+        assert!(crate::impulse::full_response(&audio, 48000, 48000, sweep, &timing).is_ok());
+    }
+    #[test]
     fn zero_batch_is_reported_as_missing_input_not_missing_references() {
         let sweep = Sweep {
             duration_ms: 1000,

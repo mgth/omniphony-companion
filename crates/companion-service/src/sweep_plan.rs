@@ -220,7 +220,8 @@ pub fn take_settings(settings: &Settings, group: &Group) -> Settings {
 /// Measure every group as one continuous batch each, in order, and return their takes
 /// in the order of `outputs` (the groups' outputs in order). One group measures straight
 /// into `request.out_dir`; several measure into `sweep-1`, `sweep-2`… inside it. Stops at
-/// the first group that fails, is cancelled or errs; the takes measured so far are kept.
+/// the first group that fails, is cancelled or errs, with its error in the outcome; the
+/// takes measured so far are kept. Only creating the folder is an error.
 /// `progress` receives the index of the speaker in the concatenated output list.
 pub fn measure_groups<B: Backend + ?Sized>(
     backend: &B,
@@ -243,9 +244,18 @@ pub fn measure_groups<B: Backend + ?Sized>(
     let mut offset = 0;
     for (index, group) in groups.iter().enumerate() {
         let child = group_request(request, group, index, groups.len());
-        let batch = backend.measure_batch(child, group.outputs.clone(), cancel, &mut |i, p| {
-            progress(offset + i, p)
-        })?;
+        // A group that fails to start keeps the takes of the groups before it.
+        let batch =
+            match backend.measure_batch(child, group.outputs.clone(), cancel, &mut |i, p| {
+                progress(offset + i, p)
+            }) {
+                Ok(batch) => batch,
+                Err(error) => {
+                    merged.cancelled |= cancel.load(std::sync::atomic::Ordering::Relaxed);
+                    merged.error = Some(error);
+                    break;
+                }
+            };
         offset += group.outputs.len();
         merged.takes.extend(batch.takes);
         merged.cancelled |= batch.cancelled;
@@ -415,5 +425,94 @@ mod tests {
         let groups = plan(&custom, &room, &all, None).unwrap();
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].sweep, custom.sweep);
+    }
+
+    #[test]
+    fn a_later_group_that_fails_keeps_the_earlier_takes() {
+        use crate::{batch::BatchOutcome, measurement::TakeOutcome};
+        struct Flaky;
+        impl Backend for Flaky {
+            fn inputs(&self) -> Result<Vec<measurement_capture::InputDevice>, String> {
+                Ok(vec![])
+            }
+            fn discover(&self, _: std::net::SocketAddr) -> Result<Snapshot, String> {
+                Err("unused".into())
+            }
+            fn measure(
+                &self,
+                _: MeasureRequest,
+                _: &AtomicBool,
+                _: &mut dyn FnMut(MeasureProgress),
+            ) -> Result<TakeOutcome, String> {
+                Err("unused".into())
+            }
+            fn measure_batch(
+                &self,
+                request: MeasureRequest,
+                outputs: Vec<String>,
+                _: &AtomicBool,
+                _: &mut dyn FnMut(usize, MeasureProgress),
+            ) -> Result<BatchOutcome, String> {
+                if outputs[0] == "LFE" {
+                    return Err("renderer connection lost".into());
+                }
+                Ok(BatchOutcome {
+                    directory: request.out_dir.clone(),
+                    takes: outputs
+                        .into_iter()
+                        .map(|id| {
+                            let take = TakeOutcome {
+                                directory: request.out_dir.join(&id),
+                                accepted: true,
+                                cancelled: false,
+                                rejection_reason: None,
+                                diagnostics: None,
+                                timing: None,
+                                impulse: None,
+                                impulse_error: None,
+                                deferred: false,
+                            };
+                            (id, take)
+                        })
+                        .collect(),
+                    cancelled: false,
+                    error: None,
+                })
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let room = snapshot(vec![
+            output("C", None, None, 0.0),
+            output("FL", None, None, 0.0),
+            output("LFE", None, Some(120.0), 0.0),
+        ]);
+        let groups = plan(&settings("C"), &room, &ids(&["FL", "LFE"]), None).unwrap();
+        assert_eq!(groups.len(), 2);
+        let request = MeasureRequest {
+            endpoint: "127.0.0.1:1".parse().unwrap(),
+            snapshot: room,
+            device: "test".into(),
+            input_channel: 1,
+            sample_rate: 48000,
+            microphone_id: "mic-1".into(),
+            position_id: "main-seat".into(),
+            output: "FL".into(),
+            reference_output: "C".into(),
+            calibration: None,
+            sweep: Settings::default().sweep,
+            out_dir: dir.path().join("batch"),
+        };
+        let outcome = measure_groups(
+            &Flaky,
+            &request,
+            &groups,
+            &AtomicBool::new(false),
+            &mut |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(outcome.takes.len(), 1);
+        assert_eq!(outcome.takes[0].0, "FL");
+        assert_eq!(outcome.error.as_deref(), Some("renderer connection lost"));
+        assert!(!outcome.cancelled);
     }
 }
