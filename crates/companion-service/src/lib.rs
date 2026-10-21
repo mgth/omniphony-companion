@@ -1,6 +1,7 @@
 //! Shared application services. No UI toolkit or frontend event loop dependency.
 pub mod alignment;
 pub mod analysis_cache;
+pub mod bass;
 pub mod batch;
 pub mod controller;
 pub mod defaults;

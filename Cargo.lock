@@ -568,6 +568,7 @@ dependencies = [
  "hound",
  "measurement-capture",
  "omniphony-adapter",
+ "rustfft",
  "serde",
  "serde_json",
  "sha2",

@@ -321,6 +321,9 @@ pub struct SpeakerCheck {
     /// Mean level of the sum over the band: measured before (the analysis at that
     /// position), predicted, and measured now.
     pub sum_level_db: [f64; 3],
+    /// How much louder the sum is half an octave below the crossover than half an
+    /// octave above: measured before, predicted, and measured now.
+    pub balance_db: [f64; 3],
     /// RMS difference between the predicted and the measured sum over the band.
     pub deviation_db: f64,
 }
@@ -1374,7 +1377,11 @@ pub fn verify(
         let parts = &prepared.parts[0];
         let now = spectrum(response, &prepared.frequencies, parts.window);
         let now = prepared.power(&now, settings);
-        let before = prepared.mean_db(&prepared.power(&parts.sum, settings), &prepared.band);
+        let before_power = prepared.power(&parts.sum, settings);
+        let before = prepared.mean_db(&before_power, &prepared.band);
+        let balance = |power: &[f64]| {
+            prepared.mean_db(power, &prepared.low) - prepared.mean_db(power, &prepared.high)
+        };
         let predicted_power = prepared.sum_power(parts, &proposal.setting, true, settings);
         let predicted = prepared.mean_db(&predicted_power, &prepared.band);
         let measured_level = prepared.mean_db(&now, &prepared.band);
@@ -1398,8 +1405,78 @@ pub fn verify(
                 round(predicted, 2),
                 round(measured_level, 2),
             ],
+            balance_db: [
+                round(balance(&before_power), 2),
+                round(balance(&predicted_power), 2),
+                round(balance(&now), 2),
+            ],
             deviation_db: round(deviation, 2),
         });
     }
     Ok(verification)
+}
+
+/// How far, in frames, `a`'s content lies after `b`'s: the lag that best lines up two
+/// recordings of the same sound (the reference sweep of two takes cut around their own
+/// correlation peaks), within `max_frames`, refined between frames. `None` when the best
+/// lag is at the limit or either is silent.
+pub fn lag(a: &[f32], b: &[f32], max_frames: usize) -> Option<f64> {
+    use rustfft::{FftPlanner, num_complex::Complex};
+    let len = a.len().max(b.len());
+    if a.is_empty() || b.is_empty() || len > 1 << 22 {
+        return None;
+    }
+    let n = (2 * len).next_power_of_two();
+    let mut planner = FftPlanner::<f64>::new();
+    let forward = planner.plan_fft_forward(n);
+    let inverse = planner.plan_fft_inverse(n);
+    let load = |x: &[f32]| {
+        let mut v: Vec<Complex<f64>> = x.iter().map(|&s| Complex::new(f64::from(s), 0.0)).collect();
+        v.resize(n, Complex::default());
+        v
+    };
+    let (mut fa, mut fb) = (load(a), load(b));
+    forward.process(&mut fa);
+    forward.process(&mut fb);
+    // r(l) = Σ a[k] b[k − l]: peaks where a's content lies l frames after b's.
+    let mut r: Vec<Complex<f64>> = fa.iter().zip(&fb).map(|(x, y)| x * y.conj()).collect();
+    inverse.process(&mut r);
+    let at = |l: i64| r[l.rem_euclid(n as i64) as usize].re;
+    let max = max_frames.min(len - 1) as i64;
+    let (best, value) = (-max..=max)
+        .map(|l| (l, at(l)))
+        .max_by(|x, y| x.1.total_cmp(&y.1))?;
+    if value <= 0.0 || best.abs() == max {
+        return None;
+    }
+    let (left, right) = (at(best - 1), at(best + 1));
+    let curvature = left - 2.0 * value + right;
+    let shift = if curvature < 0.0 {
+        0.5 * (left - right) / curvature
+    } else {
+        0.0
+    };
+    Some(best as f64 + shift.clamp(-0.5, 0.5))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn the_lag_lines_up_a_shifted_copy() {
+        let sound: Vec<f32> = (0..4000)
+            .map(|i| {
+                let t = i as f32 / 48000.0;
+                (std::f32::consts::TAU * 60.0 * t * (1.0 + 20.0 * t)).sin()
+                    * (-(t - 0.04).powi(2) / 0.0004).exp()
+            })
+            .collect();
+        let mut later = vec![0.0; 7];
+        later.extend_from_slice(&sound[..sound.len() - 7]);
+        let lag = lag(&later, &sound, 96).unwrap();
+        assert!((lag - 7.0).abs() < 0.05, "{lag}");
+        assert!((super::lag(&sound, &later, 96).unwrap() + 7.0).abs() < 0.05);
+        assert!(super::lag(&later, &sound, 7).is_none());
+        assert!(super::lag(&vec![0.0; 100], &sound, 10).is_none());
+    }
 }

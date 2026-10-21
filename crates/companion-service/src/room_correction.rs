@@ -106,7 +106,7 @@ pub fn measurements(a: &Alignment) -> Vec<(OutputMeasurements, Vec<String>)> {
 }
 
 /// One take's stored response as design evidence, or why it is not.
-fn read(folder: &Path, output_id: &str, main_seat: bool) -> Result<Measurement, String> {
+pub(crate) fn read(folder: &Path, output_id: &str, main_seat: bool) -> Result<Measurement, String> {
     if !folder.join(room_response::FILE).is_file() {
         return Err("no stored response (measured before responses were kept)".into());
     }

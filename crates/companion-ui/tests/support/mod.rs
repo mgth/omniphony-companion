@@ -447,6 +447,7 @@ pub fn alignment(
         physical_levels_changed: false,
         retake_snapshots: vec![],
         zeroed_snapshot: None,
+        bass: None,
     }
 }
 
@@ -601,6 +602,7 @@ pub fn room_alignment(controller: &Controller) -> companion_service::alignment::
         physical_levels_changed: false,
         retake_snapshots: vec![],
         zeroed_snapshot: None,
+        bass: None,
     }
 }
 
@@ -698,6 +700,7 @@ pub fn late_device_alignment(
         physical_levels_changed: false,
         retake_snapshots: vec![],
         zeroed_snapshot: None,
+        bass: None,
     }
 }
 
@@ -946,5 +949,6 @@ pub fn bench_alignment(controller: &mut Controller) -> companion_service::alignm
         physical_levels_changed: false,
         retake_snapshots: vec![],
         zeroed_snapshot: None,
+        bass: None,
     }
 }

@@ -60,9 +60,20 @@ pub fn measure(
     }
     args.sweep.validate(args.sample_rate)?;
     let mut seen = std::collections::HashSet::new();
-    for id in outputs
+    // A bass-managed target may start below its own band (the crossover gives that part
+    // to the subwoofers) and may reach any output through the panning: the renderer
+    // holds it under the ceiling on the loudest unmuted output.
+    let loudest_db = args
+        .snapshot
+        .outputs
         .iter()
-        .chain(std::iter::once(&args.reference_output))
+        .filter(|o| !o.muted)
+        .map(|o| o.gain_db)
+        .fold(f32::NEG_INFINITY, f32::max);
+    for (id, target) in outputs
+        .iter()
+        .map(|id| (id, true))
+        .chain(std::iter::once((&args.reference_output, false)))
     {
         let output = args
             .snapshot
@@ -70,10 +81,21 @@ pub fn measure(
             .iter()
             .find(|o| &o.id == id)
             .ok_or("batch output absent from snapshot")?;
+        let bass_managed = target && args.bass_managed;
+        let low = if bass_managed {
+            20.0
+        } else {
+            output.freq_low_hz.unwrap_or(20.0)
+        };
+        let gain = if bass_managed {
+            loudest_db.max(output.gain_db)
+        } else {
+            output.gain_db
+        };
         if output.muted
-            || args.sweep.start_hz < output.freq_low_hz.unwrap_or(20.0)
+            || args.sweep.start_hz < low
             || args.sweep.end_hz > output.freq_high_hz.unwrap_or(f32::MAX)
-            || args.sweep.peak_dbfs + args.snapshot.master_gain_db + output.gain_db > -6.0
+            || args.sweep.peak_dbfs + args.snapshot.master_gain_db + gain > -6.0
         {
             return Err("batch output is muted or exceeds frequency/level limits".into());
         }
@@ -96,7 +118,7 @@ pub fn measure(
     write_json(&args.out_dir.join("snapshot.json"), &args.snapshot)?;
     write_json(
         &args.out_dir.join("batch-stimulus.json"),
-        &serde_json::json!({"schema_version":1,"protocol_version":omniphony_adapter::protocol::VERSION,"outputs":outputs,"reference_output_id":args.reference_output,"signal":args.sweep,"microphone_id":args.microphone_id,"position_id":args.position_id}),
+        &serde_json::json!({"schema_version":1,"protocol_version":omniphony_adapter::protocol::VERSION,"outputs":outputs,"reference_output_id":args.reference_output,"signal":args.sweep,"microphone_id":args.microphone_id,"position_id":args.position_id,"bass_managed":args.bass_managed,"output_filters_bypassed":args.bypass_output_filters}),
     )?;
     progress(0, MeasureProgress::OpeningInput);
     let mut capture =
@@ -113,7 +135,7 @@ pub fn measure(
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        client.begin(&args.snapshot)?;
+        client.begin_with(&args.snapshot, args.bypass_output_filters)?;
         began = true;
         capture.poll();
         analysis_start_frame = capture.frames() + args.sample_rate as usize / 5;
@@ -121,12 +143,13 @@ pub fn measure(
         crate::microphone::before_playback(&mut capture, args.sample_rate, cancelled, &mut |p| {
             progress(0, p)
         })?;
-        let mut state = client.start_sequence(
+        let mut state = client.start_sequence_with(
             1,
             &args.output,
             Some(&args.reference_output),
             &outputs,
             args.sweep,
+            args.bass_managed,
         )?;
         let mut next = Instant::now();
         loop {
@@ -243,6 +266,7 @@ pub fn measure(
                 "microphone_id":args.microphone_id,"position_id":args.position_id,"output_id":output,"reference_output_id":args.reference_output,"signal":args.sweep,
                 "segment_start_render_frames":[index as u64*2*frames,(index as u64*2+1)*frames,(index as u64*2+2)*frames],
                 "sequence_window":SequenceWindow {target_index:index,source_start_frame:start,source_end_frame:end},
+                "bass_managed":args.bass_managed,"output_filters_bypassed":args.bypass_output_filters,
                 "source_recording":"../recording.wav","calibration_applied":false,"calibration_file":calibration.as_ref().map(|_|"microphone-calibration.txt")
             }),
         )?;
