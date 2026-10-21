@@ -1,12 +1,16 @@
 //! Bounded, offline swept-sine deconvolution and conservative arrival candidates.
 //! An early, repeatable peak is evidence, not proof of an unobstructed direct path.
 use crate::timing::{TimingReport, resample};
-use omniphony_osc_contract::measurement::Sweep;
+use omniphony_osc_contract::measurement::{SETTLE_MS, Sweep};
 use rustfft::{FftPlanner, num_complex::Complex};
 use serde::{Deserialize, Serialize};
 
-const PRE_SECONDS: f64 = 0.1;
+pub const PRE_SECONDS: f64 = 0.1;
 const POST_SECONDS: f64 = 0.15;
+/// The unweighted response kept for room correction runs this long after the
+/// correlation anchor. The extraction window ends 150 ms after the segment's 250 ms
+/// trailing silence, so every swept frequency is fully supported up to 400 ms.
+pub const FULL_POST_SECONDS: f64 = 0.35;
 const REGULARIZATION: f64 = 1e-5;
 const MAX_FFT: usize = 4_194_304;
 const MAX_BAND_SPREAD_MS: f64 = 0.6;
@@ -54,6 +58,22 @@ pub struct ImpulseSegment {
     pub waveforms: Option<crate::waveform::WaveformReport>,
 }
 
+/// The deconvolved response of each segment with no band weighting, kept apart from
+/// [`ImpulseReport`] so reports held for display stay compact. Not microphone-calibrated.
+#[derive(Debug, Clone)]
+pub struct FullResponse {
+    /// Capture frames per renderer second: the response's time base after clock
+    /// compensation. A file header can only hold the nominal integer capture rate.
+    pub rate: f64,
+    /// Index of the segment's correlation anchor, [`PRE_SECONDS`] into each response.
+    pub anchor: usize,
+    /// How far, in frames, each segment's correlation peak lies after its anchor frame:
+    /// the window starts on a whole frame. Within ±0.5.
+    pub anchor_offsets: [f64; 3],
+    /// `reference_before`, `speaker`, `reference_after`, of equal length.
+    pub segments: [Vec<f32>; 3],
+}
+
 /// The timing report must come from `timing::analyze` on these same samples.
 /// All calculations run after capture; nothing here is called by an audio callback.
 pub fn analyze(
@@ -75,6 +95,126 @@ pub fn inspect(
     timing: &TimingReport,
 ) -> Result<ImpulseReport, String> {
     analyze_inner(samples, capture_rate, render_rate, sweep, timing, true)
+}
+
+/// The unweighted response of every segment, for room correction. Unlike the arrival
+/// review it accepts any valid sweep, bass-only ones included, and inspects clipped
+/// recordings: callers keep their fault. The template is the sweep evaluated at the
+/// clock-compensated rate rather than interpolated, so the treble keeps its level when
+/// the capture and render clocks differ.
+pub fn full_response(
+    samples: &[f32],
+    capture_rate: u32,
+    render_rate: u32,
+    sweep: Sweep,
+    timing: &TimingReport,
+) -> Result<FullResponse, String> {
+    sweep.validate(render_rate)?;
+    sweep.validate(capture_rate)?;
+    if samples.is_empty()
+        || samples.len() > capture_rate as usize * crate::MAX_SECONDS as usize
+        || samples.iter().any(|x| !x.is_finite() || x.abs() > 16.0)
+    {
+        return Err("invalid response input".into());
+    }
+    let peaks = [
+        timing.reference_start_frames[0],
+        timing.target_start_frame,
+        timing.reference_start_frames[1],
+    ];
+    if peaks
+        .iter()
+        .any(|p| !p.is_finite() || *p < 0.0 || *p >= samples.len() as f64)
+        || !(peaks[0] < peaks[1] && peaks[1] < peaks[2])
+    {
+        return Err("invalid sequence anchors for the response".into());
+    }
+    let frames = sweep.frames(render_rate) as f64;
+    let ratio = (peaks[2] - peaks[0]) / (2.0 * frames);
+    let nominal = capture_rate as f64 / render_rate as f64;
+    if (ratio / nominal - 1.0).abs() > 0.002 {
+        return Err("clock ratio exceeds the response analysis limit".into());
+    }
+    let rate = render_rate as f64 * ratio;
+    let template = analytic_template(sweep, render_rate, ratio);
+    let pre = (PRE_SECONDS * rate).round() as usize;
+    let post = (POST_SECONDS * rate).round() as usize;
+    let len = pre + (FULL_POST_SECONDS * rate).round() as usize + 1;
+    let window_len = template.len() + pre + post;
+    let fft_len = (window_len + template.len()).next_power_of_two();
+    if fft_len > MAX_FFT {
+        return Err("response FFT exceeds the offline memory bound".into());
+    }
+    let mut planner = FftPlanner::<f64>::new();
+    let forward = planner.plan_fft_forward(fft_len);
+    let inverse = planner.plan_fft_inverse(fft_len);
+    let mut x = vec![Complex::default(); fft_len];
+    for (dest, &sample) in x.iter_mut().zip(&template) {
+        dest.re = sample;
+    }
+    forward.process(&mut x);
+    let power = x.iter().map(|v| v.norm_sqr()).fold(0.0, f64::max);
+    if power <= 0.0 || !power.is_finite() {
+        return Err("empty deconvolution template".into());
+    }
+    for bin in &mut x {
+        *bin = bin.conj() / (bin.norm_sqr() + power * REGULARIZATION);
+    }
+    let mut segments: [Vec<f32>; 3] = Default::default();
+    let mut y = vec![Complex::default(); fft_len];
+    for (segment, &peak) in segments.iter_mut().zip(&peaks) {
+        let start = (peak.round() as usize)
+            .checked_sub(pre)
+            .ok_or("not enough pre-arrival recording")?;
+        let window = samples
+            .get(start..start + window_len)
+            .ok_or("not enough acoustic tail for the response")?;
+        y.fill(Complex::default());
+        for (dest, &sample) in y.iter_mut().zip(window) {
+            dest.re = f64::from(sample);
+        }
+        forward.process(&mut y);
+        for (bin, inverse_bin) in y.iter_mut().zip(&x) {
+            *bin *= inverse_bin;
+        }
+        inverse.process(&mut y);
+        *segment = y[..len]
+            .iter()
+            .map(|v| (v.re / fft_len as f64) as f32)
+            .collect();
+    }
+    Ok(FullResponse {
+        rate,
+        anchor: pre,
+        anchor_offsets: peaks.map(|p| p - p.round()),
+        segments,
+    })
+}
+
+/// `Sweep::samples`, evaluated at `ratio` capture frames per renderer frame: the
+/// continuous sweep the converters reproduce, with the same padding and fades.
+fn analytic_template(sweep: Sweep, render_rate: u32, ratio: f64) -> Vec<f64> {
+    let rate = f64::from(render_rate);
+    let frames = sweep.frames(render_rate) as usize;
+    let padding = (render_rate as usize * SETTLE_MS as usize / 1000) as f64;
+    let sweep_frames = frames as f64 - 2.0 * padding;
+    let duration = sweep_frames / rate;
+    let log_ratio = (f64::from(sweep.end_hz) / f64::from(sweep.start_hz)).ln();
+    let phase_scale = std::f64::consts::TAU * f64::from(sweep.start_hz) * duration / log_ratio;
+    let peak = 10_f64.powf(f64::from(sweep.peak_dbfs) / 20.0);
+    let fade = (rate * 0.005).round();
+    (0..(frames as f64 * ratio).round() as usize)
+        .map(|j| {
+            // Renderer frames since the sweep body started.
+            let i = j as f64 / ratio - padding;
+            if i < 0.0 || i > sweep_frames - 1.0 {
+                return 0.0;
+            }
+            let edge = i.min(sweep_frames - 1.0 - i).min(fade) / fade;
+            let envelope = 0.5 - 0.5 * (std::f64::consts::PI * edge).cos();
+            peak * envelope * (phase_scale * (log_ratio * i / rate / duration).exp_m1()).sin()
+        })
+        .collect()
 }
 fn analyze_inner(
     samples: &[f32],
@@ -491,6 +631,76 @@ mod tests {
                     |s| s.envelope_db.len() <= 1600 && s.response.iter().all(|x| x.is_finite())
                 )
             );
+        }
+    }
+    #[test]
+    fn the_unweighted_response_recovers_a_known_room_response() {
+        // A direct path and a 2 ms echo at half its level, on every segment.
+        let paths = &[(0.0, 0.8), (2.0, 0.4)][..];
+        let samples = recording(48000, 120.0, 3.1, [paths; 3]);
+        let timing = timing::analyze(&samples, 48000, 48000, sweep()).unwrap();
+        let full = full_response(&samples, 48000, 48000, sweep(), &timing).unwrap();
+        assert!((full.rate / 48000.0 - 1.0 - 120e-6).abs() < 30e-6);
+        assert_eq!(full.anchor, (PRE_SECONDS * full.rate).round() as usize);
+        for segment in &full.segments {
+            assert_eq!(
+                segment.len(),
+                full.anchor + (FULL_POST_SECONDS * full.rate).round() as usize + 1
+            );
+            // The direct path is at the anchor, its echo 2 ms later.
+            let strongest = |range: std::ops::Range<usize>| {
+                range
+                    .max_by(|&a, &b| segment[a].abs().total_cmp(&segment[b].abs()))
+                    .unwrap()
+            };
+            let direct = strongest(full.anchor - 48..full.anchor + 48);
+            let echo = strongest(direct + 48..direct + 144);
+            assert!(direct.abs_diff(full.anchor) <= 2, "{direct}");
+            assert!((echo - direct).abs_diff(96) <= 1, "{}", echo - direct);
+            assert!((segment[echo] / segment[direct] - 0.5).abs() < 0.08);
+        }
+        let magnitude = crate::response::magnitude(&full, sweep(), None).unwrap();
+        for (i, &hz) in magnitude.frequency_hz.iter().enumerate() {
+            if !(300.0..=9000.0).contains(&hz) {
+                continue;
+            }
+            // The same 1/48-octave power average of |0.8 + 0.4·e^(−jω·2 ms)|².
+            let half = 2_f64.powf(0.5 / crate::response::POINTS_PER_OCTAVE);
+            let power = (0..=64)
+                .map(|k| {
+                    let f = hz / half * half.powf(k as f64 / 32.0);
+                    0.8 * 0.8 + 0.4 * 0.4 + 0.64 * (std::f64::consts::TAU * f * 0.002).cos()
+                })
+                .sum::<f64>()
+                / 65.0;
+            let expected = 10.0 * power.log10();
+            let tolerance = if expected < -3.0 { 0.6 } else { 0.08 };
+            for segment in &magnitude.magnitude_db {
+                let db = f64::from(segment[i]);
+                assert!(
+                    (db - expected).abs() < tolerance,
+                    "{hz} Hz: {db} vs {expected}"
+                );
+            }
+        }
+    }
+    #[test]
+    fn the_analytic_template_is_the_played_sweep() {
+        for sweep in [
+            sweep(),
+            Sweep {
+                duration_ms: 3000,
+                peak_dbfs: -12.0,
+                start_hz: 20.0,
+                end_hz: 20000.0,
+            },
+        ] {
+            let played = sweep.samples(48000).unwrap();
+            let template = analytic_template(sweep, 48000, 1.0);
+            assert_eq!(template.len(), played.len());
+            for (a, b) in template.iter().zip(&played) {
+                assert!((a - f64::from(*b)).abs() < 1e-6);
+            }
         }
     }
     #[test]

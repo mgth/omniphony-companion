@@ -12,6 +12,7 @@ pub mod microphone;
 pub mod preferences;
 pub mod review;
 pub mod room;
+pub mod room_response;
 pub mod workspace;
 pub type AppResult<T> = Result<T, Box<dyn std::error::Error>>;
 

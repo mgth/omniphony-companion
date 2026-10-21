@@ -2908,3 +2908,40 @@ fn an_uncertain_application_blocks_a_new_baseline() {
             .is_err_and(|e| e.starts_with("The last application is uncertain"))
     );
 }
+
+#[test]
+fn the_setup_rail_says_whether_a_microphone_calibration_will_be_applied() {
+    let ctx = egui::Context::default();
+    let (controller, _) = support::ready();
+    let mut app = CompanionApp::preview(&ctx, controller);
+    let size = Vec2::new(850.0, 640.0);
+    let shown = |app: &mut CompanionApp, needle: &str| {
+        frame(app, &ctx, vec![], size);
+        labels(&frame(app, &ctx, vec![], size))
+            .iter()
+            .any(|(t, _)| t.contains(needle))
+    };
+    assert!(shown(
+        &mut app,
+        "No microphone calibration. Alignment does not need one"
+    ));
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("umik-1 7101234.txt");
+    std::fs::write(
+        &path,
+        "\"Sens Factor =-.7742dB\"\n20 -1.5\n1000 0\n20000 2.1\n",
+    )
+    .unwrap();
+    app.controller.settings.calibration_path = path.display().to_string();
+    assert!(shown(
+        &mut app,
+        "Calibration: umik-1 7101234.txt · 3 points · 20–20000 Hz"
+    ));
+    assert!(
+        shown(&mut app, "Front left"),
+        "the speaker cards stay in view"
+    );
+    std::fs::write(dir.path().join("broken.txt"), "20 0\n10 1\n").unwrap();
+    app.controller.settings.calibration_path = dir.path().join("broken.txt").display().to_string();
+    assert!(shown(&mut app, "Calibration file unreadable"));
+}

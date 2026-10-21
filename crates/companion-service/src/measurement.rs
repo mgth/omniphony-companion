@@ -350,6 +350,26 @@ pub(crate) fn finish_take(
         .cloned()
         .map(Arc::new);
     let impulse_error = response.and_then(Result::err);
+    // The unweighted response, for room correction. It never changes the verdict.
+    let stored = inspected.as_ref().ok().map(|timing| {
+        impulse::full_response(
+            &recording.samples[analysis_start_frame..],
+            args.sample_rate,
+            snapshot.sample_rate,
+            sweep,
+            timing,
+        )
+        .and_then(|full| {
+            crate::room_response::store(
+                args,
+                &full,
+                args.sample_rate,
+                result.is_ok(),
+                recording.metadata.clipped_samples,
+            )
+            .map_err(|e| e.to_string())
+        })
+    });
     crate::files::write_json_compact(
         &args.out_dir.join("capture-report.json"),
         &serde_json::json!({
@@ -363,6 +383,8 @@ pub(crate) fn finish_take(
             "timing_warning": inspected.as_ref().ok().and_then(|report| report.timing_warning()),
             "accepted_for_analysis": result.is_ok(), "valid_for_correction": false,
             "calibration_applied": false,
+            "response_file": stored.as_ref().and_then(|r| r.as_ref().ok()).map(|_| crate::room_response::FILE),
+            "response_error": stored.and_then(Result::err),
         }),
     )?;
     Ok(TakeOutcome {
@@ -405,6 +427,209 @@ pub(crate) fn drain_for(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use omniphony_adapter::protocol::Output;
+
+    /// Reference, target, reference through known room responses, after a quiet lead-in.
+    fn take(sweep: Sweep, paths: [&[(f64, f64)]; 3]) -> Vec<f32> {
+        let source = sweep.samples(48000).unwrap();
+        let mut out = vec![0.0_f32; 24000 + 3 * source.len() + 24000];
+        for (segment, paths) in paths.iter().enumerate() {
+            for &(ms, gain) in *paths {
+                let start = 24000 + segment * source.len() + (ms * 48.0).round() as usize;
+                for (dst, &src) in out[start..].iter_mut().zip(&source) {
+                    *dst += src * gain as f32;
+                }
+            }
+        }
+        let mut state = 7_u32;
+        for value in &mut out {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            *value += ((state as f64 / u32::MAX as f64 - 0.5) * 2e-6) as f32;
+        }
+        out
+    }
+    fn request(directory: &Path, sweep: Sweep) -> MeasureRequest {
+        let output = |id: &str, index| Output {
+            id: id.into(),
+            index,
+            name: id.into(),
+            gain_db: 0.0,
+            delay_ms: 0.0,
+            muted: false,
+            freq_low_hz: None,
+            freq_high_hz: None,
+            azimuth_deg: None,
+            elevation_deg: None,
+            distance_m: None,
+        };
+        MeasureRequest {
+            endpoint: "127.0.0.1:1".parse().unwrap(),
+            snapshot: Snapshot {
+                instance_id: "test".into(),
+                revision: "test:1".into(),
+                sample_rate: 48000,
+                master_gain_db: 0.0,
+                max_delay_ms: 100.0,
+                outputs: vec![output("C", 0), output("FL", 1)],
+                unavailable_reason: None,
+            },
+            device: "test".into(),
+            input_channel: 1,
+            sample_rate: 48000,
+            microphone_id: "mic-1".into(),
+            position_id: "main-seat".into(),
+            output: "FL".into(),
+            reference_output: "C".into(),
+            calibration: Some(PathBuf::from("/somewhere/umik-1 7101234.txt")),
+            sweep,
+            out_dir: directory.to_owned(),
+        }
+    }
+    fn recording(samples: Vec<f32>) -> measurement_capture::Recording {
+        let (peak_dbfs, rms_dbfs, clipped_samples) = measurement_capture::levels(&samples);
+        measurement_capture::Recording {
+            metadata: measurement_capture::CaptureMetadata {
+                host: "test".into(),
+                device: "test".into(),
+                input_channel: 1,
+                stream_channels: 1,
+                sample_rate: 48000,
+                sample_format: "f32".into(),
+                is_monitor: false,
+                channel_name: None,
+                continuity_check: "test".into(),
+                frames: samples.len(),
+                fault_flags: 0,
+                peak_dbfs,
+                rms_dbfs,
+                clipped_samples,
+            },
+            samples,
+        }
+    }
+    fn progress(args: &MeasureRequest) -> Progress {
+        let frames = args.sweep.frames(48000) * 3;
+        Progress {
+            signal_id: 1,
+            output_id: args.output.clone(),
+            reference_output_id: Some(args.reference_output.clone()),
+            sequence_outputs: vec![],
+            signal: args.sweep,
+            state: SignalState::Completed,
+            rendered_frames: frames,
+            total_frames: frames,
+        }
+    }
+
+    #[test]
+    fn a_take_keeps_its_unweighted_response_and_a_calibrated_magnitude() {
+        let dir = tempfile::tempdir().unwrap();
+        let sweep = Sweep {
+            duration_ms: 1500,
+            peak_dbfs: -20.0,
+            start_hz: 20.0,
+            end_hz: 20000.0,
+        };
+        let args = request(&dir.path().join("take"), sweep);
+        fs::create_dir(&args.out_dir).unwrap();
+        let calibration = "\"Sens Factor =-.7742dB, SERNO: 7101234\"\n20 -4\n1000 0\n20000 3\n";
+        fs::write(args.out_dir.join("microphone-calibration.txt"), calibration).unwrap();
+        // The speaker 1.5 ms late, with an echo 3 ms after it at half its level.
+        let target = &[(1.5, 0.5), (4.5, 0.25)][..];
+        let samples = take(sweep, [&[(0.0, 0.8)], target, &[(0.0, 0.8)]]);
+        let outcome = finish_take(
+            &args,
+            recording(samples),
+            4800,
+            Ok(progress(&args)),
+            false,
+            &mut |_| {},
+        )
+        .unwrap();
+        assert!(outcome.accepted, "{:?}", outcome.rejection_reason);
+        let report: serde_json::Value =
+            crate::files::read_json(&args.out_dir.join("capture-report.json")).unwrap();
+        assert_eq!(report["response_file"], "response.json");
+        assert_eq!(report["calibration_applied"], false);
+        let (stored, full) = crate::room_response::load(&args.out_dir).unwrap();
+        assert_eq!(stored.position_id, "main-seat");
+        assert_eq!((stored.output_id.as_str(), stored.signal), ("FL", sweep));
+        let used = stored.calibration.as_ref().unwrap();
+        assert_eq!(used.source_name.as_deref(), Some("umik-1 7101234.txt"));
+        assert_eq!(
+            used.sha256,
+            crate::room_response::sha256(calibration.as_bytes())
+        );
+        assert_eq!((used.points, used.coverage_hz), (3, [20.0, 20000.0]));
+        // The WAV is raw; the stored magnitude matches a fresh one from it.
+        let again = measurement_capture::response::magnitude(&full, sweep, None).unwrap();
+        assert_eq!(again.magnitude_db, stored.magnitude.magnitude_db);
+        let curve = measurement_capture::calibration::Calibration::parse(calibration).unwrap();
+        let magnitude = &stored.magnitude;
+        let calibrated = stored.corrected_magnitude_db().unwrap();
+        for (i, &hz) in magnitude.frequency_hz.iter().enumerate() {
+            let raw = f64::from(magnitude.magnitude_db[1][i]);
+            // The stored grid averages power over 1/48 octave around each point.
+            let half = 2_f64.powf(0.5 / measurement_capture::response::POINTS_PER_OCTAVE);
+            let power = (0..=64)
+                .map(|k| {
+                    let f = hz / half * half.powf(k as f64 / 32.0);
+                    0.25 + 0.0625 + 0.25 * (std::f64::consts::TAU * f * 0.003).cos()
+                })
+                .sum::<f64>()
+                / 65.0;
+            let expected = 10.0 * power.log10();
+            if (30.0..=15000.0).contains(&hz) && expected > -3.0 {
+                assert!(
+                    (raw - expected).abs() < 0.15,
+                    "{hz} Hz: {raw} vs {expected}"
+                );
+            }
+            let reference = f64::from(magnitude.magnitude_db[0][i]);
+            if (30.0..=15000.0).contains(&hz) {
+                assert!(
+                    (reference - 20.0 * 0.8_f64.log10()).abs() < 0.1,
+                    "{hz}: {reference}"
+                );
+            }
+            let correction = f64::from(calibrated[1][i]) - raw;
+            assert!((correction + curve.deviation_db(hz)).abs() < 0.002);
+        }
+    }
+
+    #[test]
+    fn without_a_calibration_the_response_says_so_and_a_clipped_take_keeps_its_fault() {
+        let dir = tempfile::tempdir().unwrap();
+        let sweep = Sweep {
+            duration_ms: 1000,
+            peak_dbfs: -12.0,
+            start_hz: 200.0,
+            end_hz: 10000.0,
+        };
+        let mut args = request(&dir.path().join("take"), sweep);
+        args.calibration = None;
+        fs::create_dir(&args.out_dir).unwrap();
+        let mut samples = take(sweep, [&[(0.0, 0.8)], &[(0.0, 4.5)], &[(0.0, 0.8)]]);
+        for x in &mut samples {
+            *x = x.clamp(-1.0, 1.0);
+        }
+        let outcome = finish_take(
+            &args,
+            recording(samples),
+            4800,
+            Ok(progress(&args)),
+            false,
+            &mut |_| {},
+        )
+        .unwrap();
+        assert_eq!(
+            outcome.rejection_reason.as_deref(),
+            Some("clipped recording")
+        );
+        let (stored, _) = crate::room_response::load(&args.out_dir).unwrap();
+        assert!(!stored.accepted_for_analysis && stored.clipped_samples > 0);
+        assert!(stored.calibration.is_none() && stored.corrected_magnitude_db().is_none());
+    }
     #[test]
     fn wav_roundtrip_retains_samples_and_never_overwrites() {
         let dir = tempfile::tempdir().unwrap();

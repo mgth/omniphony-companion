@@ -16,6 +16,7 @@ pub mod live_level;
 pub mod noise;
 #[cfg(target_os = "linux")]
 mod pipewire_capture;
+pub mod response;
 pub mod sequence;
 pub mod spectral;
 pub mod timing;
