@@ -893,6 +893,91 @@ impl CompanionApp {
                     );
                 });
         });
+        ui.add_space(23.0);
+        self.positions(ui);
+    }
+
+    /// Guided microphone positions around the main seat, for room correction.
+    fn positions(&mut self, ui: &mut egui::Ui) {
+        use companion_service::positions::{self, GUIDE};
+        section(ui, "04", "Other positions");
+        ui.add_space(10.0);
+        let Some(a) = &self.controller.state.alignment else {
+            ui.label(
+                RichText::new(format!(
+                    "After an alignment at the main seat, measure {} positions around it for room correction. Delays and levels keep using the main seat.",
+                    GUIDE.len()
+                ))
+                .small()
+                .color(MUTED),
+            );
+            return;
+        };
+        let running = match &self.controller.state.job {
+            Some(Job::Position { step, .. }) => Some(*step),
+            _ => None,
+        };
+        let next = positions::next_step(a);
+        for (index, step) in GUIDE.iter().enumerate() {
+            let (status, color) = match positions::captured(a, step) {
+                _ if running == Some(index) => ("measuring…".to_owned(), ACCENT),
+                Some(p) if p.complete(a) => ("measured".to_owned(), ACCENT),
+                Some(p) => (
+                    format!(
+                        "{} / {} speakers",
+                        p.takes.iter().filter(|t| t.accepted).count(),
+                        a.rows.len()
+                    ),
+                    WARM,
+                ),
+                None => ("not yet".to_owned(), MUTED),
+            };
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(format!("{}", index + 1))
+                        .small()
+                        .monospace()
+                        .color(if next == Some(index) { ACCENT } else { MUTED }),
+                );
+                ui.add(egui::Label::new(RichText::new(step.label).small()).truncate())
+                    .on_hover_text(step.instruction);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(RichText::new(status).small().color(color));
+                });
+            });
+        }
+        ui.add_space(6.0);
+        let ready = self.controller.position_readiness();
+        let step = next.unwrap_or(0);
+        if let Some(next) = next {
+            ui.label(RichText::new(GUIDE[next].instruction).strong());
+            ui.label(
+                RichText::new("Keep it at ear height and pointing as at the main seat.")
+                    .small()
+                    .color(MUTED),
+            );
+        } else {
+            ui.label(
+                RichText::new(
+                    "All positions are measured. Put the microphone back at the main seat before aligning again.",
+                )
+                .small()
+                .color(MUTED),
+            );
+        }
+        let label = if next.is_some() {
+            format!("Measure position {}", step + 1)
+        } else {
+            "Measure position 1 again".into()
+        };
+        if ui
+            .add_enabled(ready.is_ok(), egui::Button::new(label))
+            .on_hover_text("One take of every aligned speaker here, stored for room correction. Delays and levels do not change.")
+            .on_disabled_hover_text(ready.as_ref().err().map(String::as_str).unwrap_or(""))
+            .clicked()
+        {
+            self.controller.measure_position(step);
+        }
     }
 
     fn speakers(&mut self, ui: &mut egui::Ui) {
@@ -971,6 +1056,17 @@ impl CompanionApp {
                     output_ids,
                     current,
                 }) => format!("Speaker {} / {}{left}", current + 1, output_ids.len()),
+                Some(Job::Position {
+                    step,
+                    output_ids,
+                    current,
+                }) => format!(
+                    "Position {} / {} · Speaker {} / {}{left}",
+                    step + 1,
+                    companion_service::positions::GUIDE.len(),
+                    current + 1,
+                    output_ids.len()
+                ),
                 _ => self
                     .controller
                     .batch_outputs()

@@ -40,6 +40,8 @@ struct Rig {
     /// after them, once: a passing disturbance in the room.
     disturb: Mutex<std::collections::BTreeMap<String, f32>>,
     batches: Mutex<Vec<Vec<String>>>,
+    /// The microphone position of each batch.
+    position_ids: Mutex<Vec<String>>,
     /// Addresses the renderer was written to or played through.
     endpoints: Mutex<Vec<SocketAddr>>,
 }
@@ -84,6 +86,7 @@ impl Rig {
             loud: Mutex::new(Default::default()),
             disturb: Mutex::new(Default::default()),
             batches: Mutex::new(vec![]),
+            position_ids: Mutex::new(vec![]),
             endpoints: Mutex::new(vec![]),
         }
     }
@@ -149,6 +152,10 @@ impl Backend for Rig {
         assert_eq!(*self.snapshot.lock().unwrap(), args.snapshot);
         self.endpoints.lock().unwrap().push(args.endpoint);
         self.batches.lock().unwrap().push(outputs.clone());
+        self.position_ids
+            .lock()
+            .unwrap()
+            .push(args.position_id.clone());
         let pass = self.captures.fetch_add(1, Ordering::Relaxed);
         if self.silent_batch.load(Ordering::Relaxed) {
             return Ok(BatchOutcome {
@@ -2070,4 +2077,69 @@ fn the_level_probe_sets_each_group_near_minus_6_dbfs_at_the_microphone() {
         a.rows[1].exclusion()
     );
     assert_eq!(a.corrected_output_ids(), ["L", "R"]);
+}
+
+#[test]
+fn other_positions_are_measured_like_the_main_seat_and_kept_with_the_session() {
+    use companion_service::positions;
+    let root = tempfile::tempdir().unwrap();
+    let rig = Rig::new();
+    rig.snapshot.lock().unwrap().outputs[1].gain_db = -2.0;
+    let mut a = acquire_with(&rig, root.path(), alignment::Basis::FromZero);
+    let original = rig.snapshot.lock().unwrap().clone();
+    let rows = serde_json::to_value(&a.rows).unwrap();
+    let writes = rig.writes.load(Ordering::Relaxed);
+    assert_eq!(positions::next_step(&a), Some(0));
+    let takes =
+        positions::measure(&rig, &mut a, 0, &AtomicBool::new(false), &mut |_, _| {}).unwrap();
+    assert_eq!(takes.len(), 2);
+    // Measured at the new position, in the zeroed state of the passes, then put back.
+    assert_eq!(
+        rig.position_ids.lock().unwrap().last().map(String::as_str),
+        Some("main-seat/left-30cm")
+    );
+    assert_eq!(rig.writes.load(Ordering::Relaxed), writes + 2);
+    assert!(omniphony_adapter::same_installation(
+        &rig.snapshot.lock().unwrap(),
+        &original
+    ));
+    // Delays and levels still come from the main seat only.
+    assert_eq!(serde_json::to_value(&a.rows).unwrap(), rows);
+    let capture = &a.positions[0];
+    assert_eq!(capture.position_id, "main-seat/left-30cm");
+    assert_eq!(capture.instruction, positions::GUIDE[0].instruction);
+    assert!(capture.complete(&a) && capture.directory.starts_with(&a.directory));
+    assert_eq!(
+        capture
+            .takes
+            .iter()
+            .map(|t| t.output_id.as_str())
+            .collect::<Vec<_>>(),
+        ["L", "R"]
+    );
+    assert_eq!(positions::next_step(&a), Some(1));
+    // Measuring a position again replaces its capture; the next one is added in order.
+    positions::measure(&rig, &mut a, 1, &AtomicBool::new(false), &mut |_, _| {}).unwrap();
+    let first = a.positions[0].directory.clone();
+    positions::measure(&rig, &mut a, 0, &AtomicBool::new(false), &mut |_, _| {}).unwrap();
+    assert_eq!(
+        a.positions
+            .iter()
+            .map(|p| p.step.as_str())
+            .collect::<Vec<_>>(),
+        ["left-30cm", "right-30cm"]
+    );
+    assert_ne!(a.positions[0].directory, first);
+    assert!(first.is_dir(), "an earlier capture stays on disk");
+    // The session restores with its positions.
+    let loaded = alignment::load(&a.directory).unwrap();
+    assert_eq!(loaded.positions, a.positions);
+    assert_eq!(positions::next_step(&loaded), Some(2));
+    // Another renderer state is refused before anything plays.
+    rig.snapshot.lock().unwrap().outputs[0].gain_db = -3.0;
+    let batches = rig.batches.lock().unwrap().len();
+    let error =
+        positions::measure(&rig, &mut a, 2, &AtomicBool::new(false), &mut |_, _| {}).unwrap_err();
+    assert!(error.contains("settings changed"), "{error}");
+    assert_eq!(rig.batches.lock().unwrap().len(), batches);
 }

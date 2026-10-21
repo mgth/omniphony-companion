@@ -225,7 +225,8 @@ The following work is retained for after mission 1:
 2. Extend captures and impulse windows for bass decay, noise-aware decay fits and
    reflection timing diagnostics (without claiming arrival directions).
 3. Guide successive microphone positions, show individual responses and spatial
-   variation, and reserve independent validation positions.
+   variation, and reserve independent validation positions. Five guided positions
+   around the main seat are now captured and stored; display and validation remain.
 4. Fit bounded parametric EQ to a target, favoring cuts; preview and remeasure.
 5. Align speakers/subwoofers and optimize multiple subwoofers through gains,
    polarities and delays using their complex acoustic sum and shared timing.

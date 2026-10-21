@@ -206,6 +206,13 @@ pub enum Job {
         output_id: String,
         pass: usize,
     },
+    /// The current alignment's speakers measured once at guide step `step`
+    /// ([`crate::positions::GUIDE`]), in the alignment's row order.
+    Position {
+        step: usize,
+        output_ids: Vec<String>,
+        current: usize,
+    },
     ApplyAlignment,
     LoadAlignment,
     RestoreWorkspace,
@@ -322,6 +329,7 @@ enum Event {
         Result<(Snapshot, Vec<RecordedTake>), String>,
     ),
     AlignmentLoaded(Box<Result<LoadedAlignment, String>>),
+    PositionMeasured(Box<alignment::Alignment>, Result<(), String>),
     Reviewed(Box<Result<SavedReview, String>>),
     SavedTakeLoaded(PathBuf, Box<Result<TakeOutcome, String>>),
     OutputSwitched(Result<Snapshot, String>),
@@ -406,6 +414,7 @@ impl Controller {
                     | Job::Batch { .. }
                     | Job::Alignment { .. }
                     | Job::Remeasure { .. }
+                    | Job::Position { .. }
             )
         )
     }
@@ -1279,6 +1288,68 @@ impl Controller {
             let _ = sender.send(Event::Remeasured(Box::new(a), result));
         });
     }
+    /// Whether the current alignment's speakers can be measured at another microphone
+    /// position now; the error says why not.
+    pub fn position_readiness(&self) -> Result<(), String> {
+        if self.busy() {
+            return Err("Wait for the current operation to finish.".into());
+        }
+        let a = self
+            .state
+            .alignment
+            .as_ref()
+            .ok_or("Align levels and delays at the main seat first.")?;
+        let live = self
+            .state
+            .snapshot
+            .as_ref()
+            .ok_or("Connect to Omniphony first.")?;
+        if self.state.endpoint.is_none() {
+            return Err("Connect to Omniphony first.".into());
+        }
+        crate::positions::readiness(a, live)?;
+        if self.settings != a.settings {
+            return Err(
+                "Restore the measurement settings this alignment was captured with.".into(),
+            );
+        }
+        let first = a.rows.first().ok_or("The alignment has no speakers.")?;
+        self.can_measure(&first.output_id)
+    }
+    /// Measure the current alignment's speakers at guide step `step`.
+    pub fn measure_position(&mut self, step: usize) {
+        if let Err(error) = self.position_readiness() {
+            self.state.error = Some(error);
+            return;
+        }
+        let Some(mut a) = self.state.alignment.clone() else {
+            return;
+        };
+        a.endpoint = self.state.endpoint.expect("checked by position_readiness");
+        self.state.job = Some(Job::Position {
+            step,
+            output_ids: a.rows.iter().map(|r| r.output_id.clone()).collect(),
+            current: 0,
+        });
+        self.state.progress = Some(MeasureProgress::Preparing);
+        self.state.stopping = false;
+        self.state.error = None;
+        self.cancelled = Arc::new(AtomicBool::new(false));
+        let (backend, sender, cancel) = (
+            self.backend.clone(),
+            self.sender.clone(),
+            self.cancelled.clone(),
+        );
+        std::thread::spawn(move || {
+            let result = catch_job(|| {
+                crate::positions::measure(backend.as_ref(), &mut a, step, &cancel, &mut |i, p| {
+                    let _ = sender.send(Event::BatchProgress(i, p));
+                })
+                .map(|_| ())
+            });
+            let _ = sender.send(Event::PositionMeasured(Box::new(a), result));
+        });
+    }
     pub fn refresh_alignment_proposal(&mut self) {
         if self.busy() {
             return;
@@ -1393,6 +1464,11 @@ impl Controller {
                 output_ids,
                 current,
                 ..
+            })
+            | Some(Job::Position {
+                output_ids,
+                current,
+                ..
             }) => output_ids.get(*current).map(String::as_str),
             _ => None,
         }
@@ -1447,6 +1523,11 @@ impl Controller {
                 current,
                 pass,
             }) => (planned(output_ids, 2, false), *pass, *current),
+            Some(Job::Position {
+                output_ids,
+                current,
+                ..
+            }) => (planned(output_ids, 1, false), 0, *current),
             _ => return None,
         };
         Some(estimate.remaining(pass, target, self.state.progress.as_ref()))
@@ -1762,14 +1843,41 @@ impl Controller {
                     self.state.job = None;
                 }
                 Event::BatchProgress(index, progress) => {
-                    if let Some(Job::Batch {
-                        output_ids,
-                        current,
-                    }) = &mut self.state.job
+                    if let Some(
+                        Job::Batch {
+                            output_ids,
+                            current,
+                        }
+                        | Job::Position {
+                            output_ids,
+                            current,
+                            ..
+                        },
+                    ) = &mut self.state.job
                     {
                         *current = index.min(output_ids.len().saturating_sub(1));
                     }
                     self.state.progress = Some(progress);
+                }
+                Event::PositionMeasured(a, result) => {
+                    if let Err(e) = result {
+                        self.state.error = Some(e);
+                    }
+                    // Putting zeroed outputs back gives the renderer a newer revision.
+                    if let Some(live) = &a.restored_snapshot
+                        && self
+                            .state
+                            .alignment
+                            .as_ref()
+                            .is_none_or(|old| old.restored_snapshot.as_ref() != Some(live))
+                    {
+                        self.state.saved_snapshot = Some(live.clone());
+                        self.state.snapshot = Some(live.clone());
+                    }
+                    self.state.alignment = Some(*a);
+                    self.state.job = None;
+                    self.state.progress = None;
+                    self.state.stopping = false;
                 }
                 Event::Batched(settings, revision, result) => {
                     match result {

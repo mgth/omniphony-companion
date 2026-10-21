@@ -1,8 +1,8 @@
 # Room-correction measurements
 
 Measurements for a future room-correction design step: full-range sweeps at a level
-chosen from a probe, and takes that keep the response a correction filter can be
-designed from. Nothing here designs, sends or applies a
+chosen from a probe, takes that keep the response a correction filter can be designed
+from, and guided microphone positions around the main seat. Nothing here designs, sends or applies a
 filter, and nothing changes timing, levels, alignment proposals or a take's verdict.
 
 ## The stored response
@@ -127,6 +127,32 @@ copy as `microphone-calibration.txt`; `response.json` records its source name, i
 SHA-256, point count and range, so a design can tell calibrations apart. The
 recording, `response.wav`, timing, levels and `calibration_applied: false` in the
 capture report stay uncalibrated.
+
+## Other microphone positions
+
+Delays and levels are aligned for the main seat, the alignment's `position_id`. A
+correction filter is better designed from several nearby points, so the setup rail's
+**04 Other positions** guides five more, each from the main seat: 30 cm left, 30 cm
+right, 30 cm forward (toward the screen), 30 cm back, and 15 cm higher. It shows
+which are measured, the next instruction and **Measure position N**.
+
+Each position is one pass of every speaker of the alignment, with the sweep, level
+and reference its rows were measured with, in the renderer state of the alignment's
+own passes: its outputs at 0 dB and 0 ms when it measured from zero, put back
+afterwards. Positions are therefore directly comparable with the main seat. The
+alignment must be complete and Omniphony in its original settings (undo an applied
+correction first, apply it again afterwards). Takes use the position id
+`main-seat/left-30cm` and so on, keep their stored responses, and are saved in a
+`position-<step>-<stamp>` folder of the alignment.
+
+The alignment records each position in `positions` (step, position id, instruction,
+folder, and per speaker its take folder, verdict and whether a response was stored),
+saved with `alignment-state.json` and restored with it. Measuring a position again
+replaces its record; the earlier folder stays on disk. These takes never change the
+rows, the proposal, delays or levels, and they do not appear among the speaker cards'
+results.
+
+![Guided positions in the setup rail, synthetic preview data](images/room-positions-preview.png)
 
 ## Validation
 

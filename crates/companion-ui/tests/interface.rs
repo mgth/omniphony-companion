@@ -776,6 +776,7 @@ fn alignment_session_stays_above_individual_results_and_unqualified_actions_stay
         let (mut controller, starts) = support::ready();
         controller.state.alignment = Some(companion_service::alignment::Alignment {
             level_probe: None,
+            positions: vec![],
             schema_version: 1,
             directory: "preview-alignment".into(),
             endpoint: "127.0.0.1:9000".parse().unwrap(),
@@ -1348,6 +1349,7 @@ fn loaded_alignment_pass_opens_its_latest_analysis_and_labels_the_original_verdi
         .collect();
     let alignment = Alignment {
         level_probe: None,
+        positions: vec![],
         schema_version: 1,
         directory: dir.path().to_owned(),
         endpoint: "127.0.0.1:9000".parse().unwrap(),
@@ -2953,4 +2955,55 @@ fn the_setup_rail_says_whether_a_microphone_calibration_will_be_applied() {
     std::fs::write(dir.path().join("broken.txt"), "20 0\n10 1\n").unwrap();
     app.controller.settings.calibration_path = dir.path().join("broken.txt").display().to_string();
     assert!(shown(&mut app, "Calibration file unreadable"));
+}
+
+#[test]
+fn the_setup_rail_guides_the_other_microphone_positions() {
+    use companion_service::positions::{self, GUIDE, PositionCapture, PositionTake};
+    let ctx = egui::Context::default();
+    let (mut controller, starts) = support::ready();
+    let size = Vec2::new(1160.0, 1700.0);
+    let mut app = CompanionApp::preview(&ctx, support::ready().0);
+    frame(&mut app, &ctx, vec![], size);
+    let text = labels(&frame(&mut app, &ctx, vec![], size));
+    assert!(
+        text.iter()
+            .any(|(t, _)| t.starts_with("After an alignment at the main seat"))
+    );
+    let mut a = support::room_alignment(&controller);
+    a.positions.push(PositionCapture {
+        step: GUIDE[0].id.into(),
+        position_id: positions::position_id(&a.settings.position_id, &GUIDE[0]),
+        instruction: GUIDE[0].instruction.into(),
+        directory: "synthetic-position".into(),
+        takes: a
+            .rows
+            .iter()
+            .map(|r| PositionTake {
+                output_id: r.output_id.clone(),
+                take_folder: "synthetic-position/take".into(),
+                accepted: true,
+                rejection_reason: None,
+                response: true,
+            })
+            .collect(),
+        error: None,
+    });
+    controller.state.alignment = Some(a);
+    let mut app = CompanionApp::preview(&ctx, controller);
+    frame(&mut app, &ctx, vec![], size);
+    let text = labels(&frame(&mut app, &ctx, vec![], size));
+    for needle in [
+        "Other positions",
+        "30 cm left",
+        "measured",
+        "15 cm higher",
+        "not yet",
+    ] {
+        assert!(text.iter().any(|(t, _)| t == needle), "{needle}");
+    }
+    assert!(text.iter().any(|(t, _)| t == GUIDE[1].instruction));
+    assert!(text.iter().any(|(t, _)| t == "Measure position 2"));
+    assert!(central(&frame(&mut app, &ctx, vec![], size), "Front left").is_some());
+    assert_eq!(starts.load(Ordering::Relaxed), 0);
 }

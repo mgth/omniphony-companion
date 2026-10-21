@@ -3,12 +3,19 @@
 mod support;
 
 fn main() -> eframe::Result {
+    // `--size=1160x1500` opens a taller window, for screenshots of the whole rail.
+    let size = std::env::args()
+        .find_map(|a| {
+            let (w, h) = a.strip_prefix("--size=")?.split_once('x')?;
+            Some([w.parse().ok()?, h.parse().ok()?])
+        })
+        .unwrap_or([1160.0, 800.0]);
     eframe::run_native(
         "Omniphony Companion · UI preview · No audio",
         eframe::NativeOptions {
             persist_window: false,
             viewport: eframe::egui::ViewportBuilder::default()
-                .with_inner_size([1160.0, 800.0])
+                .with_inner_size(size)
                 .with_min_inner_size([850.0, 640.0]),
             ..Default::default()
         },
@@ -29,6 +36,44 @@ fn main() -> eframe::Result {
             }
             if std::env::args().any(|a| a == "--alignment") {
                 controller.state.alignment = Some(support::room_alignment(&controller));
+            }
+            if std::env::args().any(|a| a == "--positions") {
+                // Two guided positions measured around the main seat, one of them partly.
+                let mut a = support::room_alignment(&controller);
+                for (index, measured) in [(0, a.rows.len()), (1, a.rows.len() - 1)] {
+                    let step = companion_service::positions::GUIDE[index];
+                    a.positions
+                        .push(companion_service::positions::PositionCapture {
+                            step: step.id.into(),
+                            position_id: companion_service::positions::position_id(
+                                &a.settings.position_id,
+                                &step,
+                            ),
+                            instruction: step.instruction.into(),
+                            directory: format!("synthetic-position-{}", step.id).into(),
+                            takes: a
+                                .rows
+                                .iter()
+                                .enumerate()
+                                .map(|(i, r)| companion_service::positions::PositionTake {
+                                    output_id: r.output_id.clone(),
+                                    take_folder: format!("synthetic-position-{}/{i}", step.id)
+                                        .into(),
+                                    accepted: i < measured,
+                                    rejection_reason: (i >= measured)
+                                        .then(|| "clipped recording".into()),
+                                    response: true,
+                                })
+                                .collect(),
+                            error: None,
+                        });
+                }
+                controller.state.alignment = Some(a);
+            }
+            for arg in std::env::args() {
+                if let Some(path) = arg.strip_prefix("--calibration=") {
+                    controller.settings.calibration_path = path.into();
+                }
             }
             if std::env::args().any(|a| a == "--bench") {
                 controller.state.alignment = Some(support::bench_alignment(&mut controller));
