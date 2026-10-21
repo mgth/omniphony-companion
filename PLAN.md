@@ -242,7 +242,12 @@ sweep response, not independent acquisitions.
 ## Later missions
 
 - **Bass and subwoofers**: bass response, crossovers, source cooperation and
-  seat-to-seat consistency within each speaker's capabilities.
+  seat-to-seat consistency within each speaker's capabilities. A first increment
+  integrates one subwoofer with the speakers it serves: their parts measured through
+  bass management at several positions, one delay, polarity and level for the
+  subwoofer from the sums around each crossover, a cut-only mode correction, applied
+  live and confirmed by a new measurement (`docs/bass-integration.md`). Several
+  subwoofers, mixed-phase correction and validation on real hardware remain.
 - **Reflections and temporal behavior**: identify reproducible, correctable
   phenomena, then evaluate corrections across the listening area and by listening.
 - **Overall refinement**: target curves, preferences, listening-area compromises,

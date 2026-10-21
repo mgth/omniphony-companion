@@ -56,6 +56,14 @@ The Rust/egui desktop window lets you:
   files for Studio's speaker editor, with the predicted response, how the positions
   agree and the strong early reflections. Not yet sent to Omniphony nor verified by a
   new measurement. See `docs/room-correction-design.md`.
+- Integrate the subwoofer with the speakers (**Subwoofer** in the setup rail, or
+  `bass-integration` on the command line): each speaker with a low limit plays
+  Omniphony's bass-managed sweep with the subwoofer silenced, the speakers silenced and
+  both, at the main seat and the guided positions; the proposal is one subwoofer delay,
+  polarity and level that make the sums add up around each crossover, plus a cut-only
+  mode correction. Apply sends them live over measurement protocol 8 (the polarity in
+  the subwoofer's filter), Undo puts the subwoofer back, Confirm measures the sums
+  again. Tested on simulated rooms only. See `docs/bass-integration.md`.
 - Restore input/channel/rate, renderer address, reference, microphone/position,
   sweep settings, recording/calibration paths and speaker checkboxes on startup.
 - On a first run, the setup rail is already filled in: the first microphone input
@@ -347,7 +355,8 @@ undo. A renderer whose settings differ from both cannot apply or undo it, and a 
 alignment can start. An uncertain application must be inspected before further
 changes.
 
-No subwoofer alignment, EQ or independent-driver correction is enabled. A repeatable
+The alignment itself does not time or level a subwoofer: that is the separate
+subwoofer step above. No EQ or independent-driver correction is applied by it. A repeatable
 reflection can still resemble a direct arrival; the user must keep an unobstructed
 measurement geometry. See [the method and validation](docs/gain-delay-alignment.md).
 
@@ -388,10 +397,11 @@ again. Local sessions are ignored by Git.
 ## Renderer measurement control
 
 Requires an Omniphony build with OSC contract revision 9 and measurement protocol
-version 4 or 5 from the calibration development branch. The Companion speaks
-version 5, whose discovery adds each output's layout position for the room map;
-when an older renderer refuses it, discovery continues in version 4 without
-positions. Saved version-2 and version-3 takes remain reviewable.
+version 4 or later. The Companion speaks version 8: discovery adds each output's
+layout position for the room map (version 5) and its room correction filter, and the
+subwoofer step needs version 8's bass-managed sweeps, filter bypass and filter upload.
+When an older renderer refuses it, discovery continues in the version it names, and
+what needs a newer one says so. Saved version-2 and version-3 takes remain reviewable.
 The adapter uses its existing local TCP listener, normally port 9000.
 It shares the typed protocol through a pinned revision of Omniphony's
 `omniphony-osc-contract` crate; no local sibling checkout is needed to build.
