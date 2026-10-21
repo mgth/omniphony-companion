@@ -165,22 +165,48 @@ remains an explicit Studio action.
 The room map is a painter-only view in `companion-ui/src/room_map.rs`. It reads the
 optional `azimuth_deg`, `elevation_deg` and `distance_m` of each discovered output
 (measurement protocol 5): Omniphony's declared layout geometry, room-warped and at
-the layout's scale, never measured evidence. The adapter validates their ranges with
-the rest of the snapshot and falls back to protocol 4 when an older renderer refuses
-5; outputs without an azimuth go to a "Not placed" strip, and no map is drawn when no
-output is placed. A missing distance puts the chip on a dashed ring at the median known
-distance (three quarters of the radius when none is known).
+the layout's scale (a normalised cube, not metres), never measured evidence. The
+adapter validates their ranges with the rest of the snapshot and falls back to
+protocol 4 when an older renderer refuses 5; outputs without an azimuth, and those
+within 10° of straight above or below (LFE), go to an "Off plan" strip, and no map is
+drawn when no output is placed. A missing distance puts the chip on a dashed ring at
+the median known distance (three quarters of the radius when none is known).
 
-Chip placement is a pure function of positions, names and the map size: the listener
-sits in the centre, front up, the radius follows the 3D distance (kept clear of the
-listener) and a deterministic minimal-translation pass separates overlapping chips,
-such as a height speaker sharing its bed speaker's azimuth. Chips reuse the card's
-quality dot, selection colours and click-to-select. Capture state only changes how a
-chip is painted: the speaker playing pulses (the existing busy repaint cadence drives
-it). Set-aside and excluded speakers are dimmed. Set aside means unchecked, muted,
-outside the sweep band, or set aside by the alignment policy (a far arrival not
-included anyway); global setup problems such as a missing microphone do not dim
-speakers.
+Radii are horizontal: a distance `d` at elevation `el` is drawn at `d·cos(el)`. They
+are the layout's until an alignment measured the speaker. Then
+`companion_service::room::Distances` derives, for every qualified row, the acoustic
+distance relative to the timing reference,
+`Δd = c·[(arrival − delay) − (arrival_ref − delay_ref)]` with `c = 0.343 m/ms`, where
+`delay` is the output's delay in the state the passes measured under
+(`Alignment::measured_state`: zero for an alignment from zero; arrivals include it; a
+row whose delay differs in any recorded retake state is left out). A row whose
+delay-free arrival is more than 20 ms from the group's median is another output
+device: it is drawn on the rim, distance unknown. The distances are anchored on the
+reference by the least-squares fit to the layout's distances (the mean of
+`layout − Δd`), or on a reference distance the user enters from the map's corner;
+either is raised so no speaker comes closer than 0.1 m. The entered distance is a
+display preference (`ViewPreferences::room_reference_m`), kept at once and never sent
+to the renderer. Rings are labelled in metres only once a radius is measured, and a
+hollow ring marks the layout's distance when it differs from the measured one by
+more than 0.3 m. While a new alignment captures, the last measured distances stay,
+so the chips do not fall back to the layout and jump out again.
+
+Chip placement is a pure function of positions, measured distances, names and the
+map size. Each speaker's true spot is marked (a dot at ear level, a triangle on the
+height layer); outputs with the same layout position at the same spot share one chip
+("BL·SR"). A greedy anchored pass places ear-level chips first, then heights: each
+takes its own spot when free, else the nearest free place on rings of 16 directions
+starting outward from the listener, never over another chip or the listener and, on
+a first pass, not over another spot of its layer or of the ear level; a chip moved
+off its spot keeps a leader line to it. A map too small for its chips falls back to
+the nearest free place anywhere, then to a minimal-translation pass. Chips reuse the
+card's quality dot, selection colours and click-to-select. Capture state only
+changes how a chip is painted: the speaker playing pulses (the existing busy repaint
+cadence drives it). Set-aside and excluded speakers are dimmed. Set aside means
+unchecked, muted, outside the sweep band, or set aside by the alignment policy (a far
+arrival not included anyway); global setup problems such as a missing microphone do
+not dim speakers. The legend and the strip depend on reported positions only, so the
+card's height never follows a measurement.
 
 The map card takes a right-hand column beside the speaker cards; the chart joins the
 left column only when it keeps at least 700 points, so its far-arrival bracket stays

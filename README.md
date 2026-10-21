@@ -106,14 +106,28 @@ The Rust/egui desktop window lets you:
   previous takes.
 - See where each speaker is on the **room map**, a top view beside the cards (below
   them in a narrow window): the listener in the centre, front up, each
-  speaker as a chip placed by its layout azimuth and distance, with the card's
-  quality dot and a small triangle for speakers above or below ear level. The speaker
-  being measured pulses; unchecked, muted, out-of-band, set-aside (late) and
-  excluded speakers are dimmed; and the timing reference is labelled REF. Clicking a chip selects that
-  speaker like its card. Positions come from Omniphony's speaker layout (measurement
-  protocol 5); they are display only, never measured evidence. A speaker whose
-  distance the layout does not state sits on a dashed ring at the typical distance;
-  an older renderer without positions shows no map.
+  speaker as a chip at its layout azimuth, with the card's quality dot. A small mark
+  shows each speaker's true spot (a dot at ear level, a triangle on the height
+  layer); a chip moved off it to stay readable keeps a leader line to it, ear-level
+  chips keep their spot first, and speakers sharing one layout position share one
+  chip ("BL·SR"). Distances are seen from above (projected on the floor), so a height
+  speaker stands over its bed speaker instead of being pushed outward; speakers
+  straight above or below the listener (LFE) wait in an "Off plan" strip. Until an
+  alignment has run, distances are Omniphony's layout geometry (measurement protocol
+  5), normalised and unlabelled. Afterwards each repeatable speaker is drawn at its
+  **measured acoustic distance**: its arrival minus its own output delay, at 343 m/s,
+  relative to the timing reference, so it includes each output's electronic latency.
+  The distances are fitted to the layout's by least squares, or anchored on a
+  reference distance entered from the map's corner (a display preference, kept at
+  once and never sent to Omniphony); rings are then labelled in metres, and a hollow
+  ring marks the layout's distance when it differs by more than 0.3 m. A speaker far
+  from the others in time (another output device) sits on the rim, distance unknown.
+  The speaker being measured pulses; unchecked, muted, out-of-band, set-aside (late)
+  and excluded speakers are dimmed; and the timing reference is labelled REF.
+  Clicking a chip selects that speaker like its card (a shared chip selects its
+  speakers in turn). A speaker whose distance the layout does not state sits on a
+  dashed ring at the typical distance; an older renderer without positions shows no
+  map.
 - Use one action bar: **Apply to Omniphony**, an **Original / Corrected** switch for
   listening (restore or apply, available only with a proposal and an unchanged
   renderer revision), **Confirm by re-measuring** and **Undo**. One status line says
@@ -221,7 +235,12 @@ recordings. `--alignment` shows the chart with an invented five-speaker alignmen
 (three repeatable speakers, one silent, one noisy at a long delay); `--late-device`
 shows a repeatable speaker 60 ms late, set aside, with its include link; `--lab` starts
 with Lab on. The synthetic room places its 5.1 speakers on the map, with surrounds
-above the ear and a floor subwoofer whose distance is not stated.
+above the ear and a floor subwoofer whose distance is not stated. `--bench` replaces
+it with a crowded 14-output bench taken from one real session: stacked heights, two
+outputs sharing a position, an LFE straight below and two height speakers on another
+device, measured after a first alignment:
+
+![Room map of the 14-output bench with measured distances](docs/images/companion-room-map-bench.png)
 
 ![Alignment chart, speaker cards and action bar with synthetic preview data](docs/images/companion-alignment.png)
 

@@ -686,3 +686,246 @@ pub fn late_device_alignment(
         zeroed_snapshot: None,
     }
 }
+
+/// A 14-output bench like the user's on 2026-10-20: Omniphony's normalised layout,
+/// where FL and TFL share an azimuth, BL and SR share a position, LFE sits straight
+/// below and two height speakers play through another output device, 143 ms late.
+/// Seven speakers were measured after a first alignment, so arrivals include the
+/// applied delays. Replaces the controller's renderer; values come from one real
+/// session, but no capture happens here.
+pub fn bench_alignment(controller: &mut Controller) -> companion_service::alignment::Alignment {
+    use calibration_core::repeatability::{QualifiedEstimate, RepeatEstimate};
+    use companion_service::alignment::{Alignment, PassReport, Row};
+    // id, azimuth, elevation, layout distance, delay, gain, low, high, measured arrival.
+    type Out = (
+        &'static str,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        Option<f32>,
+        Option<f32>,
+        Option<f64>,
+    );
+    let layout: [Out; 14] = [
+        (
+            "FL",
+            -26.565,
+            0.0,
+            2.236,
+            1.469,
+            -11.7,
+            Some(40.0),
+            None,
+            Some(0.017),
+        ),
+        (
+            "FR",
+            26.565,
+            0.0,
+            2.236,
+            0.174,
+            -11.9,
+            Some(40.0),
+            None,
+            Some(0.012),
+        ),
+        (
+            "C",
+            0.0,
+            0.0,
+            2.0,
+            0.216,
+            -11.6,
+            Some(40.0),
+            None,
+            Some(0.043),
+        ),
+        (
+            "BC",
+            180.0,
+            -4.229,
+            1.003,
+            7.67,
+            -11.4,
+            Some(80.0),
+            None,
+            Some(0.040),
+        ),
+        (
+            "BR",
+            -135.0,
+            0.0,
+            1.414,
+            6.971,
+            -11.5,
+            Some(40.0),
+            None,
+            Some(0.048),
+        ),
+        ("BL", 135.0, 0.0, 1.414, 0.0, 0.0, Some(40.0), None, None),
+        (
+            "TBL",
+            -135.0,
+            35.264,
+            1.732,
+            5.958,
+            -12.1,
+            Some(110.0),
+            None,
+            Some(0.038),
+        ),
+        (
+            "TBR",
+            135.0,
+            35.264,
+            1.732,
+            5.541,
+            -11.5,
+            Some(110.0),
+            None,
+            Some(0.028),
+        ),
+        (
+            "TFL",
+            -26.565,
+            24.095,
+            2.449,
+            0.0,
+            0.0,
+            Some(110.0),
+            None,
+            None,
+        ),
+        (
+            "TFR",
+            26.565,
+            24.095,
+            2.449,
+            0.0,
+            0.0,
+            Some(110.0),
+            None,
+            None,
+        ),
+        ("SR", 135.0, 0.0, 1.414, 0.0, 0.0, Some(80.0), None, None),
+        ("LFE", 0.0, -90.0, 0.5, 0.0, 0.0, None, Some(80.0), None),
+        (
+            "spk-12",
+            -90.0,
+            64.179,
+            1.111,
+            0.0,
+            0.0,
+            Some(110.0),
+            None,
+            Some(143.391),
+        ),
+        (
+            "spk-13",
+            90.0,
+            61.26,
+            1.140,
+            0.0,
+            0.0,
+            Some(110.0),
+            None,
+            Some(143.322),
+        ),
+    ];
+    let snapshot = controller.state.snapshot.as_mut().unwrap();
+    snapshot.outputs = layout
+        .iter()
+        .enumerate()
+        .map(
+            |(index, &(id, az, el, d, delay, gain, low, high, _))| Output {
+                id: id.into(),
+                name: id.into(),
+                index: index as u32,
+                gain_db: gain,
+                delay_ms: delay,
+                muted: false,
+                freq_low_hz: low,
+                freq_high_hz: high,
+                azimuth_deg: Some(az),
+                elevation_deg: Some(el),
+                distance_m: Some(d),
+            },
+        )
+        .collect();
+    let snapshot = snapshot.clone();
+    controller.settings.reference_output = Some("FL".into());
+    controller.excluded_outputs = layout
+        .iter()
+        .filter(|o| o.8.is_none())
+        .map(|o| o.0.to_owned())
+        .collect();
+    let rows = layout
+        .iter()
+        .filter_map(|&(id, .., arrival)| {
+            let arrival = arrival?;
+            let repeats = [0.0, 0.004]
+                .iter()
+                .map(|offset| RepeatEstimate {
+                    arrival_ms: Some(arrival + offset),
+                    level_db: Some(-14.0 + offset),
+                    minimum_snr_db: Some(34.0),
+                    reference_level_db: Some(0.0),
+                    reasons: vec![],
+                    codes: vec![],
+                    output_gain_offset_db: 0.0,
+                    minimum_snr_interval: None,
+                })
+                .collect();
+            Some(Row {
+                output_id: id.into(),
+                take_folders: vec![
+                    format!("synthetic-bench-pass-1-{id}").into(),
+                    format!("synthetic-bench-pass-2-{id}").into(),
+                ],
+                repeats,
+                quality: vec![],
+                qualified: Some(QualifiedEstimate {
+                    arrival_ms: arrival,
+                    level_db: -14.0,
+                    minimum_snr_db: 34.0,
+                    arrival_repeat_spread_ms: 0.004,
+                    level_repeat_spread_db: 0.004,
+                }),
+                reason: None,
+                reason_code: None,
+                // The user chose to align to the late device.
+                include_anyway: id.starts_with("spk"),
+            })
+        })
+        .collect();
+    Alignment {
+        schema_version: 1,
+        directory: "synthetic-bench-alignment".into(),
+        endpoint: "127.0.0.1:9000".parse().unwrap(),
+        settings: controller.settings.clone(),
+        snapshot,
+        rows,
+        pass_reports: Some(vec![
+            PassReport {
+                analyzed_speakers: 9,
+                error: None
+            };
+            2
+        ]),
+        verification_pass_reports: None,
+        blockers: vec![],
+        blocker_codes: vec![],
+        session: None,
+        profile: None,
+        applied_snapshot: None,
+        restored_snapshot: None,
+        verification: None,
+        verification_note: None,
+        application_uncertain: false,
+        physical_levels_changed: false,
+        retake_snapshots: vec![],
+        zeroed_snapshot: None,
+    }
+}

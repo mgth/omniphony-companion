@@ -77,6 +77,11 @@ pub struct CompanionApp {
     /// The setup rail shows chosen values; these open their editors.
     edit_microphone: bool,
     edit_reference: bool,
+    /// The room map's measured distances, kept while a new alignment captures.
+    room_distances: Option<companion_service::room::Distances>,
+    /// The timing reference's distance the user entered on the room map; `None` fits
+    /// the measured distances to the layout. Display only, kept as a view preference.
+    room_reference_m: Option<f32>,
 }
 
 impl CompanionApp {
@@ -118,6 +123,10 @@ impl CompanionApp {
         } else {
             -30.0
         };
+        app.room_reference_m = prefs
+            .view
+            .room_reference_m
+            .filter(|m| m.is_finite() && (0.1..=30.0).contains(m));
         app.preferences = Some(store);
         let index = if reconnect {
             prefs.workspace
@@ -168,6 +177,8 @@ impl CompanionApp {
             stage_height: 0.0,
             edit_microphone: false,
             edit_reference: false,
+            room_distances: None,
+            room_reference_m: None,
         }
     }
 
@@ -461,6 +472,7 @@ impl CompanionApp {
                     burst_overview: self.waveform_view.overview,
                     burst_overlay: self.waveform_view.overlay,
                     manual_noise_dbfs: self.manual_noise_dbfs,
+                    room_reference_m: self.room_reference_m,
                 });
             }
         }
@@ -1058,9 +1070,17 @@ impl CompanionApp {
         let chart = summary.is_some()
             || matches!(self.controller.state.job, Some(Job::Alignment { .. }))
                 && self.stage_height > 0.0;
+        // Measured distances stay on the map while a new alignment captures, so the
+        // chips do not fall back to the layout and jump out again at the end.
+        if let Some(alignment) = &self.controller.state.alignment {
+            self.room_distances = companion_service::room::Distances::from_alignment(alignment);
+        } else if !matches!(self.controller.state.job, Some(Job::Alignment { .. })) {
+            self.room_distances = None;
+        }
+        let scale = outputs.as_deref().and_then(|o| self.map_scale(o));
         let chips = outputs
             .as_deref()
-            .map(|o| self.map_chips(o, summary.as_ref()))
+            .map(|o| self.map_chips(o, summary.as_ref(), scale.as_ref()))
             .unwrap_or_default();
         // The speaker cards come first, so they never move for the chart below them. The
         // room map takes a column on the right beside the cards; a window too narrow for
@@ -1080,7 +1100,7 @@ impl CompanionApp {
                 .map(|o| summary.speaker(&o.id).map(alignment_view::card))
                 .collect();
         }
-        let mut map_click = None;
+        let mut map_response = room_map::MapResponse::default();
         let reserved = self.stage_height;
         let top = ui.cursor().min;
         let column_width = width - map_width.map_or(0.0, |map| map + CARD_GAP);
@@ -1201,7 +1221,7 @@ impl CompanionApp {
             ui.add_space(6.0);
             card().show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                map_click = room_map::wide(ui, &chips, side);
+                map_response = room_map::wide(ui, &chips, side, scale.as_ref().map(|s| &s.1));
             });
         }
         let mut used = left.min_rect();
@@ -1215,7 +1235,7 @@ impl CompanionApp {
                     .layout(egui::Layout::top_down(egui::Align::Min)),
             );
             card().show(&mut right, |ui| {
-                map_click = room_map::compact(ui, &chips, side);
+                map_response = room_map::compact(ui, &chips, side, scale.as_ref().map(|s| &s.1));
             });
             used = used.union(right.min_rect());
         }
@@ -1280,7 +1300,10 @@ impl CompanionApp {
                 });
             }
         }
-        if let Some(id) = stage.select.or(map_click) {
+        if let Some(reference_m) = map_response.reference_m {
+            self.room_reference_m = reference_m;
+        }
+        if let Some(id) = stage.select.or(map_response.clicked) {
             self.select_speaker(&id);
         }
         if let Some(id) = stage.match_knobs {
@@ -1368,6 +1391,40 @@ impl CompanionApp {
         }
     }
 
+    /// The anchor of the measured distances and its control: the reference distance
+    /// the user entered, else the fit to the layout's distances.
+    fn map_scale(
+        &self,
+        outputs: &[omniphony_adapter::protocol::Output],
+    ) -> Option<(f64, room_map::Scale)> {
+        let distances = self.room_distances.as_ref()?;
+        let layout_m = |id: &str| {
+            outputs
+                .iter()
+                .find(|o| o.id == id)?
+                .distance_m
+                .filter(|d| d.is_finite() && *d > 0.0)
+                .map(f64::from)
+        };
+        let entered = self.room_reference_m.map(f64::from);
+        let anchor = distances.anchor(layout_m, entered)?;
+        let editable = distances.reference_in_group();
+        let reference = outputs
+            .iter()
+            .find(|o| o.id == distances.reference_id)
+            .map_or(distances.reference_id.as_str(), |o| o.name.as_str());
+        Some((
+            anchor,
+            room_map::Scale {
+                reference: room_map::short_name(reference),
+                anchor_m: anchor as f32,
+                min_m: distances.min_reference_m() as f32,
+                entered: editable && entered.is_some(),
+                editable,
+            },
+        ))
+    }
+
     /// The room map's view of each output: its layout position, the card's quality
     /// grade, selection and role. Set aside means unchecked, muted or outside the sweep
     /// band: speaker-specific facts, so an unfinished setup does not dim every speaker.
@@ -1375,8 +1432,18 @@ impl CompanionApp {
         &self,
         outputs: &'a [omniphony_adapter::protocol::Output],
         summary: Option<&alignment_view::Summary>,
+        scale: Option<&(f64, room_map::Scale)>,
     ) -> Vec<room_map::Chip<'a>> {
         let sweep = self.controller.settings.sweep;
+        let measured = |id: &str| {
+            let (anchor, _) = scale?;
+            let distances = self.room_distances.as_ref()?;
+            let (_, d) = distances.absolute(*anchor).find(|(o, _)| *o == id)?;
+            Some(match d {
+                Some(d) => room_map::Measured::Distance(d as f32),
+                None => room_map::Measured::OtherDevice,
+            })
+        };
         outputs
             .iter()
             .map(|o| {
@@ -1402,6 +1469,7 @@ impl CompanionApp {
                     id: &o.id,
                     name: &o.name,
                     position: room_map::Position::from_output(o),
+                    measured: measured(&o.id),
                     grade: speaker.and_then(|sp| sp.grade).or_else(|| {
                         self.controller
                             .display_take(&o.id)
