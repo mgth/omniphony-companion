@@ -17,7 +17,10 @@ use rustfft::{FftPlanner, num_complex::Complex};
 use std::{
     collections::BTreeMap,
     net::SocketAddr,
-    sync::{Mutex, atomic::AtomicBool},
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 const RATE: f64 = 48000.0;
@@ -105,6 +108,10 @@ struct Rig {
     /// The subwoofer's acoustic level and polarity (wiring, amplifier).
     sub_gain: f64,
     writes: Mutex<usize>,
+    /// The next write that silences an output goes through but its reply is lost.
+    lose_silencing_ack: AtomicBool,
+    /// Captures fail, as when the microphone input disappears.
+    fail_captures: AtomicBool,
     batches: Mutex<Vec<Batch>>,
 }
 
@@ -172,6 +179,8 @@ impl Rig {
             }),
             sub_gain: -2.0,
             writes: Mutex::new(0),
+            lose_silencing_ack: AtomicBool::new(false),
+            fail_captures: AtomicBool::new(false),
             batches: Mutex::new(vec![]),
         }
     }
@@ -255,6 +264,7 @@ impl Backend for Rig {
         if *state != expected {
             return Err("stale".into());
         }
+        let silencing = settings.iter().any(|s| s.gain_db == -60.0);
         for setting in settings {
             let o = state
                 .outputs
@@ -267,6 +277,9 @@ impl Backend for Rig {
             o.delay_ms = setting.delay_ms;
         }
         self.bump(&mut state);
+        if silencing && self.lose_silencing_ack.swap(false, Ordering::Relaxed) {
+            return Err("lost acknowledgement".into());
+        }
         Ok(state.clone())
     }
     fn set_output_filters(
@@ -314,6 +327,9 @@ impl Backend for Rig {
         _: &AtomicBool,
         progress: &mut dyn FnMut(usize, MeasureProgress),
     ) -> Result<BatchOutcome, String> {
+        if self.fail_captures.load(Ordering::Relaxed) {
+            return Err("input stream did not start cleanly".into());
+        }
         let state = self.snapshot.lock().unwrap().clone();
         assert_eq!(state, args.snapshot);
         self.batches.lock().unwrap().push((
@@ -686,4 +702,59 @@ fn speakers_split_below_every_other_speaker_are_framed_by_the_subwoofer() {
         assert!(check.deviation_db < 1.0, "{check:?}");
     }
     bass::apply(&rig, &mut a, true).unwrap();
+}
+
+#[test]
+fn a_silencing_write_whose_reply_was_lost_is_put_back_from_what_the_renderer_reads() {
+    let root = tempfile::tempdir().unwrap();
+    let rig = Rig::new();
+    let mut a = alignment_for(&rig, root.path());
+    let original = rig.discover(a.endpoint).unwrap();
+    rig.lose_silencing_ack.store(true, Ordering::Relaxed);
+    let error =
+        bass::measure(&rig, &mut a, None, &AtomicBool::new(false), &mut |_, _| {}).unwrap_err();
+    assert!(error.contains("lost acknowledgement"), "{error}");
+    let live = rig.discover(a.endpoint).unwrap();
+    assert!(omniphony_adapter::same_installation(&live, &original));
+    assert!(!a.application_uncertain);
+}
+
+#[test]
+fn a_moved_speaker_makes_the_subwoofer_measurement_stale() {
+    let root = tempfile::tempdir().unwrap();
+    let rig = Rig::new();
+    let mut a = alignment_for(&rig, root.path());
+    bass::measure(&rig, &mut a, None, &AtomicBool::new(false), &mut |_, _| {}).unwrap();
+    let live = rig.discover(a.endpoint).unwrap();
+    assert!(bass::apply_readiness(&a, &live, false).is_ok());
+    let mut moved = live.clone();
+    moved.outputs[1].azimuth_deg = Some(150.0);
+    let b = a.bass.as_ref().unwrap();
+    assert_eq!(b.live_state(&moved), LiveState::Other);
+    assert!(bass::apply_readiness(&a, &moved, false).is_err());
+    assert!(bass::readiness(&a, &moved, Some(0)).is_err());
+}
+
+#[test]
+fn a_confirmation_that_fails_leaves_no_earlier_result_current() {
+    let root = tempfile::tempdir().unwrap();
+    let rig = Rig::new();
+    let mut a = alignment_for(&rig, root.path());
+    let cancel = AtomicBool::new(false);
+    bass::measure(&rig, &mut a, None, &cancel, &mut |_, _| {}).unwrap();
+    bass::apply(&rig, &mut a, false).unwrap();
+    bass::verify(&rig, &mut a, &cancel, &mut |_, _| {}).unwrap();
+    assert!(a.bass.as_ref().unwrap().verification.is_some());
+    rig.fail_captures.store(true, Ordering::Relaxed);
+    assert!(bass::verify(&rig, &mut a, &cancel, &mut |_, _| {}).is_err());
+    let b = a.bass.as_ref().unwrap();
+    assert!(b.verification.is_none());
+    assert!(
+        b.verification_note
+            .as_deref()
+            .unwrap()
+            .starts_with("Not confirmed")
+    );
+    let reloaded = alignment::load(&a.directory).unwrap();
+    assert!(reloaded.bass.unwrap().verification.is_none());
 }

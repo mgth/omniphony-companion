@@ -262,6 +262,11 @@ impl BassIntegration {
     }
     /// Where the renderer stands: as measured, with the proposal, or neither.
     pub fn live_state(&self, live: &Snapshot) -> LiveState {
+        // Bass-managed sweeps pan by the layout's positions: a moved speaker changes the
+        // parts that were measured.
+        if !same_layout(live, &self.snapshot) {
+            return LiveState::Other;
+        }
         let original = alignment::same_live_settings(live, &self.snapshot)
             && self.subwoofer_hash(live) == self.subwoofer_hash(&self.snapshot);
         let applied = self.target().is_some_and(|target| {
@@ -284,6 +289,23 @@ impl BassIntegration {
     pub fn is_applied(&self) -> bool {
         self.applied.is_some()
     }
+}
+
+/// Whether two snapshots place every output where the other does, as the panning of a
+/// bass-managed sweep sees it (positions within a thousandth of a degree or metre).
+fn same_layout(a: &Snapshot, b: &Snapshot) -> bool {
+    let close = |x: Option<f32>, y: Option<f32>| match (x, y) {
+        (Some(x), Some(y)) => (x - y).abs() <= 1e-3,
+        (None, None) => true,
+        _ => false,
+    };
+    a.outputs.len() == b.outputs.len()
+        && a.outputs.iter().zip(&b.outputs).all(|(x, y)| {
+            x.id == y.id
+                && close(x.azimuth_deg, y.azimuth_deg)
+                && close(x.elevation_deg, y.elevation_deg)
+                && close(x.distance_m, y.distance_m)
+        })
 }
 
 /// The renderer's subwoofer: the one unmuted output whose range stops below 5 kHz.
@@ -747,13 +769,13 @@ pub fn measure<B: Backend + ?Sized>(
             }
         }
     }
-    // Stopped or failed, the outputs go back to their settings all the same.
-    if let Err(e) = alignment::move_outputs(backend, a.endpoint, &current, &bass.snapshot)
-        && !settle(backend, a, &bass.snapshot)
-    {
-        return Err(format!(
-            "The outputs silenced for the subwoofer measurement could not be put back ({e}): check their gains in Studio, then refresh."
-        ));
+    // Stopped or failed, the outputs go back to their settings all the same, from what
+    // the renderer reads back: a write whose reply was lost may have gone through.
+    if !settle(backend, a, &bass.snapshot) {
+        return Err(
+            "The outputs silenced for the subwoofer measurement could not be put back: check their gains in Studio, then refresh."
+                .into(),
+        );
     }
     let capture = Capture {
         step: step.map(|s| GUIDE[s].id.to_owned()),
@@ -1325,6 +1347,12 @@ pub fn verify<B: Backend + ?Sized>(
 ) -> Result<(), String> {
     let live = backend.discover(a.endpoint)?;
     verify_readiness(a, &live)?;
+    // An earlier confirmation is no longer the current one, whatever happens next.
+    if let Some(b) = &mut a.bass {
+        b.verification = None;
+        b.verification_note = Some("Not confirmed: the last confirmation did not complete.".into());
+    }
+    alignment::save(a)?;
     let mut bass = a.bass.clone().ok_or("no subwoofer measurement")?;
     let directory = a
         .directory

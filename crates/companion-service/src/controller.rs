@@ -1558,7 +1558,11 @@ impl Controller {
             .as_ref()
             .map(|b| b.plan.speakers())
             .unwrap_or_default();
-        if let Some(b) = self.state.alignment.as_mut().and_then(|a| a.bass.as_mut()) {
+        for b in [self.state.alignment.as_mut(), Some(&mut a)]
+            .into_iter()
+            .flatten()
+            .filter_map(|a| a.bass.as_mut())
+        {
             b.verification = None;
             b.verification_note = Some("Confirmation in progress.".into());
         }
