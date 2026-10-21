@@ -78,6 +78,13 @@ enum Command {
         #[arg(long, default_value_t = 15.0)]
         max_cut_db: f64,
     },
+    /// Analyse an alignment's subwoofer measurements again and write the proposal and
+    /// the subwoofer's filter to a new folder of it. Nothing is sent to Omniphony.
+    BassIntegration {
+        /// The alignment folder (holding alignment-state.json).
+        #[arg(long)]
+        alignment: PathBuf,
+    },
     /// Check a separate observation batch; exit 2 when tolerances are not met.
     Verify {
         #[arg(long)]
@@ -200,6 +207,60 @@ fn run(args: Args) -> AppResult<ExitCode> {
                 "Filters and {} written to {}. Nothing was sent to Omniphony.",
                 room_correction::SUMMARY,
                 folder.display()
+            );
+        }
+        Command::BassIntegration { alignment } => {
+            use companion_service::bass;
+            let a = companion_service::alignment::load(&alignment)?;
+            let integration = a
+                .bass
+                .as_ref()
+                .ok_or("this alignment has no subwoofer measurement")?;
+            let analysis = bass::analyze(&a, integration)?;
+            let proposal = &analysis.proposal;
+            match &proposal.refusal {
+                Some(reason) => println!("No proposal: {reason}"),
+                None => println!(
+                    "{}: delay {:.2} -> {:.2} ms, level {:+.2} dB{}{}",
+                    proposal.subwoofer.output_id,
+                    proposal.subwoofer.delay_ms,
+                    proposal.subwoofer_delay_ms,
+                    proposal.setting.gain_change_db,
+                    if proposal.setting.inverted {
+                        ", polarity inverted"
+                    } else {
+                        ""
+                    },
+                    if proposal.others_delay_ms > 0.0 {
+                        format!(", every other output +{:.2} ms", proposal.others_delay_ms)
+                    } else {
+                        String::new()
+                    }
+                ),
+            }
+            for speaker in &proposal.speakers {
+                match (&speaker.excluded, speaker.summation_db) {
+                    (Some(reason), _) => println!("{}: left out: {reason}", speaker.output_id),
+                    (None, Some([before, best, after])) => println!(
+                        "{}: summation {before:.2} -> {after:.2} dB (own best {best:.2}), subwoofer {} ms late by phase",
+                        speaker.output_id,
+                        speaker
+                            .phase_delay_ms
+                            .map_or("?".into(), |d| format!("{d:.2}"))
+                    ),
+                    _ => println!("{}: not analysed", speaker.output_id),
+                }
+                for warning in &speaker.warnings {
+                    println!("  {warning}");
+                }
+            }
+            for note in proposal.warnings.iter().chain(&analysis.notes) {
+                println!("{note}");
+            }
+            println!(
+                "{} written to {}. Nothing was sent to Omniphony.",
+                bass::SUMMARY,
+                analysis.directory.display()
             );
         }
         Command::Verify {

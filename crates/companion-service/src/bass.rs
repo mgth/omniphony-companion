@@ -104,17 +104,44 @@ impl Part {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Plan {
     pub subwoofer: String,
-    /// Plays the direct sweeps that frame every bass-managed target.
-    pub reference: String,
-    /// The speakers measured, each split at its `freq_low_hz`.
-    pub speakers: Vec<String>,
+    /// The bass-managed sequences: each speaker's sweep, split at its `freq_low_hz`,
+    /// framed by its group's reference. The reference must play the whole sweep, so a
+    /// speaker split lower than any other speaker can be swept is framed by the
+    /// subwoofer itself; silencing the subwoofer would silence that reference, so those
+    /// speakers' own parts are the sum minus the subwoofer's.
+    pub groups: Vec<Group>,
     /// Speakers with a low limit left out, and why.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped: Vec<(String, String)>,
-    /// The bass-managed sweep.
-    pub sweep: Sweep,
     /// The subwoofer's own sweep, with its reference.
     pub direct: Group,
+}
+impl Plan {
+    /// Every speaker measured, group by group.
+    pub fn speakers(&self) -> Vec<String> {
+        self.groups
+            .iter()
+            .flat_map(|g| g.outputs.iter().cloned())
+            .collect()
+    }
+    pub fn group_of(&self, output_id: &str) -> Option<&Group> {
+        sweep_plan::group_of(&self.groups, output_id)
+    }
+    /// The parts that measure `output_id`: not the subwoofer silenced when it is the
+    /// reference, not the speakers silenced when the speaker is.
+    pub fn parts_of(&self, output_id: &str) -> Vec<Part> {
+        let Some(group) = self.group_of(output_id) else {
+            return vec![];
+        };
+        let mut parts = vec![Part::Sum];
+        if group.reference != self.subwoofer {
+            parts.push(Part::Speaker);
+        }
+        if group.reference != output_id {
+            parts.push(Part::Subwoofer);
+        }
+        parts
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -156,11 +183,10 @@ impl Capture {
             && self
                 .take(&plan.subwoofer, Part::Direct)
                 .is_some_and(BassTake::usable)
-            && plan.speakers.iter().all(|id| {
-                [Part::Sum, Part::Speaker, Part::Subwoofer]
-                    .iter()
-                    .filter(|&&part| !(part == Part::Subwoofer && *id == plan.reference))
-                    .all(|&part| self.take(id, part).is_some_and(BassTake::usable))
+            && plan.speakers().iter().all(|id| {
+                plan.parts_of(id)
+                    .into_iter()
+                    .all(|part| self.take(id, part).is_some_and(BassTake::usable))
             })
     }
 }
@@ -315,8 +341,8 @@ pub fn plan(a: &Alignment, live: &Snapshot) -> Result<Plan, String> {
         .iter()
         .filter_map(|o| o.freq_low_hz)
         .fold(0.0, f32::max);
-    // The reference plays every direct sweep: the one reaching lowest, the alignment's
-    // own when it reaches as low.
+    // The main reference plays the direct sweeps: the speaker reaching lowest, the
+    // alignment's own when it reaches as low.
     let end_wanted = (4.0 * highest)
         .clamp(SWEEP_END_HZ[0], SWEEP_END_HZ[1])
         .min(rate);
@@ -330,46 +356,68 @@ pub fn plan(a: &Alignment, live: &Snapshot) -> Result<Plan, String> {
                 let own = |o: &Output| a.settings.reference_output.as_deref() != Some(&o.id);
                 own(x).cmp(&own(y))
             })
-        })
-        .ok_or("No speaker can play the bass sweep as the timing reference.")?;
-    let start = low(reference);
-    let mut end = end_wanted.min(reference.freq_high_hz.unwrap_or(f32::MAX));
-    let mut speakers = vec![];
+        });
+    let own = sweep_plan::range(sub, live.sample_rate, a.settings.sample_rate);
+    // Each speaker needs the octave around its crossover, and a little past it.
+    let fits = |fc: f32, [start, end]: [f32; 2]| {
+        fc / std::f32::consts::SQRT_2 >= start * 1.03 && fc * std::f32::consts::SQRT_2 <= end / 1.03
+    };
+    let main_range =
+        reference.map(|r| [low(r), end_wanted.min(r.freq_high_hz.unwrap_or(f32::MAX))]);
+    let mut main = vec![];
+    let mut by_subwoofer = vec![];
     let mut skipped = vec![];
     for o in candidates {
         let fc = o.freq_low_hz.unwrap_or(20.0);
-        if fc / std::f32::consts::SQRT_2 < start {
+        if main_range.is_some_and(|range| fits(fc, range)) {
+            main.push(o);
+        } else if fits(fc, own) {
+            by_subwoofer.push(o);
+        } else {
             skipped.push((
                 o.id.clone(),
                 format!(
-                    "Its {fc:.0} Hz crossover is too low for the timing reference ({}), whose sweep starts at {start:.0} Hz.",
-                    reference.name
+                    "Its {fc:.0} Hz crossover cannot be swept an octave wide: {} and {} ({:.0}–{:.0} Hz) cannot frame it.",
+                    reference.map_or("no other speaker", |r| r.name.as_str()),
+                    sub.name,
+                    own[0],
+                    own[1]
                 ),
             ));
-        } else {
-            end = end.min(o.freq_high_hz.unwrap_or(f32::MAX));
-            speakers.push(o.id.clone());
         }
     }
-    if speakers.is_empty() {
-        return Err(format!(
-            "No speaker's crossover can be measured: the timing reference ({}) cannot play below {start:.0} Hz. A speaker without a low limit makes a better reference.",
-            reference.name
-        ));
-    }
-    let sweep = Sweep {
-        duration_ms: sweep_plan::ROOM_SWEEP_MS,
-        peak_dbfs: a.settings.sweep.peak_dbfs,
-        start_hz: start,
-        end_hz: end,
+    let group = |reference: &Output, members: &[&Output], [start, end]: [f32; 2]| Group {
+        sweep: Sweep {
+            duration_ms: sweep_plan::ROOM_SWEEP_MS,
+            peak_dbfs: a.settings.sweep.peak_dbfs,
+            start_hz: start,
+            end_hz: members
+                .iter()
+                .filter_map(|o| o.freq_high_hz)
+                .fold(end, f32::min),
+        },
+        reference: reference.id.clone(),
+        outputs: members.iter().map(|o| o.id.clone()).collect(),
     };
-    let own = sweep_plan::range(sub, live.sample_rate, a.settings.sample_rate);
-    let direct_reference =
-        if low(reference) <= own[0] && reference.freq_high_hz.is_none_or(|h| h >= own[1]) {
-            reference.id.clone()
-        } else {
-            sub.id.clone()
-        };
+    let mut groups = vec![];
+    if let (Some(reference), Some(range)) = (reference, main_range)
+        && !main.is_empty()
+    {
+        groups.push(group(reference, &main, range));
+    }
+    if !by_subwoofer.is_empty() {
+        groups.push(group(sub, &by_subwoofer, own));
+    }
+    if groups.is_empty() {
+        return Err(
+            "No speaker's crossover can be swept an octave wide with the speakers and subwoofer available as timing references."
+                .into(),
+        );
+    }
+    let direct_reference = match reference {
+        Some(r) if low(r) <= own[0] && r.freq_high_hz.is_none_or(|h| h >= own[1]) => r.id.clone(),
+        _ => sub.id.clone(),
+    };
     let direct = Group {
         sweep: Sweep {
             duration_ms: sweep_plan::ROOM_SWEEP_MS,
@@ -382,22 +430,21 @@ pub fn plan(a: &Alignment, live: &Snapshot) -> Result<Plan, String> {
     };
     Ok(Plan {
         subwoofer: sub.id.clone(),
-        reference: reference.id.clone(),
-        speakers,
+        groups,
         skipped,
-        sweep,
         direct,
     })
 }
 
-/// `measured` with the outputs `part` silences at [`SILENT_DB`].
-fn state(measured: &Snapshot, plan: &Plan, part: Part) -> Snapshot {
+/// `measured` with the outputs `part` silences at [`SILENT_DB`], for a group framed by
+/// `reference`.
+fn state(measured: &Snapshot, plan: &Plan, part: Part, reference: &str) -> Snapshot {
     let mut s = measured.clone();
     for output in &mut s.outputs {
         let silent = match part {
             Part::Sum | Part::Direct => false,
             Part::Speaker => output.id == plan.subwoofer,
-            Part::Subwoofer => output.id != plan.subwoofer && output.id != plan.reference,
+            Part::Subwoofer => output.id != plan.subwoofer && output.id != reference,
         };
         if silent {
             output.gain_db = SILENT_DB;
@@ -406,43 +453,35 @@ fn state(measured: &Snapshot, plan: &Plan, part: Part) -> Snapshot {
     s
 }
 
-/// The groups one part plays.
-/// `measured` is the state every part starts from: the bass-managed sweep stays under
-/// its ceiling there, so every part plays it at one level.
-fn groups(plan: &Plan, part: Part, measured: &Snapshot, capture_rate: u32) -> Vec<Group> {
-    let snapshot = measured;
-    match part {
-        Part::Direct => vec![plan.direct.clone()],
-        _ => {
-            let outputs: Vec<String> = plan
-                .speakers
-                .iter()
-                .filter(|id| !(part == Part::Subwoofer && **id == plan.reference))
-                .cloned()
-                .collect();
-            if outputs.is_empty() {
-                return vec![];
-            }
-            let mut sweep = plan.sweep;
-            sweep.peak_dbfs = sweep.peak_dbfs.min(bass_ceiling(snapshot));
-            vec![Group {
-                sweep,
-                reference: plan.reference.clone(),
-                outputs,
-            }]
-            .into_iter()
-            .map(|mut g| {
-                g.sweep.duration_ms = fitting(
-                    g.sweep,
-                    snapshot.sample_rate,
-                    capture_rate,
-                    plan.speakers.len(),
-                );
-                g
-            })
-            .collect()
-        }
+/// What one part plays of `group`: its targets (not the reference when the speakers
+/// are silenced), under the bass-managed ceiling of `measured`, the state every part
+/// starts from, so each part plays it at one level. `None` when nothing is left.
+fn part_group(group: &Group, part: Part, measured: &Snapshot, capture_rate: u32) -> Option<Group> {
+    if part == Part::Direct {
+        return Some(group.clone());
     }
+    let outputs: Vec<String> = group
+        .outputs
+        .iter()
+        .filter(|id| !(part == Part::Subwoofer && **id == group.reference))
+        .cloned()
+        .collect();
+    if outputs.is_empty() {
+        return None;
+    }
+    let mut sweep = group.sweep;
+    sweep.peak_dbfs = sweep.peak_dbfs.min(bass_ceiling(measured));
+    sweep.duration_ms = fitting(
+        sweep,
+        measured.sample_rate,
+        capture_rate,
+        group.outputs.len(),
+    );
+    Some(Group {
+        sweep,
+        reference: group.reference.clone(),
+        outputs,
+    })
 }
 
 /// The longest sweep up to 3 s, in 100 ms steps, whose sequence of `targets` fits.
@@ -552,14 +591,13 @@ pub fn measure<B: Backend + ?Sized>(
         .directory
         .join(format!("bass-{label}-{}", alignment::stamp()));
     std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
-    let first = bass.plan.speakers[0].clone();
-    let speakers = bass.plan.speakers.clone();
-    let request_for = |snapshot: &Snapshot, part: Part, out_dir: PathBuf| {
+    let speakers = bass.plan.speakers();
+    let request_for = |snapshot: &Snapshot, part: Part, group: &Group, out_dir: PathBuf| {
         let mut request = alignment::request(
             a.endpoint,
             snapshot.clone(),
             &a.settings,
-            first.clone(),
+            group.outputs[0].clone(),
             out_dir,
         )?;
         request.position_id = position_id.clone();
@@ -574,31 +612,41 @@ pub fn measure<B: Backend + ?Sized>(
     // The level, from a quiet probe at the main seat, in the state the sum plays in.
     if step.is_none() && a.settings.automatic_level {
         let mut found = vec![];
-        for part in [Part::Sum, Part::Direct] {
-            let groups = groups(&bass.plan, part, &live, a.settings.sample_rate);
-            let request = request_for(&live, part, directory.join("level-probe"))?;
+        let mut probed: Vec<Group> = bass
+            .plan
+            .groups
+            .iter()
+            .filter_map(|g| part_group(g, Part::Sum, &live, a.settings.sample_rate))
+            .collect();
+        probed.push(bass.plan.direct.clone());
+        for (index, group) in probed.iter().enumerate() {
+            let part = if index + 1 == probed.len() {
+                Part::Direct
+            } else {
+                Part::Sum
+            };
+            let request = request_for(&live, part, group, directory.join("level-probe"))?;
             let probe = level_probe::run(
                 backend,
                 &request,
-                &groups,
-                &directory.join(format!("level-probe-{}", part.folder())),
+                std::slice::from_ref(group),
+                &directory.join(format!("level-probe-{}", index + 1)),
                 a.settings.sweep.peak_dbfs,
                 cancel,
-                &mut |i, p| progress(i.min(speakers.len() - 1), p),
+                &mut |i, p| {
+                    let id = group.outputs.get(i).map_or(0, |id| speaker_index(id));
+                    progress(id, p)
+                },
             )?;
-            let members: Vec<&String> = groups
-                .iter()
-                .flat_map(|g| g.outputs.iter().chain(std::iter::once(&g.reference)))
-                .collect();
             let peak = probe
                 .levels
                 .iter()
-                .filter(|l| members.contains(&&l.output_id))
+                .filter(|l| l.output_id == group.reference || group.outputs.contains(&l.output_id))
                 .map(|l| l.peak_dbfs)
                 .fold(sweep_plan::MAX_PEAK_DBFS, f32::min);
             match part {
-                Part::Sum => bass.plan.sweep.peak_dbfs = peak,
-                _ => bass.plan.direct.sweep.peak_dbfs = peak,
+                Part::Direct => bass.plan.direct.sweep.peak_dbfs = peak,
+                _ => bass.plan.groups[index].sweep.peak_dbfs = peak,
             }
             found.extend(probe.levels);
         }
@@ -607,15 +655,33 @@ pub fn measure<B: Backend + ?Sized>(
             levels: found,
         });
     }
+    // Every part of every group, in the state it is measured in.
+    let mut steps: Vec<(Part, Group)> = vec![];
+    for part in Part::ALL {
+        if part == Part::Direct {
+            steps.push((part, bass.plan.direct.clone()));
+            continue;
+        }
+        for group in &bass.plan.groups {
+            if part == Part::Speaker && group.reference == bass.plan.subwoofer {
+                continue;
+            }
+            if let Some(g) = part_group(group, part, &bass.snapshot, a.settings.sample_rate) {
+                steps.push((part, g));
+            }
+        }
+    }
+    let several = bass.plan.groups.len() > 1;
     let mut takes = vec![];
     let mut error = None;
     let mut current = live.clone();
-    for part in Part::ALL {
+    for (index, (part, group)) in steps.iter().enumerate() {
+        let part = *part;
         if cancel.load(Ordering::Relaxed) {
             error = Some("capture cancelled by user".to_owned());
             break;
         }
-        let target = state(&bass.snapshot, &bass.plan, part);
+        let target = state(&bass.snapshot, &bass.plan, part, &group.reference);
         current = match alignment::move_outputs(backend, a.endpoint, &current, &target) {
             Ok(snapshot) => snapshot,
             Err(e) => {
@@ -626,20 +692,22 @@ pub fn measure<B: Backend + ?Sized>(
                 break;
             }
         };
-        let groups = groups(&bass.plan, part, &bass.snapshot, a.settings.sample_rate);
-        if groups.is_empty() {
-            continue;
-        }
-        let request = request_for(&current, part, directory.join(part.folder()))?;
-        let outcome =
-            sweep_plan::measure_groups(backend, &request, &groups, cancel, &mut |i, p| {
-                let id = groups
-                    .iter()
-                    .flat_map(|g| g.outputs.iter())
-                    .nth(i)
-                    .map_or(0, |id| speaker_index(id));
+        let folder = if several && part != Part::Direct {
+            format!("{}-{}", part.folder(), index + 1)
+        } else {
+            part.folder().to_owned()
+        };
+        let request = request_for(&current, part, group, directory.join(folder))?;
+        let outcome = sweep_plan::measure_groups(
+            backend,
+            &request,
+            std::slice::from_ref(group),
+            cancel,
+            &mut |i, p| {
+                let id = group.outputs.get(i).map_or(0, |id| speaker_index(id));
                 progress(id, p)
-            });
+            },
+        );
         match outcome {
             Ok(batch) => {
                 takes.extend(
@@ -814,51 +882,59 @@ fn inputs(bass: &BassIntegration) -> Result<Inputs, String> {
     let sub = output(&plan.subwoofer).ok_or("the subwoofer is absent from the measured state")?;
     let mut notes = vec![];
     let mut speakers = vec![];
-    for id in &plan.speakers {
-        let fc = output(id)
-            .and_then(|o| o.freq_low_hz)
-            .ok_or_else(|| format!("{id} has no low limit in the measured state"))?;
-        let mut positions = vec![];
-        for capture in &bass.captures {
-            let label = capture.step.as_deref().unwrap_or("main seat");
-            let read = |part: Part| -> Result<Loaded, String> {
-                let take = capture
-                    .take(id, part)
-                    .ok_or_else(|| format!("{} not measured", part.label()))?;
-                load(take, id).map_err(|e| format!("{}: {e}", part.label()))
-            };
-            let parts = (|| -> Result<_, String> {
-                let sum = read(Part::Sum)?;
-                let mut speaker = read(Part::Speaker)?;
-                line_up(&mut speaker, &sum)
-                    .map_err(|e| format!("{}: {e}", Part::Speaker.label()))?;
-                let subwoofer = if *id == plan.reference {
-                    None
-                } else {
-                    let mut part = read(Part::Subwoofer)?;
-                    line_up(&mut part, &sum)
-                        .map_err(|e| format!("{}: {e}", Part::Subwoofer.label()))?;
-                    Some(part.response)
+    for group in &plan.groups {
+        for id in &group.outputs {
+            let fc = output(id)
+                .and_then(|o| o.freq_low_hz)
+                .ok_or_else(|| format!("{id} has no low limit in the measured state"))?;
+            let mut positions = vec![];
+            for capture in &bass.captures {
+                let label = capture.step.as_deref().unwrap_or("main seat");
+                let read = |part: Part| -> Result<Loaded, String> {
+                    let take = capture
+                        .take(id, part)
+                        .ok_or_else(|| format!("{} not measured", part.label()))?;
+                    load(take, id).map_err(|e| format!("{}: {e}", part.label()))
                 };
-                Ok(core::PositionResponses {
-                    position_id: capture.position_id.clone(),
-                    main_seat: capture.step.is_none(),
-                    speaker: speaker.response,
-                    subwoofer,
-                    sum: sum.response,
-                })
-            })();
-            match parts {
-                Ok(p) => positions.push(p),
-                Err(e) => notes.push(format!("{id} at {label}: {e}")),
+                let lined_up = |part: Part, sum: &Loaded| -> Result<core::Response, String> {
+                    let mut loaded = read(part)?;
+                    line_up(&mut loaded, sum).map_err(|e| format!("{}: {e}", part.label()))?;
+                    Ok(loaded.response)
+                };
+                let parts = (|| -> Result<_, String> {
+                    let sum = read(Part::Sum)?;
+                    let parts = plan.parts_of(id);
+                    let speaker = parts
+                        .contains(&Part::Speaker)
+                        .then(|| lined_up(Part::Speaker, &sum))
+                        .transpose()?;
+                    let subwoofer = parts
+                        .contains(&Part::Subwoofer)
+                        .then(|| lined_up(Part::Subwoofer, &sum))
+                        .transpose()?;
+                    Ok(core::PositionResponses {
+                        position_id: capture.position_id.clone(),
+                        main_seat: capture.step.is_none(),
+                        speaker,
+                        subwoofer,
+                        sum: sum.response,
+                    })
+                })();
+                match parts {
+                    Ok(p) => positions.push(p),
+                    Err(e) => notes.push(format!("{id} at {label}: {e}")),
+                }
             }
+            speakers.push(core::SpeakerResponses {
+                output_id: id.clone(),
+                crossover_hz: f64::from(fc),
+                swept_hz: [
+                    f64::from(group.sweep.start_hz),
+                    f64::from(group.sweep.end_hz),
+                ],
+                positions,
+            });
         }
-        speakers.push(core::SpeakerResponses {
-            output_id: id.clone(),
-            crossover_hz: f64::from(fc),
-            swept_hz: [f64::from(plan.sweep.start_hz), f64::from(plan.sweep.end_hz)],
-            positions,
-        });
     }
     let mut measurements = vec![];
     for capture in &bass.captures {
@@ -1236,51 +1312,80 @@ pub fn verify<B: Backend + ?Sized>(
     let directory = a
         .directory
         .join(format!("bass-verification-{}", alignment::stamp()));
-    let groups = groups(&bass.plan, Part::Sum, &live, a.settings.sample_rate);
-    let mut request = alignment::request(
-        a.endpoint,
-        live.clone(),
-        &a.settings,
-        bass.plan.speakers[0].clone(),
-        directory.clone(),
-    )?;
-    request.calibration = request
-        .calibration
-        .map(|_| a.directory.join(room_response::CALIBRATION_FILE));
-    request.bass_managed = true;
-    let batch = sweep_plan::measure_groups(backend, &request, &groups, cancel, progress)?;
-    if let Some(e) = batch
-        .error
-        .clone()
-        .or_else(|| batch.cancelled.then(|| "capture cancelled by user".into()))
-    {
-        bass.verification_note = Some(format!("Not confirmed: {e}"));
-        a.bass = Some(bass);
-        alignment::save(a)?;
-        return Err(e);
-    }
     let Inputs {
         speakers, direct, ..
     } = inputs(&bass)?;
     let mut notes = vec![];
     let (_, filter) = mode_correction(&bass, &direct, &mut notes)?;
     let main = bass.capture(None).ok_or("no main-seat capture")?.clone();
+    let analysis = bass.analysis.as_ref().ok_or("nothing analysed")?;
+    // The subwoofer's own delay change moves a group it frames: its reference arrives
+    // that much later, and its polarity may have turned.
+    let reference_moved_s =
+        (analysis.proposal.subwoofer_delay_ms - analysis.proposal.subwoofer.delay_ms) / 1000.0;
+    let speaker_list = bass.plan.speakers();
     let mut measured = vec![];
     let mut warnings = vec![];
-    for (id, take) in &batch.takes {
-        let take = bass_take(id, Part::Sum, take);
-        let loaded = load(&take, id).and_then(|mut now| {
-            let base = main
-                .take(id, Part::Sum)
-                .ok_or("not measured at the main seat")
-                .map_err(String::from)
-                .and_then(|t| load(t, id))?;
-            line_up(&mut now, &base)?;
-            Ok(now)
-        });
-        match loaded {
-            Ok(now) => measured.push((id.clone(), main.position_id.clone(), now.response)),
-            Err(e) => warnings.push(format!("{id}: {e}")),
+    for (index, group) in bass.plan.groups.iter().enumerate() {
+        let Some(group) = part_group(group, Part::Sum, &live, a.settings.sample_rate) else {
+            continue;
+        };
+        let mut request = alignment::request(
+            a.endpoint,
+            live.clone(),
+            &a.settings,
+            group.outputs[0].clone(),
+            directory.join(format!("sum-{}", index + 1)),
+        )?;
+        request.calibration = request
+            .calibration
+            .map(|_| a.directory.join(room_response::CALIBRATION_FILE));
+        request.bass_managed = true;
+        let batch = sweep_plan::measure_groups(
+            backend,
+            &request,
+            std::slice::from_ref(&group),
+            cancel,
+            &mut |i, p| {
+                let id = group
+                    .outputs
+                    .get(i)
+                    .and_then(|id| speaker_list.iter().position(|s| s == id))
+                    .unwrap_or(0);
+                progress(id, p)
+            },
+        )?;
+        if let Some(e) = batch
+            .error
+            .clone()
+            .or_else(|| batch.cancelled.then(|| "capture cancelled by user".into()))
+        {
+            bass.verification_note = Some(format!("Not confirmed: {e}"));
+            a.bass = Some(bass);
+            alignment::save(a)?;
+            return Err(e);
+        }
+        let framed_by_subwoofer = group.reference == bass.plan.subwoofer;
+        for (id, take) in &batch.takes {
+            let take = bass_take(id, Part::Sum, take);
+            let loaded = load(&take, id).and_then(|mut now| {
+                if framed_by_subwoofer {
+                    now.response.start_s += reference_moved_s;
+                    now.response.anchor_s += reference_moved_s;
+                } else {
+                    let base = main
+                        .take(id, Part::Sum)
+                        .ok_or("not measured at the main seat")
+                        .map_err(String::from)
+                        .and_then(|t| load(t, id))?;
+                    line_up(&mut now, &base)?;
+                }
+                Ok(now)
+            });
+            match loaded {
+                Ok(now) => measured.push((id.clone(), main.position_id.clone(), now.response)),
+                Err(e) => warnings.push(format!("{id}: {e}")),
+            }
         }
     }
     let analysis = bass.analysis.as_ref().ok_or("nothing analysed")?;

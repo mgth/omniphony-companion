@@ -1472,7 +1472,7 @@ impl Controller {
             (Some(bass), Some(_)) => bass.plan.clone(),
             _ => crate::bass::plan(a, live)?,
         };
-        self.output_readiness(&plan.reference)
+        self.output_readiness(&plan.groups[0].reference)
     }
     /// Measure the subwoofer's integration at the main seat (`None`, which starts over)
     /// or at guide step `step`.
@@ -1486,9 +1486,9 @@ impl Controller {
         };
         a.endpoint = self.state.endpoint.expect("checked by bass_readiness");
         let output_ids = match (&a.bass, step, &self.state.snapshot) {
-            (Some(bass), Some(_), _) => bass.plan.speakers.clone(),
+            (Some(bass), Some(_), _) => bass.plan.speakers(),
             (_, _, Some(live)) => crate::bass::plan(&a, live)
-                .map(|p| p.speakers)
+                .map(|p| p.speakers())
                 .unwrap_or_default(),
             _ => vec![],
         };
@@ -1533,7 +1533,11 @@ impl Controller {
                 "Restore the measurement settings this alignment was captured with.".into(),
             );
         }
-        let reference = a.bass.as_ref().map(|b| b.plan.reference.clone());
+        let reference = a
+            .bass
+            .as_ref()
+            .and_then(|b| b.plan.groups.first())
+            .map(|g| g.reference.clone());
         self.output_readiness(reference.as_deref().unwrap_or_default())
     }
     /// Measure the applied subwoofer integration again at the main seat.
@@ -1552,7 +1556,7 @@ impl Controller {
         let output_ids = a
             .bass
             .as_ref()
-            .map(|b| b.plan.speakers.clone())
+            .map(|b| b.plan.speakers())
             .unwrap_or_default();
         if let Some(b) = self.state.alignment.as_mut().and_then(|a| a.bass.as_mut()) {
             b.verification = None;

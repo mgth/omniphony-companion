@@ -126,6 +126,21 @@ fn output(index: u32, id: &str, low: Option<f32>, high: Option<f32>, delay_ms: f
 }
 
 impl Rig {
+    /// As Omniphony's bench layout: no speaker plays below 40 Hz, so none can frame
+    /// the 40 Hz crossovers.
+    fn every_speaker_from_40_hz() -> Self {
+        let rig = Self::new();
+        {
+            let mut state = rig.snapshot.lock().unwrap();
+            for output in &mut state.outputs {
+                match output.id.as_str() {
+                    "L" | "FR" => output.freq_low_hz = Some(40.0),
+                    _ => {}
+                }
+            }
+        }
+        rig
+    }
     fn new() -> Self {
         Self {
             snapshot: Mutex::new(Snapshot {
@@ -425,9 +440,10 @@ fn a_late_inverted_loud_subwoofer_is_measured_integrated_applied_confirmed_and_u
     let cancel = AtomicBool::new(false);
     let plan = bass::plan(&a, &original).unwrap();
     assert_eq!(plan.subwoofer, "LFE");
-    assert_eq!(plan.reference, "L");
-    assert_eq!(plan.speakers, ["FL", "FR", "C"]);
-    assert_eq!(plan.sweep.start_hz, 20.0);
+    assert_eq!(plan.groups.len(), 1);
+    assert_eq!(plan.groups[0].reference, "L");
+    assert_eq!(plan.speakers(), ["FL", "FR", "C"]);
+    assert_eq!(plan.groups[0].sweep.start_hz, 20.0);
     assert_eq!(plan.direct.reference, "L");
 
     bass::measure(&rig, &mut a, None, &cancel, &mut |_, _| {}).unwrap();
@@ -596,4 +612,78 @@ fn a_subwoofer_that_already_plays_a_filter_is_not_measured() {
     no_filter.outputs[4].filter = None;
     let error = bass::readiness(&a, &no_filter, Some(0)).unwrap_err();
     assert!(error.contains("main seat first"), "{error}");
+}
+
+#[test]
+fn speakers_split_below_every_other_speaker_are_framed_by_the_subwoofer() {
+    let root = tempfile::tempdir().unwrap();
+    let rig = Rig::every_speaker_from_40_hz();
+    let mut a = alignment_for(&rig, root.path());
+    let original = rig.discover(a.endpoint).unwrap();
+    let plan = bass::plan(&a, &original).unwrap();
+    assert_eq!(plan.groups.len(), 2, "{plan:?}");
+    assert_eq!(plan.groups[0].reference, "L");
+    assert_eq!(plan.groups[0].outputs, ["FL", "C"]);
+    assert_eq!(plan.groups[0].sweep.start_hz, 40.0);
+    assert_eq!(plan.groups[1].reference, "LFE");
+    assert_eq!(plan.groups[1].outputs, ["L", "FR"]);
+    assert_eq!(
+        [plan.groups[1].sweep.start_hz, plan.groups[1].sweep.end_hz],
+        [20.0, 120.0]
+    );
+    assert_eq!(
+        plan.parts_of("FR"),
+        [bass::Part::Sum, bass::Part::Subwoofer]
+    );
+    let cancel = AtomicBool::new(false);
+    bass::measure(&rig, &mut a, None, &cancel, &mut |_, _| {}).unwrap();
+    // The subwoofer is never silenced while it frames a group.
+    let batches = rig.batches.lock().unwrap().clone();
+    assert!(
+        batches
+            .iter()
+            .any(|b| b.1 && b.0["LFE"] == 0.0 && b.0["L"] == -60.0 && b.0["FR"] == -60.0)
+    );
+    let b = a.bass.as_ref().unwrap();
+    assert!(b.capture(None).unwrap().complete(&b.plan));
+    let analysis = b
+        .analysis
+        .as_ref()
+        .unwrap_or_else(|| panic!("{:?}", b.analysis_error));
+    let proposal = &analysis.proposal;
+    assert!(proposal.refusal.is_none(), "{proposal:?}");
+    for id in ["L", "FR"] {
+        let speaker = proposal
+            .speakers
+            .iter()
+            .find(|s| s.output_id == id)
+            .unwrap();
+        assert!(speaker.excluded.is_none(), "{speaker:?}");
+        assert!(
+            speaker
+                .warnings
+                .iter()
+                .any(|w| w.contains("is its timing reference")),
+            "{speaker:?}"
+        );
+        // The 45 Hz mode's own group delay is part of the subwoofer's lateness this low.
+        let phase = speaker.phase_delay_ms.unwrap();
+        assert!(phase > 15.0 && phase < 35.0, "{id}: {phase}");
+        let [measured, _, proposed] = speaker.summation_db.unwrap();
+        assert!(proposed > measured + 1.0 && proposed > -1.0, "{speaker:?}");
+    }
+    assert!(proposal.setting.inverted);
+    assert!(
+        (proposal.setting.delay_change_ms + 17.0).abs() < 2.0,
+        "{proposal:?}"
+    );
+    // Applied and confirmed: the subwoofer-framed sums follow its own delay change.
+    bass::apply(&rig, &mut a, false).unwrap();
+    bass::verify(&rig, &mut a, &cancel, &mut |_, _| {}).unwrap();
+    let verification = a.bass.as_ref().unwrap().verification.clone().unwrap();
+    assert_eq!(verification.speakers.len(), 4, "{verification:?}");
+    for check in &verification.speakers {
+        assert!(check.deviation_db < 1.0, "{check:?}");
+    }
+    bass::apply(&rig, &mut a, true).unwrap();
 }

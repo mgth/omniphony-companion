@@ -169,8 +169,11 @@ impl Response {
 pub struct PositionResponses {
     pub position_id: String,
     pub main_seat: bool,
-    /// With the subwoofer silenced: the speaker and any other output its low band reaches.
-    pub speaker: Response,
+    /// With the subwoofer silenced: the speaker and any other output its low band
+    /// reaches. `None` when it could not be measured apart (the subwoofer is the timing
+    /// reference, so silencing it silences the reference): the sum minus the
+    /// subwoofer's part stands for it.
+    pub speaker: Option<Response>,
     /// With every other output silenced: the subwoofer's part. `None` when it could not
     /// be measured apart (the timing reference keeps playing its own sweep): the sum
     /// minus the speaker's part stands for it.
@@ -501,7 +504,8 @@ impl Prepared {
         let mut warnings = vec![];
         let mut parts = vec![];
         for p in &speaker.positions {
-            let mut responses = vec![&p.speaker, &p.sum];
+            let mut responses = vec![&p.sum];
+            responses.extend(p.speaker.as_ref());
             responses.extend(p.subwoofer.as_ref());
             responses.extend(extra);
             let from = responses
@@ -522,18 +526,36 @@ impl Prepared {
                 continue;
             }
             let span = [from, to];
-            let spk = spectrum(&p.speaker, &frequencies, span);
             let sum = spectrum(&p.sum, &frequencies, span);
-            let (sub, measured_apart) = match &p.subwoofer {
-                Some(r) => (spectrum(r, &frequencies, span), true),
-                None => (
-                    sum.iter()
-                        .zip(&spk)
-                        .map(|(s, a)| (s.0 - a.0, s.1 - a.1))
-                        .collect(),
-                    false,
-                ),
+            let rest = |part: &[(f64, f64)]| -> Vec<(f64, f64)> {
+                sum.iter()
+                    .zip(part)
+                    .map(|(s, a)| (s.0 - a.0, s.1 - a.1))
+                    .collect()
             };
+            let (spk, sub) = match (&p.speaker, &p.subwoofer) {
+                (Some(a), Some(b)) => (
+                    spectrum(a, &frequencies, span),
+                    spectrum(b, &frequencies, span),
+                ),
+                (Some(a), None) => {
+                    let a = spectrum(a, &frequencies, span);
+                    let b = rest(&a);
+                    (a, b)
+                }
+                (None, Some(b)) => {
+                    let b = spectrum(b, &frequencies, span);
+                    (rest(&b), b)
+                }
+                (None, None) => {
+                    warnings.push(format!(
+                        "{}: neither part was measured apart; left out.",
+                        p.position_id
+                    ));
+                    continue;
+                }
+            };
+            let measured_apart = p.speaker.is_some() && p.subwoofer.is_some();
             parts.push(Parts {
                 weight: if p.main_seat {
                     settings.main_seat_weight
@@ -902,10 +924,9 @@ pub fn propose(
             "speaker crossover and sweep must be finite and ascending",
         )?;
         for p in &speaker.positions {
-            p.speaker.validate()?;
             p.sum.validate()?;
-            if let Some(s) = &p.subwoofer {
-                s.validate()?;
+            for part in [&p.speaker, &p.subwoofer].into_iter().flatten() {
+                part.validate()?;
             }
         }
     }
@@ -967,7 +988,7 @@ pub fn propose(
     }
 
     // Per speaker: timing from the phase, share, consistency.
-    for (result, p) in proposal.speakers.iter_mut().zip(&prepared) {
+    for ((result, p), speaker) in proposal.speakers.iter_mut().zip(&prepared).zip(speakers) {
         let Some(p) = p else { continue };
         let total = p.total_weight();
         let fits: Vec<(f64, (f64, f64, f64))> = p
@@ -1029,9 +1050,16 @@ pub fn propose(
                 "The subwoofer plays little of its low band ({share:.0} dB against the speaker's own part): its bass goes to other speakers."
             ));
         }
-        if p.parts.iter().any(|parts| !parts.measured_apart) {
+        let positions = |pick: fn(&PositionResponses) -> bool| speaker.positions.iter().any(pick);
+        if positions(|p| p.subwoofer.is_none() && p.speaker.is_some()) {
             result.warnings.push(
                 "The timing reference keeps playing: its subwoofer part is the sum minus its own part."
+                    .into(),
+            );
+        }
+        if positions(|p| p.speaker.is_none() && p.subwoofer.is_some()) {
+            result.warnings.push(
+                "The subwoofer is its timing reference: its own part is the sum minus the subwoofer's."
                     .into(),
             );
         }

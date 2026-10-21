@@ -834,6 +834,65 @@ pub fn same_configuration(a: &Snapshot, b: &Snapshot) -> bool {
         }
         out.gain_db = expected.gain_db;
         out.delay_ms = expected.delay_ms;
+        // A filter that finished loading meanwhile is still the same filter.
+        if let (Some(filter), Some(was)) = (&out.filter, &expected.filter)
+            && filter.origin == was.origin
+            && filter.file == was.file
+            && (was.hash.is_none() || filter.hash == was.hash)
+            && was.state == protocol::FilterLoadState::Pending
+        {
+            out.filter = expected.filter.clone();
+        }
     }
     normalized == *b
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn snapshot(state: protocol::FilterLoadState, hash: Option<&str>) -> Snapshot {
+        Snapshot {
+            instance_id: "test".into(),
+            revision: "test:1".into(),
+            sample_rate: 48000,
+            master_gain_db: 0.0,
+            max_delay_ms: 250.0,
+            unavailable_reason: None,
+            output_filters_bypassed: false,
+            outputs: vec![protocol::Output {
+                id: "L".into(),
+                name: "L".into(),
+                index: 0,
+                gain_db: 0.0,
+                delay_ms: 0.0,
+                muted: false,
+                freq_low_hz: None,
+                freq_high_hz: None,
+                azimuth_deg: None,
+                elevation_deg: None,
+                distance_m: None,
+                filter: Some(protocol::OutputFilter {
+                    origin: protocol::FilterOrigin::File,
+                    file: Some("L.wav".into()),
+                    state,
+                    sample_rate: hash.map(|_| 48000),
+                    taps: hash.map(|_| 8192),
+                    hash: hash.map(Into::into),
+                    error: None,
+                }),
+            }],
+        }
+    }
+    #[test]
+    fn a_filter_that_finished_loading_is_the_same_configuration() {
+        use protocol::FilterLoadState::*;
+        let pending = snapshot(Pending, None);
+        let loaded = snapshot(Loaded, Some("0123456789abcdef"));
+        assert!(same_configuration(&loaded, &pending));
+        // Not the other way round, nor another filter.
+        assert!(!same_configuration(&pending, &loaded));
+        let mut other = loaded.clone();
+        other.outputs[0].filter.as_mut().unwrap().file = Some("other.wav".into());
+        assert!(!same_configuration(&other, &pending));
+    }
 }

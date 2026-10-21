@@ -801,3 +801,267 @@ fn speaker_output_is_requested_only_from_a_renderer_that_knows_the_command() {
     drop(client);
     handle.join().unwrap();
 }
+
+fn bypassed_session(signal: Option<Progress>) -> Reply {
+    let Reply::Session {
+        session_id,
+        mut snapshot,
+        lease_ms,
+        signal,
+    } = session(signal)
+    else {
+        unreachable!()
+    };
+    snapshot.output_filters_bypassed = true;
+    Reply::Session {
+        session_id,
+        snapshot,
+        lease_ms,
+        signal,
+    }
+}
+
+#[test]
+fn a_bypassed_session_waits_for_the_filters_then_plays_a_bass_managed_sequence() {
+    let (endpoint, handle) = server(|mut stream| {
+        let r = receive(&mut stream);
+        assert_eq!(
+            r.command,
+            Command::Begin {
+                expected_revision: "test:1".into(),
+                bypass_output_filters: true,
+            }
+        );
+        send(&mut stream, r.request_id, bypassed_session(None));
+        // Twice refused while the filters switch, before anything plays.
+        let mut ids = vec![];
+        for _ in 0..2 {
+            let r = receive(&mut stream);
+            assert!(matches!(
+                r.command,
+                Command::Start {
+                    signal_id: 1,
+                    bass_managed: true,
+                    ..
+                }
+            ));
+            ids.push(r.request_id);
+            send(
+                &mut stream,
+                r.request_id,
+                Reply::Error {
+                    code: "filters_settling".into(),
+                    message: "start again in a moment".into(),
+                },
+            );
+        }
+        let r = receive(&mut stream);
+        let Command::Start {
+            signal_id: 1,
+            sequence_outputs,
+            reference_output_id,
+            bass_managed: true,
+            ..
+        } = r.command
+        else {
+            panic!("start")
+        };
+        assert!(r.request_id > ids[1] && ids[1] > ids[0]);
+        let mut p = progress(SignalState::Queued, 0);
+        p.reference_output_id = reference_output_id;
+        p.sequence_outputs = sequence_outputs;
+        p.total_frames *= 3;
+        p.bass_managed = true;
+        send(&mut stream, r.request_id, bypassed_session(Some(p.clone())));
+        // A progress that forgets the bass management is another signal.
+        let r = receive(&mut stream);
+        p.bass_managed = false;
+        send(&mut stream, r.request_id, bypassed_session(Some(p)));
+    });
+    let mut c = Client::connect(endpoint, Duration::from_secs(1)).unwrap();
+    c.begin_with(&snapshot(), true).unwrap();
+    let p = c
+        .start_sequence_with(1, "L", Some("L"), &["L".into()], spec(), true)
+        .unwrap();
+    assert!(p.bass_managed);
+    assert!(
+        c.status()
+            .unwrap_err()
+            .to_string()
+            .contains("identity changed")
+    );
+    handle.join().unwrap();
+}
+
+#[test]
+fn a_session_that_does_not_report_the_bypass_is_refused() {
+    let (endpoint, handle) = server(|mut stream| {
+        let r = receive(&mut stream);
+        send(&mut stream, r.request_id, session(None));
+    });
+    let mut c = Client::connect(endpoint, Duration::from_secs(1)).unwrap();
+    let error = c.begin_with(&snapshot(), true).unwrap_err().to_string();
+    assert!(error.contains("does not match"), "{error}");
+    handle.join().unwrap();
+}
+
+#[test]
+fn a_filter_is_uploaded_in_chunks_and_applied_with_a_revision_check() {
+    let taps: Vec<f32> = (0..10_000).map(|i| 1.0 / (1.0 + i as f32)).collect();
+    let hash = taps_hash_hex(&taps);
+    let expected = taps.clone();
+    let (endpoint, handle) = server(move |mut stream| {
+        let r = receive(&mut stream);
+        send(
+            &mut stream,
+            r.request_id,
+            Reply::Snapshot {
+                snapshot: snapshot(),
+            },
+        );
+        let mut received: Vec<f32> = vec![];
+        for (chunk, upload_id) in [(0, None), (1, Some("upload:1".to_owned()))] {
+            let r = receive(&mut stream);
+            let Command::UploadFilter {
+                upload_id: id,
+                sample_rate: 48000,
+                total_taps: 10_000,
+                offset,
+                taps,
+            } = r.command
+            else {
+                panic!("upload")
+            };
+            assert_eq!(id, upload_id);
+            assert_eq!(offset as usize, received.len());
+            received.extend(decode_taps(&taps).unwrap());
+            assert_eq!(received.len(), if chunk == 0 { 8192 } else { 10_000 });
+            send(
+                &mut stream,
+                r.request_id,
+                Reply::FilterUpload {
+                    upload: FilterUpload {
+                        upload_id: "upload:1".into(),
+                        sample_rate: 48000,
+                        total_taps: 10_000,
+                        received_taps: received.len() as u32,
+                        hash: (received.len() == 10_000).then(|| taps_hash_hex(&received)),
+                    },
+                },
+            );
+        }
+        assert_eq!(received, expected);
+        let r = receive(&mut stream);
+        assert_eq!(
+            r.command,
+            Command::SetOutputFilters {
+                expected_revision: "test:1".into(),
+                outputs: vec![OutputFilterSetting {
+                    output_id: "L".into(),
+                    filter: Some("upload:1".into()),
+                }],
+            }
+        );
+        let mut applied = snapshot();
+        applied.revision = "test:2".into();
+        applied.outputs[0].filter = Some(OutputFilter {
+            origin: FilterOrigin::Live,
+            file: None,
+            state: FilterLoadState::Pending,
+            sample_rate: Some(48000),
+            taps: Some(10_000),
+            hash: Some(taps_hash_hex(&received)),
+            error: None,
+        });
+        send(
+            &mut stream,
+            r.request_id,
+            Reply::Snapshot { snapshot: applied },
+        );
+        // Removing it, the renderer forgets to: the readback says so.
+        let r = receive(&mut stream);
+        assert!(matches!(r.command, Command::SetOutputFilters { .. }));
+        let mut kept = snapshot();
+        kept.revision = "test:3".into();
+        kept.outputs[0].filter = Some(OutputFilter {
+            origin: FilterOrigin::Live,
+            file: None,
+            state: FilterLoadState::Loaded,
+            sample_rate: Some(48000),
+            taps: Some(10_000),
+            hash: None,
+            error: None,
+        });
+        send(
+            &mut stream,
+            r.request_id,
+            Reply::Snapshot { snapshot: kept },
+        );
+    });
+    let mut c = Client::connect(endpoint, Duration::from_secs(1)).unwrap();
+    c.discover().unwrap();
+    let upload = c.upload_filter(48000, &taps).unwrap();
+    assert_eq!(upload, "upload:1");
+    let applied = c
+        .set_output_filters(
+            &snapshot(),
+            vec![OutputFilterSetting {
+                output_id: "L".into(),
+                filter: Some(upload),
+            }],
+        )
+        .unwrap();
+    assert_eq!(
+        applied.outputs[0].filter.as_ref().unwrap().hash.as_deref(),
+        Some(hash.as_str())
+    );
+    let error = c
+        .set_output_filters(
+            &applied,
+            vec![OutputFilterSetting {
+                output_id: "L".into(),
+                filter: None,
+            }],
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("other filters"), "{error}");
+    handle.join().unwrap();
+}
+
+#[test]
+fn filters_and_bass_management_need_protocol_8() {
+    let (endpoint, handle) = server(|mut stream| {
+        let r = receive(&mut stream);
+        // An older renderer refuses this version and names its own.
+        send_version(
+            &mut stream,
+            7,
+            r.request_id,
+            Reply::Error {
+                code: "unsupported_version".into(),
+                message: "use version 7".into(),
+            },
+        );
+        let r = receive(&mut stream);
+        assert_eq!(r.version, 7);
+        send_version(
+            &mut stream,
+            7,
+            r.request_id,
+            Reply::Snapshot {
+                snapshot: snapshot(),
+            },
+        );
+    });
+    let mut c = Client::connect(endpoint, Duration::from_secs(1)).unwrap();
+    c.discover().unwrap();
+    assert_eq!(c.protocol_version(), 7);
+    for error in [
+        c.upload_filter(48000, &[1.0]).unwrap_err(),
+        c.begin_with(&snapshot(), true).unwrap_err(),
+    ] {
+        assert!(error.to_string().contains("protocol 8"), "{error}");
+    }
+    handle.join().unwrap();
+}

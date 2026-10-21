@@ -1054,7 +1054,7 @@ impl CompanionApp {
             let (status, color, mut hover) = match (&speaker.excluded, speaker.summation_db) {
                 (Some(reason), _) => ("left out".to_owned(), WARM, reason.clone()),
                 (None, Some([before, _, after])) => (
-                    format!("{before:.1} → {after:.1} dB"),
+                    format!("{} → {} dB", tenths(before), tenths(after)),
                     if speaker.warnings.is_empty() { ACCENT } else { WARM },
                     "How far the sum around the crossover falls below the two adding in phase, measured → with the proposal (0 dB: perfect).".to_owned(),
                 ),
@@ -3070,6 +3070,11 @@ fn chosen(
             });
         });
     change
+}
+
+/// `value` to a tenth, never as "-0.0".
+fn tenths(value: f64) -> String {
+    format!("{:.1}", (value * 10.0).round() / 10.0 + 0.0)
 }
 
 fn caption(ui: &mut egui::Ui, text: &str) {

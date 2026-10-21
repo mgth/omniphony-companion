@@ -132,7 +132,7 @@ impl Room {
         PositionResponses {
             position_id: id.into(),
             main_seat,
-            speaker: response(&[&self.speaker], self.speaker.arrival_s, seed),
+            speaker: Some(response(&[&self.speaker], self.speaker.arrival_s, seed)),
             subwoofer: Some(response(
                 &[&self.subwoofer],
                 self.subwoofer.arrival_s,
@@ -354,7 +354,7 @@ fn a_speaker_whose_bass_goes_elsewhere_or_whose_sum_does_not_add_up_is_left_out(
     let mut other_bass = quiet.speaker.clone();
     other_bass.ir = impulse(&lr4(110.0, false), 0.3);
     let mut quiet_position = quiet.position("main", true, 1);
-    quiet_position.speaker = response(&[&quiet.speaker, &other_bass], 0.003, 9);
+    quiet_position.speaker = Some(response(&[&quiet.speaker, &other_bass], 0.003, 9));
     quiet_position.sum = response(&[&quiet.speaker, &other_bass, &quiet.subwoofer], 0.003, 10);
     // This one's sum was measured with the subwoofer 4 ms later than its own part.
     let moved = Room::ideal(80.0, 0.003, 0.003, 1.0);
@@ -539,4 +539,34 @@ fn a_subwoofer_sweep_narrower_than_an_octave_is_not_corrected() {
     .unwrap();
     assert!(design.filter.is_none());
     assert!(design.refusal.unwrap().contains("narrower than an octave"));
+}
+
+#[test]
+fn a_subwoofer_that_is_the_timing_reference_gives_the_speaker_part_as_the_rest() {
+    // Silencing the subwoofer would silence the reference: only the sum and the
+    // subwoofer's part are measured.
+    let room = Room::ideal(40.0, 0.004, 0.0, 1.0);
+    let mut position = room.position("main", true, 1);
+    position.speaker = None;
+    let proposal = bass::propose(
+        &[speaker("FL", 40.0, vec![position])],
+        &subwoofer(20.0),
+        None,
+        &Settings::default(),
+    )
+    .unwrap();
+    let result = &proposal.speakers[0];
+    assert!(result.excluded.is_none(), "{result:?}");
+    assert!(result.consistency_db.is_none());
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|w| w.contains("is its timing reference"))
+    );
+    // The subwoofer arrives 4 ms before the speaker.
+    assert!(
+        (proposal.setting.delay_change_ms - 4.0).abs() < 0.1,
+        "{proposal:?}"
+    );
 }
