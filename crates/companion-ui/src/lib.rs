@@ -923,11 +923,7 @@ impl CompanionApp {
                 _ if running == Some(index) => ("measuring…".to_owned(), ACCENT),
                 Some(p) if p.complete(a) => ("measured".to_owned(), ACCENT),
                 Some(p) => (
-                    format!(
-                        "{} / {} speakers",
-                        p.takes.iter().filter(|t| t.accepted).count(),
-                        a.rows.len()
-                    ),
+                    format!("{} / {} speakers", p.usable_count(), a.rows.len()),
                     WARM,
                 ),
                 None => ("not yet".to_owned(), MUTED),

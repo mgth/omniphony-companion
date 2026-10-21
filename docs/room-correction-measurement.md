@@ -142,8 +142,12 @@ Each position is one pass of every speaker of the alignment, with the sweep, lev
 and reference its rows were measured with, in the renderer state of the alignment's
 own passes: its outputs at 0 dB and 0 ms when it measured from zero, put back
 afterwards. Positions are therefore directly comparable with the main seat. The
-alignment must be complete and Omniphony in its original settings (undo an applied
-correction first, apply it again afterwards). Takes use the position id
+alignment must be complete, with no speaker volumes turned since (the manual level
+tool marks that), and Omniphony in its original settings (undo an applied correction
+first, apply it again afterwards). If a write around a position fails, the settings
+are read back and put back; when that cannot be confirmed, the session is marked
+uncertain until a refresh finds Omniphony in a known state. A position counts as
+measured only when every speaker has an accepted take with its response stored. Takes use the position id
 `main-seat/left-30cm` and so on, keep their stored responses, and are saved in a
 `position-<step>-<stamp>` folder of the alignment.
 

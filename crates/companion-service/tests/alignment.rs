@@ -42,6 +42,8 @@ struct Rig {
     batches: Mutex<Vec<Vec<String>>>,
     /// The microphone position of each batch.
     position_ids: Mutex<Vec<String>>,
+    /// Takes store no room response, as when its extraction fails.
+    no_response: AtomicBool,
     /// Addresses the renderer was written to or played through.
     endpoints: Mutex<Vec<SocketAddr>>,
 }
@@ -87,6 +89,7 @@ impl Rig {
             disturb: Mutex::new(Default::default()),
             batches: Mutex::new(vec![]),
             position_ids: Mutex::new(vec![]),
+            no_response: AtomicBool::new(false),
             endpoints: Mutex::new(vec![]),
         }
     }
@@ -231,6 +234,9 @@ impl Backend for Rig {
             }
             let directory = args.out_dir.join(id);
             std::fs::create_dir(&directory).unwrap();
+            if !self.no_response.load(Ordering::Relaxed) {
+                std::fs::write(directory.join("response.json"), "{}").unwrap();
+            }
             let rejection = self.rejected.lock().unwrap().get(id).cloned();
             let rejection = rejection.or_else(|| clipped.then(|| "clipped recording".into()));
             // The level probe reads its peaks from the diagnostics.
@@ -2190,4 +2196,60 @@ fn measuring_from_zero_leaves_a_bass_only_output_as_it_was() {
     assert_eq!(a.rows[2].exclusion(), Some(ExclusionReason::BassOnly));
     assert_eq!(a.corrected_output_ids(), ["L", "R"]);
     assert_eq!(a.apply_blocker(), None);
+}
+
+#[test]
+fn a_position_counts_only_with_stored_responses_and_current_physical_levels() {
+    use companion_service::positions;
+    let root = tempfile::tempdir().unwrap();
+    let rig = Rig::new();
+    let mut a = acquire_with(&rig, root.path(), alignment::Basis::FromZero);
+    rig.no_response.store(true, Ordering::Relaxed);
+    positions::measure(&rig, &mut a, 0, &AtomicBool::new(false), &mut |_, _| {}).unwrap();
+    let capture = &a.positions[0];
+    assert!(capture.takes.iter().all(|t| t.accepted && !t.response));
+    assert!(!capture.complete(&a) && capture.usable_count() == 0);
+    assert_eq!(
+        positions::next_step(&a),
+        Some(0),
+        "the position can be measured again"
+    );
+    // Turned amplifier knobs make the main seat's evidence stale: nothing plays.
+    alignment::invalidate_physical_levels(&mut a).unwrap();
+    let batches = rig.batches.lock().unwrap().len();
+    let error =
+        positions::measure(&rig, &mut a, 1, &AtomicBool::new(false), &mut |_, _| {}).unwrap_err();
+    assert!(error.contains("new alignment"), "{error}");
+    assert_eq!(rig.batches.lock().unwrap().len(), batches);
+}
+
+#[test]
+fn a_lost_reply_while_zeroing_for_a_position_puts_the_settings_back() {
+    use companion_service::positions;
+    let root = tempfile::tempdir().unwrap();
+    let rig = Rig::new();
+    rig.snapshot.lock().unwrap().outputs[1].gain_db = -5.0;
+    rig.snapshot.lock().unwrap().outputs[1].delay_ms = 4.0;
+    let mut a = acquire_with(&rig, root.path(), alignment::Basis::FromZero);
+    let batches = rig.batches.lock().unwrap().len();
+    rig.lose_ack.store(true, Ordering::Relaxed);
+    let error =
+        positions::measure(&rig, &mut a, 0, &AtomicBool::new(false), &mut |_, _| {}).unwrap_err();
+    assert!(error.contains("nothing was measured"), "{error}");
+    assert_eq!(rig.batches.lock().unwrap().len(), batches);
+    let r = rig.snapshot.lock().unwrap().outputs[1].clone();
+    assert_eq!((r.gain_db, r.delay_ms), (-5.0, 4.0));
+    assert!(!a.application_uncertain && a.positions.is_empty());
+    // When the renderer cannot be read back either, the session says it is uncertain.
+    let root = tempfile::tempdir().unwrap();
+    let rig = Rig::new();
+    rig.snapshot.lock().unwrap().outputs[1].gain_db = -5.0;
+    let mut a = acquire_with(&rig, root.path(), alignment::Basis::FromZero);
+    rig.lose_ack.store(true, Ordering::Relaxed);
+    rig.blind_after_lost_ack.store(true, Ordering::Relaxed);
+    let error =
+        positions::measure(&rig, &mut a, 0, &AtomicBool::new(false), &mut |_, _| {}).unwrap_err();
+    assert!(error.contains("could not be confirmed"), "{error}");
+    assert!(a.application_uncertain);
+    assert!(alignment::load(&a.directory).unwrap().application_uncertain);
 }
