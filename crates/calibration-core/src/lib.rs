@@ -9,6 +9,7 @@ mod model;
 mod policy;
 pub mod reason;
 pub mod repeatability;
+pub mod room_correction;
 
 pub use model::*;
 pub use policy::*;

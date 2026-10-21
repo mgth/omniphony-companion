@@ -11,6 +11,7 @@ description = "UI-independent calibration sessions, proposals and verification"
 [dependencies]
 serde.workspace = true
 thiserror.workspace = true
+rustfft = "6.4"
 
 [dev-dependencies]
 serde_json.workspace = true

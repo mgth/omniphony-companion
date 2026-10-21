@@ -3007,3 +3007,71 @@ fn the_setup_rail_guides_the_other_microphone_positions() {
     assert!(central(&frame(&mut app, &ctx, vec![], size), "Front left").is_some());
     assert_eq!(starts.load(Ordering::Relaxed), 0);
 }
+
+#[test]
+fn the_setup_rail_exports_correction_filters_below_the_positions() {
+    use companion_service::room_correction::{OutputSummary, Summary};
+    let ctx = egui::Context::default();
+    let (mut controller, starts) = support::ready();
+    let size = Vec2::new(1160.0, 2200.0);
+    let a = support::room_alignment(&controller);
+    // The synthetic takes stored no response: nothing to design from yet.
+    assert!(controller.state.alignment.is_none());
+    controller.state.alignment = Some(a.clone());
+    assert!(controller.room_correction_readiness().is_err());
+    let output = |id: &str, file: Option<&str>, refusal: Option<&str>| OutputSummary {
+        output_id: id.into(),
+        file: file.map(Into::into),
+        refusal: refusal.map(Into::into),
+        warnings: vec![],
+        calibrated: true,
+        taps: file.map(|_| 8192),
+        sample_rate: file.map(|_| 48000),
+        headroom_db: file.map(|_| 3.5),
+        deepest_cut_db: file.map(|_| -6.0),
+        normalisation_db: file.map(|_| 0.4),
+        band_hz: None,
+        low_limit_hz: None,
+        evaluation_band_hz: None,
+        deviation_db: file.map(|_| [4.2, 1.1]),
+        repeatability_db: None,
+        spread_db: None,
+        positions: vec![],
+        reflections: vec![],
+    };
+    let ids: Vec<String> = a.rows.iter().map(|r| r.output_id.clone()).collect();
+    let summary = Summary {
+        schema_version: 1,
+        method: "synthetic".into(),
+        settings: Default::default(),
+        outputs: vec![
+            output(&ids[0], Some("FL.wav"), None),
+            output(
+                &ids[1],
+                None,
+                Some("A subwoofer or LFE: left to bass integration."),
+            ),
+        ],
+    };
+    controller.state.room_correction = Some((
+        a.directory.clone(),
+        Ok(("synthetic/room-correction-1".into(), summary)),
+    ));
+    let mut app = CompanionApp::preview(&ctx, controller);
+    frame(&mut app, &ctx, vec![], size);
+    let text = labels(&frame(&mut app, &ctx, vec![], size));
+    for needle in [
+        "Correction filters",
+        "Design and export filters",
+        "1 of 2 filters saved in",
+        "4.2 → 1.1 dB",
+        "not corrected",
+    ] {
+        assert!(text.iter().any(|(t, _)| t == needle), "{needle}");
+    }
+    let rail = |needle: &str| text.iter().find(|(t, _)| t == needle).unwrap().1;
+    assert!(rail("Correction filters").top() > rail("Other positions").top());
+    assert!(rail("Correction filters").right() < 310.0);
+    assert!(central(&frame(&mut app, &ctx, vec![], size), "Front left").is_some());
+    assert_eq!(starts.load(Ordering::Relaxed), 0);
+}

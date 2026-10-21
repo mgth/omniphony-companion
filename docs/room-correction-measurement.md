@@ -3,7 +3,9 @@
 Measurements for a future room-correction design step: full-range sweeps at a level
 chosen from a probe, takes that keep the response a correction filter can be designed
 from, and guided microphone positions around the main seat. Nothing here designs, sends or applies a
-filter, and nothing changes timing, levels, alignment proposals or a take's verdict.
+filter, and nothing changes timing, levels, alignment proposals or a take's verdict. The
+filters are designed from these responses as described in
+[room-correction filter design](room-correction-design.md).
 
 ## The stored response
 
