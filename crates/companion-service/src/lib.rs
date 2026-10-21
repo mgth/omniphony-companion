@@ -10,6 +10,7 @@ pub mod level_probe;
 pub mod manual_level;
 pub mod measurement;
 pub mod microphone;
+pub mod positions;
 pub mod preferences;
 pub mod review;
 pub mod room;

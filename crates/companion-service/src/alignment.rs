@@ -158,6 +158,10 @@ pub struct Alignment {
     /// The automatic level probe the passes' sweep levels come from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub level_probe: Option<crate::level_probe::Probe>,
+    /// Responses measured at other microphone positions around this one, for room
+    /// correction only: they never change the rows, the proposal or the delays.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub positions: Vec<crate::positions::PositionCapture>,
 }
 /// How an alignment treats the gains and delays the renderer has when it starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -189,7 +193,7 @@ const MIN_OUTPUT_GAIN_DB: f32 = -60.0;
 fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
-fn stamp() -> u128 {
+pub(crate) fn stamp() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -380,6 +384,7 @@ pub fn capture<B: Backend + ?Sized>(
         retake_snapshots: vec![],
         zeroed_snapshot: None,
         level_probe: None,
+        positions: vec![],
     };
     let mut takes = vec![];
     // Preserve one calibration file for both passes, even if its source is edited.
@@ -591,7 +596,7 @@ fn zeroed(snapshot: &Snapshot, ids: &[String]) -> Snapshot {
 /// Give the outputs of the renderer, found in `current`, the gains and delays they have
 /// in `target`; only the outputs that differ are written. The renderer must read back
 /// `target`.
-fn move_outputs<B: Backend + ?Sized>(
+pub(crate) fn move_outputs<B: Backend + ?Sized>(
     backend: &B,
     endpoint: SocketAddr,
     current: &Snapshot,
@@ -624,7 +629,7 @@ fn move_outputs<B: Backend + ?Sized>(
 
 /// After passes measured from zero, give the outputs, found in `current`, their settings
 /// from before the passes again. Nothing to do when the passes refined them.
-fn put_back<B: Backend + ?Sized>(
+pub(crate) fn put_back<B: Backend + ?Sized>(
     backend: &B,
     a: &mut Alignment,
     current: &Snapshot,

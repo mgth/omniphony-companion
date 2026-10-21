@@ -364,6 +364,7 @@ fn whole_alignment_reanalysis_retains_originals_and_cannot_apply_a_profile() {
         .clone();
     let original = Alignment {
         level_probe: None,
+        positions: vec![],
         schema_version: 1,
         directory: original_dir,
         endpoint: "127.0.0.1:9000".parse().unwrap(),

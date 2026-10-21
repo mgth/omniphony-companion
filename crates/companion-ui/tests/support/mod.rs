@@ -405,6 +405,7 @@ pub fn alignment(
         .collect();
     Alignment {
         level_probe: None,
+        positions: vec![],
         schema_version: 1,
         directory: "synthetic-alignment".into(),
         endpoint: "127.0.0.1:9000".parse().unwrap(),
@@ -562,6 +563,7 @@ pub fn room_alignment(controller: &Controller) -> companion_service::alignment::
         .collect();
     Alignment {
         level_probe: None,
+        positions: vec![],
         schema_version: 1,
         directory: "synthetic-room-alignment".into(),
         endpoint: "127.0.0.1:9000".parse().unwrap(),
@@ -667,6 +669,7 @@ pub fn late_device_alignment(
         .collect();
     Alignment {
         level_probe: None,
+        positions: vec![],
         schema_version: 1,
         directory: directory.to_owned(),
         endpoint: "127.0.0.1:9000".parse().unwrap(),
@@ -913,6 +916,7 @@ pub fn bench_alignment(controller: &mut Controller) -> companion_service::alignm
         .collect();
     Alignment {
         level_probe: None,
+        positions: vec![],
         schema_version: 1,
         directory: "synthetic-bench-alignment".into(),
         endpoint: "127.0.0.1:9000".parse().unwrap(),
