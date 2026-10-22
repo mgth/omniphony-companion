@@ -120,9 +120,16 @@ and range, or that there is none: alignment does not need one, room correction
 will. An unreadable file stops measurements until it is fixed or cleared, as before.
 
 Accepted files have two columns, frequency in Hz and dB, or three with an ignored
-phase column; whitespace or commas separate them. Lines starting with `#`, `;`, `*`
-or a double quote are comments, which covers the UMIK-1 `"Sens Factor …"` header.
-The sensitivity factor is not used: levels stay relative.
+phase column; whitespace or commas separate them. LF, CRLF and classic Mac CR-only
+line endings are read alike, and a leading UTF-8 byte-order mark is ignored. As in
+REW, a line that does not start with a number is not data: comments (`#`, `;`, `*`),
+column headers such as `Hz  dB  Phase` or `Freq(Hz)  SPL(dB)`, and the UMIK-1
+`"Sens Factor …"` header are all skipped. The sensitivity factor is not used:
+levels stay relative. A line that starts with a number (sign or leading `.`
+included) must be a valid point: a finite frequency from 1 Hz to 192 kHz, above the
+previous point's, and a dB value within ±60 dB. Otherwise the file is refused with
+that line's number. A file needs at least two points and is limited to 1 MiB and
+20 000 points.
 
 The file gives the microphone's deviation from flat. `calibrated_magnitude_db` is
 `magnitude_db` minus that deviation, interpolated linearly over log frequency and

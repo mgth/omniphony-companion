@@ -8,17 +8,21 @@ pub struct CalibrationPoint {
 }
 
 /// Common frequency/relative-dB text exports, with an optional third phase column
-/// that is ignored. Comments beginning with #, ; or * and quoted header lines such as
-/// a UMIK-1 `"Sens Factor =…"` are retained in the raw file by the caller, not
-/// interpreted: levels stay relative, so a sensitivity factor is not needed.
+/// that is ignored. CR, CRLF and LF line endings are alike. As in REW, a line that
+/// does not start with a number is not data: comments (`#`, `;`, `*`), column
+/// headers such as `Hz\tdB\tPhase` and a UMIK-1 `"Sens Factor =…"` line are retained
+/// in the raw file by the caller, not interpreted: levels stay relative, so a
+/// sensitivity factor is not needed. A line that does start with a number must be a
+/// valid point, in increasing frequency.
 pub fn parse(text: &str) -> Result<Vec<CalibrationPoint>, String> {
     if text.len() > 1024 * 1024 {
         return Err("calibration file exceeds 1 MiB".into());
     }
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut points: Vec<CalibrationPoint> = Vec::new();
-    for (index, line) in text.lines().enumerate() {
+    for (index, line) in lines(text).enumerate() {
         let line = line.trim();
-        if line.is_empty() || line.starts_with(['#', ';', '*', '"']) {
+        if !starts_with_number(line) {
             continue;
         }
         let values: Vec<_> = line
@@ -27,14 +31,16 @@ pub fn parse(text: &str) -> Result<Vec<CalibrationPoint>, String> {
             .collect();
         if !(2..=3).contains(&values.len()) {
             return Err(format!(
-                "calibration line {} needs frequency and dB",
+                "calibration needs frequency and dB on line {}",
                 index + 1
             ));
         }
         let frequency_hz: f64 = values[0]
             .parse()
-            .map_err(|_| "invalid calibration frequency")?;
-        let correction_db: f64 = values[1].parse().map_err(|_| "invalid calibration dB")?;
+            .map_err(|_| format!("invalid calibration frequency on line {}", index + 1))?;
+        let correction_db: f64 = values[1]
+            .parse()
+            .map_err(|_| format!("invalid calibration dB on line {}", index + 1))?;
         if values
             .get(2)
             .is_some_and(|phase| phase.parse::<f64>().is_err())
@@ -66,6 +72,20 @@ pub fn parse(text: &str) -> Result<Vec<CalibrationPoint>, String> {
         return Err("calibration requires at least two frequency points".into());
     }
     Ok(points)
+}
+
+/// Lines ended by LF, CRLF or a lone CR (classic Mac OS exports).
+fn lines(text: &str) -> impl Iterator<Item = &str> {
+    text.split('\n')
+        .flat_map(|line| line.strip_suffix('\r').unwrap_or(line).split('\r'))
+}
+
+/// Whether `line` opens with a decimal number (`20`, `-0.5`, `+.5`, `.5`). A signed
+/// line counts, so a negative frequency is rejected rather than skipped.
+fn starts_with_number(line: &str) -> bool {
+    let rest = line.strip_prefix(['+', '-']).unwrap_or(line);
+    let rest = rest.strip_prefix('.').unwrap_or(rest);
+    rest.starts_with(|c: char| c.is_ascii_digit())
 }
 
 /// A parsed calibration: the microphone's deviation from flat, as the file states it.
@@ -133,6 +153,59 @@ mod tests {
         let umik = "\"Sens Factor =-.7742dB, AGain =18dB, SERNO: 7101234\"\n10.054\t-2.8\n1000.0\t0.0\n20000\t-1.5\n";
         assert_eq!(parse(umik).unwrap().len(), 3);
         assert_eq!(parse("20,-1.0,12.5\n200,0.5,-3").unwrap().len(), 2);
+    }
+    #[test]
+    fn classic_mac_export_with_a_plain_header_is_read() {
+        // The shape of the generic Behringer ECM8000 file from Sonic Studio: CR-only
+        // line endings, an unquoted `Hz dB Phase` header and no final line ending.
+        let ecm8000 = "Hz\tdB\tPhase\r20.0000\t-0.070\t31.90\r25.1785\t0.137\t25.80\r\
+            31.6978\t0.275\t20.20\r1000.0000\t0.000\t0.00\r21164.4000\t-4.460\t-16.00\r\
+            21999.0000\t-4.920\t-15.00";
+        let points = parse(ecm8000).unwrap();
+        assert_eq!(points.len(), 6);
+        assert_eq!(points[0].frequency_hz, 20.0);
+        assert_eq!(points[0].correction_db, -0.07);
+        assert_eq!(points[5].frequency_hz, 21999.0);
+        assert_eq!(points[5].correction_db, -4.92);
+    }
+    #[test]
+    fn umik_style_crlf_export_is_read() {
+        let umik = "\u{feff}\"Sens Factor =-1.378dB, AGain =18dB, SERNO: 7000000\"\r\n\
+            10.054\t-4.6501\r\n10.179\t-4.5235\r\n1000.000\t0.0000\r\n20000.000\t-0.9310\r\n";
+        let points = parse(umik).unwrap();
+        assert_eq!(points.len(), 4);
+        assert_eq!(points[0].frequency_hz, 10.054);
+        assert_eq!(points[3].correction_db, -0.931);
+    }
+    #[test]
+    fn dayton_style_export_is_read() {
+        // A sensitivity line, a column header with units, space-padded columns with
+        // trailing blanks and a blank last line.
+        let dayton = "*1kHz\t-41.6\r\nFreq(Hz)  SPL(dB)  Phase(degrees)\r\n\
+             20.00   -0.42   12.3 \r\n 100.00  +0.10   -1.0 \r\n1000.00   0.00    0.0\r\n\
+            20000.00  2.35  -45.0\r\n\r\n";
+        let points = parse(dayton).unwrap();
+        assert_eq!(points.len(), 4);
+        assert_eq!(points[1].correction_db, 0.1);
+        assert_eq!(points[3].frequency_hz, 20000.0);
+    }
+    #[test]
+    fn malformed_or_unsorted_numeric_lines_are_rejected_with_their_line() {
+        for (text, line) in [
+            ("Hz\tdB\tPhase\r100\t0\t0\r20\t0\t0", 3),
+            ("Hz dB\r\n20 0\r\n1k 0\r\n2000 1", 3),
+            ("# header\n20 0\n100 0 x\n200 0", 3),
+            ("-20 0\r100 0", 1),
+            (".5x 0\r100 0", 1),
+            ("Hz dB\r20\r100 0", 2),
+        ] {
+            let error = parse(text).unwrap_err();
+            assert!(
+                error.ends_with(&format!("line {line}")),
+                "{text:?}: {error}"
+            );
+        }
+        assert!(parse("Hz dB\r20 0\rend of data").is_err());
     }
     #[test]
     fn deviation_interpolates_over_log_frequency_and_holds_the_ends() {
