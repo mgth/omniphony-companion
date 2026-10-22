@@ -230,7 +230,9 @@ The following work is retained for after mission 1:
 4. Fit bounded parametric EQ to a target, favoring cuts; preview and remeasure.
 5. Align speakers/subwoofers and optimize multiple subwoofers through gains,
    polarities and delays using their complex acoustic sum and shared timing.
-6. Add minimum-phase FIR correction with a defined latency/runtime budget.
+6. Add minimum-phase FIR correction with a defined latency/runtime budget. Designed,
+   applied over measurement protocol 8, compared and confirmed by measuring again
+   (`docs/room-correction.md`); not yet run against a real renderer or listened to.
 7. Evaluate excess-phase and modal-tail correction separately, only where repeatable
    improvements survive validation at other positions.
 

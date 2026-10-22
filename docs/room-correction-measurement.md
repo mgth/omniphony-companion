@@ -1,6 +1,6 @@
 # Room-correction measurements
 
-Measurements for a future room-correction design step: full-range sweeps at a level
+Measurements for the room-correction design step: full-range sweeps at a level
 chosen from a probe, takes that keep the response a correction filter can be designed
 from, and guided microphone positions around the main seat. Nothing here designs, sends or applies a
 filter, and nothing changes timing, levels, alignment proposals or a take's verdict. The
@@ -136,7 +136,7 @@ capture report stay uncalibrated.
 
 Delays and levels are aligned for the main seat, the alignment's `position_id`. A
 correction filter is better designed from several nearby points, so the setup rail's
-**04 Other positions** guides five more, each from the main seat: 30 cm left, 30 cm
+**04 Room correction** guides five more, each from the main seat: 30 cm left, 30 cm
 right, 30 cm forward (toward the screen), 30 cm back, and 15 cm higher. It shows
 which are measured, the next instruction and **Measure position N**.
 
@@ -145,8 +145,10 @@ and reference its rows were measured with, in the renderer state of the alignmen
 own passes: its outputs at 0 dB and 0 ms when it measured from zero, put back
 afterwards. Positions are therefore directly comparable with the main seat. The
 alignment must be complete, with no speaker volumes turned since (the manual level
-tool marks that), and Omniphony in its original settings (undo an applied correction
-first, apply it again afterwards). If a write around a position fails, the settings
+tool marks that). An applied alignment is set to the passes' state for the position and
+put back afterwards, and every speaker plays without its current correction filter
+(`bypass_output_filters`), so a position measured after a correction is applied
+compares with the main seat. If a write around a position fails, the settings
 are read back and put back; when that cannot be confirmed, the session is marked
 uncertain until a refresh finds Omniphony in a known state. A position counts as
 measured only when every speaker has an accepted take with its response stored. Takes use the position id

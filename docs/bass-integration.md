@@ -17,25 +17,29 @@ measurement protocol 8.
 
 ## Use
 
-After an alignment (applied: the subwoofer is timed against the speakers' delays as
-Omniphony has them, and a later Apply or Undo of the alignment makes these
-measurements stale), the setup rail's **06 Subwoofer**:
+The subwoofer is part of the guided [room correction](room-correction.md) step, in the
+setup rail's **04 Room correction**, after an alignment (applied: the subwoofer is timed
+against the speakers' delays as Omniphony has them, and a later Apply or Undo of the
+alignment makes these measurements stale):
 
 1. **Measure the subwoofer** with the microphone at the main seat. A quiet level probe
    first, then every part described below. About a minute per group of speakers.
-2. Optionally **Position 1** to **5**: the same at the guided positions around the seat
-   (30 cm left, right, forward, back, 15 cm higher), which the proposal averages, the
-   main seat counting twice.
-3. Read the proposal: the subwoofer's delay, level change, polarity, the deepest cut of
-   its mode correction, and per speaker how far its sum around the crossover falls
-   below the two adding in phase, measured → proposed (hover for the subwoofer's
-   lateness from the phase, the balance below and above the crossover and warnings).
-4. **Apply** sends the subwoofer's delay and level with `set_outputs` (and, when it
-   would need less than no delay, the same added delay to every other output) and its
-   filter with `set_output_filters`. Live only: they reach `config.yaml` only through
-   Studio's Save. **Undo** puts the subwoofer back as measured, without its filter.
-5. **Confirm** with the microphone back at the main seat: every speaker's sum is
-   measured again through the filters and compared with the prediction.
+2. **Measure position 1** to **5** measure the subwoofer too, once it was measured at
+   the main seat: the same at the guided positions around the seat (30 cm left, right,
+   forward, back, 15 cm higher), which the proposal averages, the main seat counting
+   twice.
+3. Read the proposal on the subwoofer's card (delay, level change, polarity, mode
+   correction) and, in its drawer, how far each speaker's sum around the crossover
+   falls below the two adding in phase, measured and proposed.
+4. The room correction's **Apply** sends the subwoofer's filter in the same
+   `set_output_filters` as the speakers' filters, then its delay and level with
+   `set_outputs` (and, when it would need less than no delay, the same added delay to
+   every other output). Live only: they reach `config.yaml` only through Studio's
+   Save. **Undo** puts the subwoofer back as measured, without its filter. Turning
+   **Integrate the subwoofer** off in Lab's correction settings leaves it as it is.
+5. **Confirm by re-measuring**, with the microphone back at the main seat, also
+   measures every speaker's sum again through the filters and compares it with the
+   prediction.
 
 `omniphony-companion bass-integration --alignment DIR` analyses saved measurements
 again offline and writes a new `bass-integration-<stamp>` folder; nothing is sent.
