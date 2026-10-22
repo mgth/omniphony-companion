@@ -166,6 +166,14 @@ pub struct Alignment {
     /// applied ([`crate::bass`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bass: Option<crate::bass::BassIntegration>,
+    /// The room correction computed from this alignment and where it stands
+    /// ([`crate::correction`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correction: Option<crate::correction::Correction>,
+    /// The outputs whose correction filter played during the passes: empty when the
+    /// passes held the filters off. `None` on sessions from before it was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filtered_outputs: Option<Vec<String>>,
 }
 /// How an alignment treats the gains and delays the renderer has when it starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -390,6 +398,8 @@ pub fn capture<B: Backend + ?Sized>(
         level_probe: None,
         positions: vec![],
         bass: None,
+        correction: None,
+        filtered_outputs: Some(filtered_outputs(&request)),
     };
     let mut takes = vec![];
     // Preserve one calibration file for both passes, even if its source is edited.
@@ -1733,6 +1743,8 @@ pub fn reconcile(a: &mut Alignment, live: &Snapshot) -> Result<bool, String> {
             _ => {}
         }
     }
+    // The room correction's filters: independent of the gains and delays.
+    bass_changed |= crate::correction::reconcile(a, live);
     let state = a.live_state(live);
     if a.application_uncertain && state == LiveState::Other {
         if bass_changed {
@@ -1947,7 +1959,6 @@ pub fn request(
 ) -> Result<MeasureRequest, String> {
     Ok(MeasureRequest {
         endpoint,
-        snapshot,
         device: s.device.clone().ok_or("choose microphone")?,
         input_channel: s.input_channel,
         sample_rate: s.sample_rate,
@@ -1960,8 +1971,28 @@ pub fn request(
         sweep: s.sweep,
         out_dir,
         bass_managed: false,
-        bypass_output_filters: false,
+        // Speakers measured for a correction play without the filters they have, so a
+        // design never corrects a correction twice.
+        bypass_output_filters: has_filters(&snapshot),
+        snapshot,
     })
+}
+/// The outputs whose correction filter plays through `request`'s session.
+pub(crate) fn filtered_outputs(request: &MeasureRequest) -> Vec<String> {
+    if request.bypass_output_filters {
+        return vec![];
+    }
+    request
+        .snapshot
+        .outputs
+        .iter()
+        .filter(|o| o.filter.is_some())
+        .map(|o| o.id.clone())
+        .collect()
+}
+/// Whether any output of `snapshot` plays a correction filter (protocol 8 only).
+pub fn has_filters(snapshot: &Snapshot) -> bool {
+    snapshot.outputs.iter().any(|o| o.filter.is_some())
 }
 pub fn save(a: &Alignment) -> Result<(), String> {
     let mut pending = tempfile::NamedTempFile::new_in(&a.directory).map_err(err)?;
@@ -1982,6 +2013,9 @@ pub fn load(directory: &Path) -> Result<Alignment, String> {
         a.targets(false)?;
     }
     a.directory = directory.to_owned();
+    if let Some(c) = &mut a.correction {
+        crate::correction::attach_curves(c);
+    }
     Ok(a)
 }
 

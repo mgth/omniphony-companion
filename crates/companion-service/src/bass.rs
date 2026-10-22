@@ -1117,7 +1117,7 @@ fn file_name(id: &str) -> String {
 }
 
 /// The taps of `file`, checked against the hash the analysis recorded.
-fn read_filter(file: &FilterFile) -> Result<Vec<f32>, String> {
+pub(crate) fn read_filter(file: &FilterFile) -> Result<Vec<f32>, String> {
     let mut wav = hound::WavReader::open(&file.file).map_err(|e| e.to_string())?;
     let spec = wav.spec();
     if spec.channels != 1
@@ -1386,6 +1386,8 @@ pub fn verify<B: Backend + ?Sized>(
             .calibration
             .map(|_| a.directory.join(room_response::CALIBRATION_FILE));
         request.bass_managed = true;
+        // Through the filters, the subwoofer's own included.
+        request.bypass_output_filters = false;
         let batch = sweep_plan::measure_groups(
             backend,
             &request,

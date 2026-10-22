@@ -758,3 +758,119 @@ fn a_confirmation_that_fails_leaves_no_earlier_result_current() {
     let reloaded = alignment::load(&a.directory).unwrap();
     assert!(reloaded.bass.unwrap().verification.is_none());
 }
+
+#[test]
+fn the_room_correction_applies_and_undoes_the_subwoofer_with_the_speakers_filters() {
+    use companion_service::{
+        correction::{self, Correction, Live, SpeakerFilter, Taps, Target},
+        room_correction::{OutputSummary, Summary},
+    };
+    let root = tempfile::tempdir().unwrap();
+    let rig = Rig::new();
+    let mut a = alignment_for(&rig, root.path());
+    let original = rig.discover(a.endpoint).unwrap();
+    bass::measure(&rig, &mut a, None, &AtomicBool::new(false), &mut |_, _| {}).unwrap();
+    let proposal = a.bass.as_ref().unwrap().analysis.clone().unwrap();
+    let sub_hash = proposal.filter.as_ref().unwrap().hash.clone();
+    // FL's room correction filter, as a computation exports it.
+    let directory = a.directory.join("room-correction-test");
+    std::fs::create_dir_all(&directory).unwrap();
+    let taps = vec![0.9_f32, 0.05, -0.01];
+    let file = directory.join("FL.wav");
+    let mut w = hound::WavWriter::create(
+        &file,
+        hound::WavSpec {
+            channels: 1,
+            sample_rate: 48000,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        },
+    )
+    .unwrap();
+    for &t in &taps {
+        w.write_sample(t).unwrap();
+    }
+    w.finalize().unwrap();
+    let summary: OutputSummary = serde_json::from_value(serde_json::json!({
+        "output_id": "FL", "file": "FL.wav", "refusal": null, "warnings": [],
+        "calibrated": true, "taps": 3, "sample_rate": 48000, "headroom_db": 0.0,
+        "deepest_cut_db": -1.0, "normalisation_db": 0.0, "band_hz": null,
+        "low_limit_hz": null, "evaluation_band_hz": null, "deviation_db": [2.0, 1.0],
+        "repeatability_db": null, "spread_db": null, "positions": [], "reflections": []
+    }))
+    .unwrap();
+    a.correction = Some(Correction {
+        choices: Default::default(),
+        settings: Default::default(),
+        directory: directory.clone(),
+        summary: Summary {
+            schema_version: 1,
+            method: "test".into(),
+            settings: Default::default(),
+            outputs: vec![summary],
+        },
+        filters: vec![SpeakerFilter {
+            output_id: "FL".into(),
+            taps: Taps {
+                file,
+                sample_rate: 48000,
+                taps: taps.len(),
+                hash: protocol::taps_hash_hex(&taps),
+            },
+        }],
+        previous: vec![],
+        applied: None,
+        uncertain: false,
+        subwoofer: false,
+        verification: None,
+        verification_note: None,
+        curves: vec![],
+    });
+    let endpoint = a.endpoint;
+    let hash = |id: &str| {
+        rig.discover(endpoint)
+            .unwrap()
+            .outputs
+            .iter()
+            .find(|o| o.id == id)
+            .unwrap()
+            .filter
+            .as_ref()
+            .and_then(|f| f.hash.clone())
+    };
+    let lfe = |s: &Snapshot| {
+        let o = s.outputs.iter().find(|o| o.id == "LFE").unwrap();
+        (f64::from(o.gain_db), f64::from(o.delay_ms))
+    };
+
+    // Apply: FL's filter and the subwoofer's in one write, then its delay and level.
+    let applied = correction::apply(&rig, &mut a, Target::Corrected).unwrap();
+    assert_eq!(hash("FL"), Some(protocol::taps_hash_hex(&taps)));
+    assert_eq!(hash("LFE"), Some(sub_hash.clone()));
+    let (gain, delay) = lfe(&applied);
+    assert!((delay - proposal.proposal.subwoofer_delay_ms).abs() < 1e-3);
+    assert!((gain - proposal.proposal.subwoofer_gain_db).abs() < 1e-3);
+    assert!(a.correction.as_ref().unwrap().subwoofer);
+    assert!(a.bass.as_ref().unwrap().is_applied());
+    assert!(!a.application_uncertain);
+    assert!(!alignment::reconcile(&mut a, &applied).unwrap());
+
+    // Listening to the original switches FL only: the subwoofer stays integrated.
+    correction::apply(&rig, &mut a, Target::Compare).unwrap();
+    assert_eq!(hash("FL"), Some(correction::identity_hash()));
+    assert_eq!(hash("LFE"), Some(sub_hash));
+    assert_eq!(lfe(&rig.discover(a.endpoint).unwrap()), (gain, delay));
+    correction::apply(&rig, &mut a, Target::Corrected).unwrap();
+
+    // Undo: the subwoofer as measured, without a filter, and FL without one.
+    correction::apply(&rig, &mut a, Target::Original).unwrap();
+    let after = rig.discover(a.endpoint).unwrap();
+    assert_eq!(hash("FL"), None);
+    assert_eq!(hash("LFE"), None);
+    assert!(omniphony_adapter::same_installation(&after, &original));
+    assert!(!a.bass.as_ref().unwrap().is_applied());
+    assert_eq!(
+        a.correction.as_ref().unwrap().live_state(&after),
+        Live::Original
+    );
+}

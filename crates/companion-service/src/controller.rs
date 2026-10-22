@@ -81,6 +81,12 @@ pub trait Backend: Send + Sync + 'static {
     }
     fn inputs(&self) -> Result<Vec<InputDevice>, String>;
     fn discover(&self, endpoint: SocketAddr) -> Result<Snapshot, String>;
+    /// [`Self::discover`] with the measurement protocol version the renderer speaks: an
+    /// older renderer negotiates down and cannot take correction filters.
+    fn discover_versioned(&self, endpoint: SocketAddr) -> Result<(Snapshot, u32), String> {
+        self.discover(endpoint)
+            .map(|s| (s, omniphony_adapter::protocol::VERSION))
+    }
     fn measure(
         &self,
         request: MeasureRequest,
@@ -142,6 +148,14 @@ impl Backend for LiveBackend {
     fn discover(&self, endpoint: SocketAddr) -> Result<Snapshot, String> {
         Client::connect(endpoint, Duration::from_secs(2))
             .and_then(|mut client| client.discover())
+            .map_err(|e| e.to_string())
+    }
+    fn discover_versioned(&self, endpoint: SocketAddr) -> Result<(Snapshot, u32), String> {
+        Client::connect(endpoint, Duration::from_secs(2))
+            .and_then(|mut client| {
+                let snapshot = client.discover()?;
+                Ok((snapshot, client.protocol_version()))
+            })
             .map_err(|e| e.to_string())
     }
     fn use_speaker_output(&self, endpoint: SocketAddr) -> Result<Snapshot, String> {
@@ -260,8 +274,18 @@ pub enum Job {
         output_ids: Vec<String>,
         current: usize,
     },
-    /// Designing the current alignment's room-correction filters and exporting them.
+    /// Designing the current alignment's room correction and exporting its filters.
     RoomCorrection,
+    /// The room correction applied, compared, or undone.
+    ApplyCorrection {
+        target: crate::correction::Target,
+    },
+    /// The applied room correction measured again at the main seat, then the
+    /// subwoofer's sums when it was applied with it.
+    VerifyCorrection {
+        output_ids: Vec<String>,
+        current: usize,
+    },
     /// The subwoofer's integration measured at the main seat (`step` `None`) or at a
     /// guide step, the speakers of its plan in order.
     Bass {
@@ -292,9 +316,6 @@ pub enum Job {
         current: usize,
     },
 }
-
-/// Where an alignment's correction filters were exported, and what was exported.
-pub type RoomCorrectionExport = (PathBuf, crate::room_correction::Summary);
 
 /// A take with the settings it was measured with and its speaker.
 type RecordedTake = (Settings, String, TakeOutcome);
@@ -327,9 +348,8 @@ pub struct State {
     pub manual_run: Option<manual_level::Run>,
     pub manual_reference: Option<manual_level::Reference>,
     pub alignment: Option<alignment::Alignment>,
-    /// The last room-correction export, with the folder of the alignment it was
-    /// designed from: its folder and summary, or why it failed.
-    pub room_correction: Option<(PathBuf, Result<RoomCorrectionExport, String>)>,
+    /// The measurement protocol version the connected renderer speaks.
+    pub protocol_version: Option<u32>,
     pub review: Option<SavedReview>,
     pub review_error: Option<String>,
     pub inputs: Vec<InputDevice>,
@@ -400,7 +420,12 @@ enum Event {
         Result<(Snapshot, Vec<RecordedTake>), String>,
     ),
     AlignmentLoaded(Box<Result<LoadedAlignment, String>>),
-    PositionMeasured(Box<alignment::Alignment>, Result<(), String>),
+    /// A guided position measured; the renderer as read back after it.
+    PositionMeasured(
+        Box<alignment::Alignment>,
+        Result<(), String>,
+        Option<Snapshot>,
+    ),
     /// A subwoofer measurement, Apply, Undo or Confirm finished; the renderer as read
     /// back after an Apply or Undo.
     BassUpdated(
@@ -408,14 +433,20 @@ enum Event {
         Result<Option<Snapshot>, String>,
         Option<Snapshot>,
     ),
-    RoomCorrectionExported(PathBuf, Box<Result<RoomCorrectionExport, String>>),
+    /// A room correction computed, applied, compared, undone or confirmed; the renderer
+    /// as read back after it.
+    CorrectionUpdated(
+        Box<alignment::Alignment>,
+        Result<(), String>,
+        Option<Snapshot>,
+    ),
     Reviewed(Box<Result<SavedReview, String>>),
     SavedTakeLoaded(PathBuf, Box<Result<TakeOutcome, String>>),
     OutputSwitched(Result<Snapshot, String>),
     Inputs(Result<Vec<InputDevice>, String>),
     Discovered(
         SocketAddr,
-        Result<Snapshot, String>,
+        Result<(Snapshot, u32), String>,
         Option<Box<Result<alignment::Alignment, String>>>,
     ),
     Progress(MeasureProgress),
@@ -442,6 +473,8 @@ pub struct Controller {
     pub chosen_alignment_basis: Option<alignment::Basis>,
     /// The calibration file last read, by path: re-read only when the path changes.
     calibration: Option<(String, Result<crate::room_response::CalibrationUse, String>)>,
+    /// The settings the next room correction is computed with.
+    pub correction_choices: crate::correction::Choices,
 }
 impl Default for Controller {
     fn default() -> Self {
@@ -463,6 +496,7 @@ impl Controller {
             startup_endpoint: None,
             chosen_alignment_basis: None,
             calibration: None,
+            correction_choices: Default::default(),
         }
     }
     /// The microphone calibration the next takes will use: `None` without a file,
@@ -496,6 +530,7 @@ impl Controller {
                     | Job::Position { .. }
                     | Job::Bass { .. }
                     | Job::VerifyBass { .. }
+                    | Job::VerifyCorrection { .. }
             )
         )
     }
@@ -824,6 +859,7 @@ impl Controller {
             return;
         }
         self.state.snapshot = None;
+        self.state.protocol_version = None;
         self.state.endpoint = None;
         self.state.connection_error = None;
     }
@@ -845,11 +881,11 @@ impl Controller {
         let sender = self.sender.clone();
         let alignment = self.state.alignment.clone();
         std::thread::spawn(move || {
-            let result = catch_job(|| backend.discover(endpoint));
+            let result = catch_job(|| backend.discover_versioned(endpoint));
             // Whichever port or process it is, record whether this renderer has the
             // alignment's original or corrected settings.
             let reconciled = match (&result, alignment) {
-                (Ok(live), Some(mut a)) => Some(Box::new(catch_job(|| {
+                (Ok((live, _)), Some(mut a)) => Some(Box::new(catch_job(|| {
                     a.endpoint = endpoint;
                     alignment::reconcile(&mut a, live).map(|_| a)
                 }))),
@@ -1097,6 +1133,9 @@ impl Controller {
         self.state.alignment.as_ref().is_some_and(|a| {
             a.application_uncertain
                 || a.bass.as_ref().is_some_and(|b| b.is_applied())
+                || a.correction
+                    .as_ref()
+                    .is_some_and(|c| c.uncertain || c.applied.is_some())
                 || a.applied_snapshot.is_some()
                     && self.alignment_live_state() == Some(alignment::LiveState::Applied)
         })
@@ -1400,7 +1439,20 @@ impl Controller {
         let first = a.rows.first().ok_or("The alignment has no speakers.")?;
         self.can_measure(&first.output_id)
     }
-    /// Measure the current alignment's speakers at guide step `step`.
+    /// Whether the subwoofer's integration is measured at guide step `step` with the
+    /// speakers: chosen, and measured at the main seat first.
+    pub fn position_includes_subwoofer(&self, step: usize) -> bool {
+        self.correction_choices.with_subwoofer
+            && self
+                .state
+                .alignment
+                .as_ref()
+                .and_then(|a| a.bass.as_ref())
+                .is_some_and(|b| b.capture(None).is_some())
+            && self.bass_readiness(Some(step)).is_ok()
+    }
+    /// Measure the current alignment's speakers at guide step `step`, and the
+    /// subwoofer's integration there when [`Self::position_includes_subwoofer`].
     pub fn measure_position(&mut self, step: usize) {
         if let Err(error) = self.position_readiness() {
             self.state.error = Some(error);
@@ -1410,9 +1462,15 @@ impl Controller {
             return;
         };
         a.endpoint = self.state.endpoint.expect("checked by position_readiness");
+        let subwoofer = self.position_includes_subwoofer(step);
+        let mut output_ids: Vec<String> = a.rows.iter().map(|r| r.output_id.clone()).collect();
+        let speakers = output_ids.len();
+        if subwoofer && let Some(b) = &a.bass {
+            output_ids.extend(b.plan.speakers());
+        }
         self.state.job = Some(Job::Position {
             step,
-            output_ids: a.rows.iter().map(|r| r.output_id.clone()).collect(),
+            output_ids,
             current: 0,
         });
         self.state.progress = Some(MeasureProgress::Preparing);
@@ -1428,10 +1486,24 @@ impl Controller {
             let result = catch_job(|| {
                 crate::positions::measure(backend.as_ref(), &mut a, step, &cancel, &mut |i, p| {
                     let _ = sender.send(Event::BatchProgress(i, p));
-                })
-                .map(|_| ())
+                })?;
+                if subwoofer && !cancel.load(Ordering::Relaxed) {
+                    crate::bass::measure(
+                        backend.as_ref(),
+                        &mut a,
+                        Some(step),
+                        &cancel,
+                        &mut |i, p| {
+                            let _ = sender.send(Event::BatchProgress(speakers + i, p));
+                        },
+                    )?;
+                }
+                Ok(())
             });
-            let _ = sender.send(Event::PositionMeasured(Box::new(a), result));
+            // Moving outputs for the position and back gives the renderer a newer
+            // revision: read it again, whatever happened.
+            let live = backend.discover(a.endpoint).ok();
+            let _ = sender.send(Event::PositionMeasured(Box::new(a), result, live));
         });
     }
     /// The current alignment, the connected renderer and its address, when the
@@ -1610,48 +1682,165 @@ impl Controller {
             let _ = sender.send(Event::BassUpdated(Box::new(a), result, live));
         });
     }
-    /// Whether the current alignment's correction filters can be designed now; the
-    /// error says why not. No renderer is needed: only stored responses are read.
-    pub fn room_correction_readiness(&self) -> Result<(), String> {
+    /// Whether the current alignment's room correction can be computed now, and what
+    /// would make it weaker. No renderer is needed: only stored responses are read.
+    pub fn correction_readiness(&self) -> crate::correction::Readiness {
         if self.busy() {
-            return Err("Wait for the current operation to finish.".into());
+            return crate::correction::Readiness {
+                blocker: Some("Wait for the current operation to finish.".into()),
+                ..Default::default()
+            };
         }
-        let a = self
-            .state
-            .alignment
-            .as_ref()
-            .ok_or("Align levels and delays at the main seat first.")?;
-        crate::room_correction::readiness(a)
+        let Some(a) = self.state.alignment.as_ref() else {
+            return crate::correction::Readiness {
+                blocker: Some("Align levels and delays at the main seat first.".into()),
+                ..Default::default()
+            };
+        };
+        crate::correction::readiness(a, self.state.snapshot.as_ref(), self.state.protocol_version)
     }
-    /// Design one correction filter per speaker of the current alignment and export them
-    /// as WAV files in a new folder of the alignment. Nothing is sent to Omniphony.
-    pub fn export_room_correction(&mut self) {
-        if let Err(error) = self.room_correction_readiness() {
+    /// Design the current alignment's room correction, export its filters as WAV files
+    /// in a new folder of the alignment and record it there. Nothing is sent to
+    /// Omniphony.
+    pub fn compute_correction(&mut self) {
+        if let Some(error) = self.correction_readiness().blocker {
             self.state.error = Some(error);
             return;
         }
-        let Some(a) = self.state.alignment.clone() else {
+        let Some(mut a) = self.state.alignment.clone() else {
             return;
         };
         self.state.job = Some(Job::RoomCorrection);
         self.state.error = None;
-        let sender = self.sender.clone();
+        let (sender, choices) = (self.sender.clone(), self.correction_choices);
         std::thread::spawn(move || {
-            let result = catch_job(|| crate::room_correction::design_and_export(&a));
-            let _ = sender.send(Event::RoomCorrectionExported(
-                a.directory.clone(),
-                Box::new(result),
-            ));
+            let result = catch_job(|| {
+                let correction = crate::correction::compute(&a, choices)?;
+                a.correction = Some(correction);
+                alignment::save(&a)
+            });
+            let _ = sender.send(Event::CorrectionUpdated(Box::new(a), result, None));
         });
     }
-    /// The last export of the current alignment's filters, if any.
-    pub fn room_correction(&self) -> Option<&Result<RoomCorrectionExport, String>> {
-        let a = self.state.alignment.as_ref()?;
-        self.state
-            .room_correction
-            .as_ref()
-            .filter(|(directory, _)| *directory == a.directory)
-            .map(|(_, result)| result)
+    /// Where the connected renderer stands with the current alignment's correction.
+    pub fn correction_live_state(&self) -> Option<crate::correction::Live> {
+        let c = self.state.alignment.as_ref()?.correction.as_ref()?;
+        Some(c.live_state(self.state.snapshot.as_ref()?))
+    }
+    /// Whether the correction can be taken to `target` now; the error says why not.
+    pub fn correction_apply_readiness(
+        &self,
+        target: crate::correction::Target,
+    ) -> Result<(), String> {
+        let (a, live) = self.connected_alignment()?;
+        crate::correction::apply_readiness(
+            a,
+            live,
+            self.state.protocol_version.unwrap_or(0),
+            target,
+        )
+    }
+    /// Apply the correction, switch it for listening, or undo it.
+    pub fn apply_correction(&mut self, target: crate::correction::Target) {
+        if let Err(error) = self.correction_apply_readiness(target) {
+            self.state.error = Some(error);
+            return;
+        }
+        let Some(mut a) = self.state.alignment.clone() else {
+            return;
+        };
+        a.endpoint = self.state.endpoint.expect("checked by the readiness");
+        self.state.job = Some(Job::ApplyCorrection { target });
+        self.start_correction_job(a, move |backend, a, _, _| {
+            crate::correction::apply(backend, a, target).map(Some)
+        });
+    }
+    /// Whether the applied correction can be confirmed now.
+    pub fn correction_verify_readiness(&self) -> Result<(), String> {
+        let (a, live) = self.connected_alignment()?;
+        crate::correction::verify_readiness(a, live)?;
+        if self.settings != a.settings {
+            return Err(
+                "Restore the measurement settings this alignment was captured with.".into(),
+            );
+        }
+        if self.selected_input().is_some_and(|i| i.is_monitor) {
+            return Err("Choose an acoustic microphone, not a sink monitor.".into());
+        }
+        let first = crate::correction::verified_outputs(a);
+        self.output_readiness(first.first().map_or("", String::as_str))
+    }
+    /// Measure the corrected speakers again at the main seat, through their filters.
+    pub fn verify_correction(&mut self) {
+        if let Err(error) = self.correction_verify_readiness() {
+            self.state.error = Some(error);
+            return;
+        }
+        let Some(mut a) = self.state.alignment.clone() else {
+            return;
+        };
+        a.endpoint = self.state.endpoint.expect("checked by the readiness");
+        let mut output_ids = crate::correction::verified_outputs(&a);
+        if a.correction.as_ref().is_some_and(|c| c.subwoofer)
+            && let Some(b) = a.bass.as_ref()
+        {
+            output_ids.extend(b.plan.speakers());
+        }
+        for c in [self.state.alignment.as_mut(), Some(&mut a)]
+            .into_iter()
+            .flatten()
+            .filter_map(|a| a.correction.as_mut())
+        {
+            c.verification = None;
+            c.verification_note = Some("Confirmation in progress.".into());
+        }
+        self.state.job = Some(Job::VerifyCorrection {
+            output_ids,
+            current: 0,
+        });
+        self.start_correction_job(a, |backend, a, cancel, progress| {
+            crate::correction::verify(backend, a, cancel, progress).map(|()| None)
+        });
+    }
+    fn start_correction_job(
+        &mut self,
+        mut a: alignment::Alignment,
+        job: impl FnOnce(
+            &dyn Backend,
+            &mut alignment::Alignment,
+            &AtomicBool,
+            &mut dyn FnMut(usize, MeasureProgress),
+        ) -> Result<Option<Snapshot>, String>
+        + Send
+        + 'static,
+    ) {
+        self.state.progress = Some(MeasureProgress::Preparing);
+        self.state.stopping = false;
+        self.state.error = None;
+        self.cancelled = Arc::new(AtomicBool::new(false));
+        let (backend, sender, cancel) = (
+            self.backend.clone(),
+            self.sender.clone(),
+            self.cancelled.clone(),
+        );
+        std::thread::spawn(move || {
+            let result = catch_job(|| {
+                job(backend.as_ref(), &mut a, &cancel, &mut |i, p| {
+                    let _ = sender.send(Event::BatchProgress(i, p));
+                })
+            });
+            // Every write gives the renderer a newer revision: read it again, whatever
+            // happened.
+            let live = match &result {
+                Ok(Some(snapshot)) => Some(snapshot.clone()),
+                _ => backend.discover(a.endpoint).ok(),
+            };
+            let _ = sender.send(Event::CorrectionUpdated(
+                Box::new(a),
+                result.map(|_| ()),
+                live,
+            ));
+        });
     }
     pub fn refresh_alignment_proposal(&mut self) {
         if self.busy() {
@@ -1779,6 +1968,10 @@ impl Controller {
                 ..
             })
             | Some(Job::VerifyBass {
+                output_ids,
+                current,
+            })
+            | Some(Job::VerifyCorrection {
                 output_ids,
                 current,
             }) => output_ids.get(*current).map(String::as_str),
@@ -2175,6 +2368,10 @@ impl Controller {
                         | Job::VerifyBass {
                             output_ids,
                             current,
+                        }
+                        | Job::VerifyCorrection {
+                            output_ids,
+                            current,
                         },
                     ) = &mut self.state.job
                     {
@@ -2182,9 +2379,18 @@ impl Controller {
                     }
                     self.state.progress = Some(progress);
                 }
-                Event::RoomCorrectionExported(directory, result) => {
-                    self.state.room_correction = Some((directory, *result));
+                Event::CorrectionUpdated(a, result, live) => {
+                    if let Err(e) = result {
+                        self.state.error = Some(e);
+                    }
+                    if let Some(snapshot) = live {
+                        self.state.saved_snapshot = Some(snapshot.clone());
+                        self.state.snapshot = Some(snapshot);
+                    }
+                    self.state.alignment = Some(*a);
                     self.state.job = None;
+                    self.state.progress = None;
+                    self.state.stopping = false;
                 }
                 Event::BassUpdated(a, result, live) => {
                     if let Err(e) = result {
@@ -2199,12 +2405,14 @@ impl Controller {
                     self.state.progress = None;
                     self.state.stopping = false;
                 }
-                Event::PositionMeasured(a, result) => {
+                Event::PositionMeasured(a, result, live) => {
                     if let Err(e) = result {
                         self.state.error = Some(e);
                     }
-                    // Putting zeroed outputs back gives the renderer a newer revision.
-                    if let Some(live) = &a.restored_snapshot
+                    if let Some(live) = live {
+                        self.state.saved_snapshot = Some(live.clone());
+                        self.state.snapshot = Some(live);
+                    } else if let Some(live) = &a.restored_snapshot
                         && self
                             .state
                             .alignment
@@ -2332,7 +2540,8 @@ impl Controller {
                         None => {}
                     }
                     match result {
-                        Ok(snapshot) => {
+                        Ok((snapshot, version)) => {
+                            self.state.protocol_version = Some(version);
                             crate::defaults::reference_settings(
                                 &mut self.settings,
                                 &snapshot,
@@ -2344,6 +2553,7 @@ impl Controller {
                         }
                         Err(error) => {
                             self.state.snapshot = None;
+                            self.state.protocol_version = None;
                             self.state.connection_error = Some(error);
                         }
                     }
