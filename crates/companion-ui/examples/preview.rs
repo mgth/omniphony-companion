@@ -40,40 +40,34 @@ fn main() -> eframe::Result {
             if std::env::args().any(|a| a == "--positions") {
                 // Two guided positions measured around the main seat, one of them partly.
                 let mut a = support::room_alignment(&controller);
-                for (index, measured) in [(0, a.rows.len()), (1, a.rows.len() - 1)] {
-                    let step = companion_service::positions::GUIDE[index];
-                    a.positions
-                        .push(companion_service::positions::PositionCapture {
-                            step: step.id.into(),
-                            position_id: companion_service::positions::position_id(
-                                &a.settings.position_id,
-                                &step,
-                            ),
-                            instruction: step.instruction.into(),
-                            directory: format!("synthetic-position-{}", step.id).into(),
-                            takes: a
-                                .rows
-                                .iter()
-                                .enumerate()
-                                .map(|(i, r)| companion_service::positions::PositionTake {
-                                    output_id: r.output_id.clone(),
-                                    take_folder: format!("synthetic-position-{}/{i}", step.id)
-                                        .into(),
-                                    accepted: i < measured,
-                                    rejection_reason: (i >= measured)
-                                        .then(|| "clipped recording".into()),
-                                    response: true,
-                                })
-                                .collect(),
-                            error: None,
-                        });
-                }
+                support::measured_positions(&mut a, 2);
                 controller.state.alignment = Some(a);
             }
             for arg in std::env::args() {
                 if let Some(path) = arg.strip_prefix("--calibration=") {
                     controller.settings.calibration_path = path.into();
                 }
+            }
+            // `--correction`, or `--correction=applied|comparing|saved|verified`: the
+            // room correction computed (and where Omniphony stands with it), with two
+            // positions measured and the subwoofer integrated.
+            if let Some(state) = std::env::args().find_map(|a| {
+                (a == "--correction")
+                    .then(|| "computed".to_owned())
+                    .or_else(|| a.strip_prefix("--correction=").map(str::to_owned))
+            }) {
+                use support::CorrectionState::*;
+                let state = match state.as_str() {
+                    "applied" => Applied,
+                    "comparing" => Comparing,
+                    "saved" => Saved,
+                    "verified" => Verified,
+                    _ => Computed,
+                };
+                let mut a = support::room_alignment(&controller);
+                support::measured_positions(&mut a, 2);
+                support::correction(&mut controller, &mut a, state);
+                controller.state.alignment = Some(a);
             }
             if std::env::args().any(|a| a == "--bench") {
                 controller.state.alignment = Some(support::bench_alignment(&mut controller));
@@ -136,6 +130,12 @@ fn main() -> eframe::Result {
             }
             let mut app = companion_ui::CompanionApp::preview(&cc.egui_ctx, controller);
             app.lab = std::env::args().any(|a| a == "--lab");
+            // `--select=Front left` opens that speaker in the Inspect drawer.
+            if let Some(id) =
+                std::env::args().find_map(|a| a.strip_prefix("--select=").map(str::to_owned))
+            {
+                app.select_speaker(&id);
+            }
             for arg in std::env::args() {
                 app.result_plot = match arg.as_str() {
                     "--frequency-response" => companion_ui::ResultPlot::FrequencyResponse,

@@ -50,20 +50,27 @@ The Rust/egui desktop window lets you:
   five more microphone positions around the main seat, stored for room correction
   only. See `docs/room-correction-measurement.md`.
 - Design one minimum-phase correction filter per speaker from those responses
-  (**Correction filters** in the setup rail, or `correction-filters` on the command
+  (**Compute the correction** in the setup rail, or `correction-filters` on the command
   line): a gently tilted target up to 10 kHz, boosts of at most 3.5 dB and none below
   the speaker's own roll-off, the 500 Hz–2 kHz level kept. They are exported as WAV
-  files for Studio's speaker editor, with the predicted response, how the positions
-  agree and the strong early reflections. Not yet sent to Omniphony nor verified by a
-  new measurement. See `docs/room-correction-design.md`.
-- Integrate the subwoofer with the speakers (**Subwoofer** in the setup rail, or
+  files, with the predicted response, how the positions agree and the strong early
+  reflections. See `docs/room-correction-design.md`.
+- Follow the room correction as one guided step after the alignment (**04 Room
+  correction**): positions and subwoofer, compute, review on the speaker cards and in
+  the drawer below them, **Apply correction** (every filter in one revision-checked
+  write over measurement protocol 8, with the subwoofer's delay, level and filter),
+  **Original / Corrected** for listening at constant latency, **Confirm by
+  re-measuring**, **Undo** (the previous filters back, file filters included). Live
+  only: the bar says when Studio's Save has kept them. Tested on simulated renderers
+  only. See `docs/room-correction.md`.
+- Integrate the subwoofer with the speakers (in the room correction step, or
   `bass-integration` on the command line): each speaker with a low limit plays
   Omniphony's bass-managed sweep with the subwoofer silenced, the speakers silenced and
   both, at the main seat and the guided positions; the proposal is one subwoofer delay,
   polarity and level that make the sums add up around each crossover, plus a cut-only
-  mode correction. Apply sends them live over measurement protocol 8 (the polarity in
-  the subwoofer's filter), Undo puts the subwoofer back, Confirm measures the sums
-  again. Tested on simulated rooms only. See `docs/bass-integration.md`.
+  mode correction. The room correction's Apply sends them live over measurement
+  protocol 8 (the polarity in the subwoofer's filter), Undo puts the subwoofer back,
+  Confirm measures the sums again. Tested on simulated rooms only. See `docs/bass-integration.md`.
 - Restore input/channel/rate, renderer address, reference, microphone/position,
   sweep settings, recording/calibration paths and speaker checkboxes on startup.
 - On a first run, the setup rail is already filled in: the first microphone input

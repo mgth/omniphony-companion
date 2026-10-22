@@ -14,9 +14,9 @@ stored responses of an alignment and writes the export.
 
 ## Use
 
-After an alignment, and ideally the five other positions, **05 Correction filters →
-Design and export filters** in the setup rail designs every speaker and saves the
-result in a new `room-correction-<stamp>` folder of the alignment:
+After an alignment, and ideally the five other positions, **Compute the correction**
+in the setup rail's guided [room correction](room-correction.md) designs every speaker
+and saves the result in a new `room-correction-<stamp>` folder of the alignment:
 
 - `<output>.wav` for each corrected speaker: mono, 32-bit float, at the rate the
   renderer ran at during the alignment, 8192 taps;
@@ -28,13 +28,14 @@ result in a new `room-correction-<stamp>` folder of the alignment:
   band, the averaged response, the target, the correction asked, what the taps realise
   and the predicted corrected response.
 
-The rail then lists each speaker with its predicted deviation from the target's shape,
-before → after, or "not corrected"; hovering gives the reason and the warnings.
-`omniphony-companion correction-filters --alignment DIR` does the same from the
+The speaker cards then show each speaker's predicted deviation from the target's shape,
+before and after, or why it is not corrected, and the drawer below them its curves and
+diagnostics; Apply sends the filters to Omniphony live (see
+[room correction](room-correction.md)). `omniphony-companion correction-filters --alignment DIR` does the same from the
 command line, run from the folder the sessions were saved from, and accepts another
 filter length, correction limit, tilt, boost and cut.
 
-Load a filter in Studio, listen, and keep the level in mind: each filter boosts by at
+The WAV files also load in Studio by hand. Keep the level in mind: each filter boosts by at
 most the reported headroom (3.5 dB by default), so content near full scale at those
 frequencies can clip.
 

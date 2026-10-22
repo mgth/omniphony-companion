@@ -801,6 +801,8 @@ fn alignment_session_stays_above_individual_results_and_unqualified_actions_stay
             retake_snapshots: vec![],
             zeroed_snapshot: None,
             bass: None,
+            correction: None,
+            filtered_outputs: None,
         });
         let mut app = CompanionApp::preview(&ctx, controller);
         for _ in 0..3 {
@@ -1386,6 +1388,8 @@ fn loaded_alignment_pass_opens_its_latest_analysis_and_labels_the_original_verdi
         retake_snapshots: vec![],
         zeroed_snapshot: None,
         bass: None,
+        correction: None,
+        filtered_outputs: None,
     };
     write_json(&dir.path().join("alignment-state.json"), &alignment).unwrap();
     controller.state.takes = vec![first, second];
@@ -2960,8 +2964,8 @@ fn the_setup_rail_says_whether_a_microphone_calibration_will_be_applied() {
 }
 
 #[test]
-fn the_setup_rail_guides_the_other_microphone_positions() {
-    use companion_service::positions::{self, GUIDE, PositionCapture, PositionTake};
+fn the_setup_rail_guides_the_room_correction_step_by_step() {
+    use companion_service::positions::GUIDE;
     let ctx = egui::Context::default();
     let (mut controller, starts) = support::ready();
     let size = Vec2::new(1160.0, 1700.0);
@@ -2973,251 +2977,265 @@ fn the_setup_rail_guides_the_other_microphone_positions() {
             .any(|(t, _)| t.starts_with("After an alignment at the main seat"))
     );
     let mut a = support::room_alignment(&controller);
-    a.positions.push(PositionCapture {
-        step: GUIDE[0].id.into(),
-        position_id: positions::position_id(&a.settings.position_id, &GUIDE[0]),
-        instruction: GUIDE[0].instruction.into(),
-        directory: "synthetic-position".into(),
-        takes: a
-            .rows
-            .iter()
-            .map(|r| PositionTake {
-                output_id: r.output_id.clone(),
-                take_folder: "synthetic-position/take".into(),
-                accepted: true,
-                rejection_reason: None,
-                response: true,
-            })
-            .collect(),
-        error: None,
-    });
+    support::measured_positions(&mut a, 1);
+    a.bass = Some(support::bass_integration(&controller));
     controller.state.alignment = Some(a);
     let mut app = CompanionApp::preview(&ctx, controller);
     frame(&mut app, &ctx, vec![], size);
     let text = labels(&frame(&mut app, &ctx, vec![], size));
     for needle in [
-        "Other positions",
+        "Room correction",
+        "Main seat",
+        "from the alignment",
+        "Subwoofer at the main seat",
+        "Measure the subwoofer again",
         "30 cm left",
         "measured",
         "15 cm higher",
         "not yet",
-    ] {
-        assert!(text.iter().any(|(t, _)| t == needle), "{needle}");
-    }
-    assert!(text.iter().any(|(t, _)| t == GUIDE[1].instruction));
-    assert!(text.iter().any(|(t, _)| t == "Measure position 2"));
-    assert!(central(&frame(&mut app, &ctx, vec![], size), "Front left").is_some());
-    assert_eq!(starts.load(Ordering::Relaxed), 0);
-}
-
-#[test]
-fn the_setup_rail_exports_correction_filters_below_the_positions() {
-    use companion_service::room_correction::{OutputSummary, Summary};
-    let ctx = egui::Context::default();
-    let (mut controller, starts) = support::ready();
-    let size = Vec2::new(1160.0, 2200.0);
-    let a = support::room_alignment(&controller);
-    // The synthetic takes stored no response: nothing to design from yet.
-    assert!(controller.state.alignment.is_none());
-    controller.state.alignment = Some(a.clone());
-    assert!(controller.room_correction_readiness().is_err());
-    let output = |id: &str, file: Option<&str>, refusal: Option<&str>| OutputSummary {
-        output_id: id.into(),
-        file: file.map(Into::into),
-        refusal: refusal.map(Into::into),
-        warnings: vec![],
-        calibrated: true,
-        taps: file.map(|_| 8192),
-        sample_rate: file.map(|_| 48000),
-        headroom_db: file.map(|_| 3.5),
-        deepest_cut_db: file.map(|_| -6.0),
-        normalisation_db: file.map(|_| 0.4),
-        band_hz: None,
-        low_limit_hz: None,
-        evaluation_band_hz: None,
-        deviation_db: file.map(|_| [4.2, 1.1]),
-        repeatability_db: None,
-        spread_db: None,
-        positions: vec![],
-        reflections: vec![],
-    };
-    let ids: Vec<String> = a.rows.iter().map(|r| r.output_id.clone()).collect();
-    let summary = Summary {
-        schema_version: 1,
-        method: "synthetic".into(),
-        settings: Default::default(),
-        outputs: vec![
-            output(&ids[0], Some("FL.wav"), None),
-            output(
-                &ids[1],
-                None,
-                Some("A subwoofer or LFE: left to bass integration."),
-            ),
-        ],
-    };
-    controller.state.room_correction = Some((
-        a.directory.clone(),
-        Ok(("synthetic/room-correction-1".into(), summary)),
-    ));
-    let mut app = CompanionApp::preview(&ctx, controller);
-    frame(&mut app, &ctx, vec![], size);
-    let text = labels(&frame(&mut app, &ctx, vec![], size));
-    for needle in [
-        "Correction filters",
-        "Design and export filters",
-        "1 of 2 filters saved in",
-        "4.2 → 1.1 dB",
-        "not corrected",
-    ] {
-        assert!(text.iter().any(|(t, _)| t == needle), "{needle}");
-    }
-    let rail = |needle: &str| text.iter().find(|(t, _)| t == needle).unwrap().1;
-    assert!(rail("Correction filters").top() > rail("Other positions").top());
-    assert!(rail("Correction filters").right() < 310.0);
-    assert!(central(&frame(&mut app, &ctx, vec![], size), "Front left").is_some());
-    assert_eq!(starts.load(Ordering::Relaxed), 0);
-}
-
-#[test]
-fn the_setup_rail_shows_the_subwoofer_integration_below_the_filters() {
-    use calibration_core::bass::{Proposal, Setting, SpeakerResult, Subwoofer};
-    use companion_service::bass::{Analysis, BassIntegration, BassTake, Capture, Part, Plan};
-    let ctx = egui::Context::default();
-    let (mut controller, starts) = support::ready();
-    let size = Vec2::new(1160.0, 2600.0);
-    let mut a = support::room_alignment(&controller);
-    let speakers = ["Front left", "Front right", "Center"];
-    let sweep = omniphony_adapter::Sweep {
-        duration_ms: 3000,
-        peak_dbfs: -20.0,
-        start_hz: 20.0,
-        end_hz: 320.0,
-    };
-    let plan = Plan {
-        subwoofer: "Subwoofer".into(),
-        groups: vec![companion_service::sweep_plan::Group {
-            sweep,
-            reference: "Center".into(),
-            outputs: speakers.iter().map(|s| (*s).into()).collect(),
-        }],
-        skipped: vec![],
-        direct: companion_service::sweep_plan::Group {
-            sweep,
-            reference: "Subwoofer".into(),
-            outputs: vec!["Subwoofer".into()],
-        },
-    };
-    let take = |id: &str, part: Part| BassTake {
-        output_id: id.into(),
-        part,
-        take_folder: "synthetic-bass/take".into(),
-        accepted: true,
-        rejection_reason: None,
-        response: true,
-    };
-    let mut takes = vec![take("Subwoofer", Part::Direct)];
-    for id in speakers {
-        takes.push(take(id, Part::Sum));
-        takes.push(take(id, Part::Speaker));
-        if id != "Center" {
-            takes.push(take(id, Part::Subwoofer));
-        }
-    }
-    let speaker = |id: &str, excluded: Option<&str>| SpeakerResult {
-        output_id: id.into(),
-        crossover_hz: 80.0,
-        band_hz: Some([40.0, 160.0]),
-        positions: 1,
-        excluded: excluded.map(Into::into),
-        phase_delay_ms: Some(17.4),
-        phase_inverted: Some(true),
-        phase_fit_deg: Some(3.0),
-        subwoofer_share_db: Some(25.0),
-        consistency_db: Some(0.1),
-        best: None,
-        position_best: vec![],
-        summation_db: Some([-2.26, -0.03, -0.03]),
-        sum_level_db: None,
-        balance_db: Some([11.7, 0.2]),
-        warnings: vec![],
-        curves: None,
-    };
-    let proposal = Proposal {
-        method: "synthetic".into(),
-        subwoofer: Subwoofer {
-            output_id: "Subwoofer".into(),
-            delay_ms: 20.0,
-            gain_db: -3.0,
-            others_max_delay_ms: 3.45,
-            max_delay_ms: 100.0,
-        },
-        setting: Setting {
-            delay_change_ms: -18.0,
-            inverted: true,
-            gain_change_db: -6.0,
-        },
-        subwoofer_delay_ms: 2.0,
-        subwoofer_gain_db: -9.0,
-        others_delay_ms: 0.0,
-        mode_correction: false,
-        speakers: vec![
-            speaker("Front left", None),
-            speaker("Front right", None),
-            speaker(
-                "Center",
-                Some(
-                    "The subwoofer plays little of its low band: its bass goes to other speakers.",
-                ),
-            ),
-        ],
-        warnings: vec![],
-        refusal: None,
-    };
-    let snapshot = controller.state.snapshot.clone().unwrap();
-    a.bass = Some(BassIntegration {
-        plan,
-        snapshot,
-        level_probe: None,
-        captures: vec![Capture {
-            step: None,
-            position_id: a.settings.position_id.clone(),
-            directory: "synthetic-bass".into(),
-            takes,
-            error: None,
-        }],
-        analysis: Some(Analysis {
-            directory: "synthetic-bass/bass-integration".into(),
-            proposal,
-            mode_correction: None,
-            filter: None,
-            notes: vec![],
-        }),
-        analysis_error: None,
-        applied: None,
-        verification: None,
-        verification_note: None,
-    });
-    controller.state.alignment = Some(a);
-    let mut app = CompanionApp::preview(&ctx, controller);
-    frame(&mut app, &ctx, vec![], size);
-    let text = labels(&frame(&mut app, &ctx, vec![], size));
-    for needle in [
-        "Subwoofer",
-        "Main seat",
-        "measured",
-        "Main seat again",
-        "Position 1",
-        "Subwoofer: delay 20.0 → 2.0 ms, level -6.0 dB, polarity inverted",
-        "-2.3 → 0.0 dB",
-        "left out",
-        "Apply",
-        "Confirm",
+        "Measure position 2",
+        "Compute the correction",
     ] {
         assert!(text.iter().any(|(t, _)| t == needle), "{needle}: {text:?}");
     }
+    assert!(text.iter().any(|(t, _)| t == GUIDE[1].instruction));
+    // Prerequisites are named before computing: here no calibration and one position.
+    assert!(
+        text.iter()
+            .any(|(t, _)| t.starts_with("No microphone calibration")),
+        "{text:?}"
+    );
+    assert!(
+        text.iter()
+            .any(|(t, _)| t.starts_with("1 of 5 positions measured"))
+    );
+    // The synthetic takes stored no response: nothing to compute from yet.
+    let readiness = app.controller.correction_readiness();
+    assert!(readiness.blocker.unwrap().contains("no stored response"));
     let rail = |needle: &str| text.iter().find(|(t, _)| t == needle).unwrap().1;
-    assert!(rail("Main seat again").top() > rail("Correction filters").top());
-    assert!(rail("Main seat again").right() < 310.0);
+    assert!(rail("Compute the correction").top() > rail("15 cm higher").top());
+    assert!(rail("Compute the correction").right() < 310.0);
+    // Settings only under Lab, with defaults that need no touching.
+    assert!(!text.iter().any(|(t, _)| t == "Correction settings"));
+    app.lab = true;
+    let text = labels(&frame(&mut app, &ctx, vec![], size));
+    assert!(text.iter().any(|(t, _)| t == "Correction settings"));
     assert!(central(&frame(&mut app, &ctx, vec![], size), "Front left").is_some());
     assert_eq!(starts.load(Ordering::Relaxed), 0);
+}
+
+fn correction_app(
+    ctx: &egui::Context,
+    state: support::CorrectionState,
+) -> (CompanionApp, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    let (mut controller, starts) = support::ready();
+    let mut a = support::room_alignment(&controller);
+    support::measured_positions(&mut a, 2);
+    support::correction(&mut controller, &mut a, state);
+    controller.state.alignment = Some(a);
+    (CompanionApp::preview(ctx, controller), starts)
+}
+
+#[test]
+fn a_computed_correction_is_reviewed_on_the_cards_without_moving_them() {
+    use support::CorrectionState;
+    for size in [
+        Vec2::new(850.0, 640.0),
+        Vec2::new(1160.0, 800.0),
+        Vec2::new(1400.0, 1000.0),
+    ] {
+        let ctx = egui::Context::default();
+        let (mut app, starts) = correction_app(&ctx, CorrectionState::Computed);
+        for _ in 0..3 {
+            frame(&mut app, &ctx, vec![], size);
+        }
+        let output = frame(&mut app, &ctx, vec![], size);
+        let corrected = card_named(&output, "Front left").expect("card").0;
+        let text = labels(&output);
+        // Visible without scrolling, where the alignment's cards are.
+        assert!(corrected.bottom() < size.y, "{size:?}");
+        let ctx2 = egui::Context::default();
+        let (mut controller, _) = support::ready();
+        controller.state.alignment = Some(support::room_alignment(&controller));
+        let mut plain = CompanionApp::preview(&ctx2, controller);
+        for _ in 0..3 {
+            frame(&mut plain, &ctx2, vec![], size);
+        }
+        let aligned = card_named(&frame(&mut plain, &ctx2, vec![], size), "Front left")
+            .unwrap()
+            .0;
+        assert_eq!(corrected, aligned, "{size:?}");
+        let in_card = |needle: &str| {
+            text.iter().any(|(t, r)| {
+                t.contains(needle) && r.left() > 310.0 && r.top() < corrected.bottom() + 400.0
+            })
+        };
+        if size.x > 1000.0 {
+            for needle in [
+                "Room 4.3 » 1.2 dB",
+                "+3.1 / -8.4 dB · 1 refl.",
+                "No room correction",
+            ] {
+                assert!(in_card(needle), "{needle}: {size:?}");
+            }
+        }
+        assert_eq!(starts.load(Ordering::Relaxed), 0);
+    }
+    // The subwoofer card carries its integration; the drawer details a speaker.
+    let ctx = egui::Context::default();
+    let (mut app, _) = correction_app(&ctx, CorrectionState::Computed);
+    // Tall enough for the action bar below the cards and the chart.
+    let tall = Vec2::new(1400.0, 2400.0);
+    let text = labels(&frame(&mut app, &ctx, vec![], tall));
+    for needle in [
+        "Delay 20.0 » 2.0 ms · -6.0 dB",
+        "Polarity inverted",
+        "PLAYING · ORIGINAL",
+        "Apply correction",
+    ] {
+        assert!(text.iter().any(|(t, _)| t == needle), "{needle}: {text:?}");
+    }
+    let size = Vec2::new(1400.0, 1000.0);
+    let card = card_named(&frame(&mut app, &ctx, vec![], size), "Front left")
+        .unwrap()
+        .0;
+    click(&mut app, &ctx, card.center() + Vec2::new(-40.0, 0.0), size);
+    for needle in [
+        "Room correction · Front left",
+        "2.38 ms after the direct sound · -4.1 dB · 82 cm longer path",
+        "largest boost 3.1 dB (limit 3.5 dB)",
+        "Predicted",
+    ] {
+        find_result_text(&mut app, &ctx, size, needle);
+    }
+    // Switched off, the cards show the alignment again.
+    app.correction_cards = false;
+    let text = labels(&frame(&mut app, &ctx, vec![], size));
+    assert!(!text.iter().any(|(t, _)| t == "Room 4.3 » 1.2 dB"));
+}
+
+/// The lowest `text` right of the setup panel: the correction bar's, below the
+/// alignment's, for the labels both bars use.
+fn lowest(output: &egui::FullOutput, text: &str) -> Option<Rect> {
+    labels(output)
+        .into_iter()
+        .filter(|(s, r)| s == text && r.left() > 310.0)
+        .map(|(_, r)| r)
+        .max_by(|a, b| a.top().total_cmp(&b.top()))
+}
+
+fn status_text(app: &mut CompanionApp, ctx: &egui::Context, size: Vec2) -> Vec<String> {
+    labels(&frame(app, ctx, vec![], size))
+        .into_iter()
+        .map(|(t, _)| t)
+        .collect()
+}
+
+#[test]
+fn the_compare_switch_shows_what_plays_and_whether_omniphony_saved_it() {
+    use companion_service::{
+        controller::Job,
+        correction::{Live, Target},
+    };
+    use support::CorrectionState;
+    // Tall enough for the action bar below the cards and the chart.
+    let size = Vec2::new(1400.0, 2400.0);
+    let find = |text: &[String], needle: &str| text.iter().any(|t| t.contains(needle));
+    let ctx = egui::Context::default();
+    let (mut app, _) = correction_app(&ctx, CorrectionState::Applied);
+    assert_eq!(
+        app.controller.correction_live_state(),
+        Some(Live::Corrected)
+    );
+    let text = status_text(&mut app, &ctx, size);
+    assert!(find(&text, "PLAYING · CORRECTED"));
+    assert!(
+        find(
+            &text,
+            "Press Save in Omniphony Studio to keep them; Save writes them as WAV files"
+        ),
+        "{text:?}"
+    );
+    // Original asks Omniphony for the original filters, at the same latency.
+    let original = lowest(&frame(&mut app, &ctx, vec![], size), "Original").expect("switch");
+    click(&mut app, &ctx, original.center(), size);
+    assert!(matches!(
+        app.controller.state.job,
+        Some(Job::ApplyCorrection {
+            target: Target::Compare
+        })
+    ));
+
+    let ctx = egui::Context::default();
+    let (mut app, _) = correction_app(&ctx, CorrectionState::Comparing);
+    assert_eq!(
+        app.controller.correction_live_state(),
+        Some(Live::Comparing)
+    );
+    let text = status_text(&mut app, &ctx, size);
+    assert!(find(&text, "PLAYING · ORIGINAL"));
+    assert!(find(&text, "at the same latency"));
+    assert!(
+        app.controller
+            .correction_verify_readiness()
+            .unwrap_err()
+            .contains("Corrected")
+    );
+    let corrected = lowest(&frame(&mut app, &ctx, vec![], size), "Corrected").expect("switch");
+    click(&mut app, &ctx, corrected.center(), size);
+    assert!(matches!(
+        app.controller.state.job,
+        Some(Job::ApplyCorrection {
+            target: Target::Corrected
+        })
+    ));
+
+    let ctx = egui::Context::default();
+    let (mut app, _) = correction_app(&ctx, CorrectionState::Saved);
+    let text = status_text(&mut app, &ctx, size);
+    assert!(
+        find(&text, "Saved in Omniphony's configuration"),
+        "{text:?}"
+    );
+
+    let ctx = egui::Context::default();
+    let (mut app, _) = correction_app(&ctx, CorrectionState::Verified);
+    let text = status_text(&mut app, &ctx, size);
+    assert!(
+        find(&text, "Confirmed at the main seat: 3 of 3 speakers"),
+        "{text:?}"
+    );
+    assert!(find(&text, "Room 4.3 » 1.5 dB measured"), "{text:?}");
+    // Undo is offered once applied.
+    let undo = lowest(&frame(&mut app, &ctx, vec![], size), "Undo").expect("undo");
+    click(&mut app, &ctx, undo.center(), size);
+    assert!(matches!(
+        app.controller.state.job,
+        Some(Job::ApplyCorrection {
+            target: Target::Original
+        })
+    ));
+}
+
+#[test]
+fn an_older_renderer_cannot_take_the_filters_and_says_so() {
+    use support::CorrectionState;
+    let ctx = egui::Context::default();
+    let (mut app, _) = correction_app(&ctx, CorrectionState::Computed);
+    app.controller.state.protocol_version = Some(7);
+    let size = Vec2::new(1400.0, 2400.0);
+    let e = app
+        .controller
+        .correction_apply_readiness(companion_service::correction::Target::Corrected)
+        .unwrap_err();
+    assert!(e.contains("protocol 8"), "{e}");
+    let text = status_text(&mut app, &ctx, size);
+    assert!(
+        text.iter()
+            .any(|t| t.starts_with("This Omniphony build cannot take correction filters")),
+        "{text:?}"
+    );
+    let apply = central(&frame(&mut app, &ctx, vec![], size), "Apply correction").unwrap();
+    click(&mut app, &ctx, apply.center(), size);
+    assert!(app.controller.state.job.is_none());
 }

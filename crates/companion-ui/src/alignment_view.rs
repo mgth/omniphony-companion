@@ -216,6 +216,8 @@ pub struct Card {
     /// A far speaker the policy sets aside: `Some(false)` while set aside,
     /// `Some(true)` once aligned to anyway. The card offers the other choice.
     pub far: Option<bool>,
+    /// A small response plot beside the lines (room correction).
+    pub plot: Option<super::correction_view::CardPlot>,
 }
 pub fn card(sp: &Speaker) -> Card {
     let (measured, planned) = match (sp.arrival, &sp.reason) {
@@ -252,6 +254,7 @@ pub fn card(sp: &Speaker) -> Card {
         } else {
             sp.row.set_aside().then_some(false)
         },
+        plot: None,
     }
 }
 

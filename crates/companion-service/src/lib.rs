@@ -4,6 +4,7 @@ pub mod analysis_cache;
 pub mod bass;
 pub mod batch;
 pub mod controller;
+pub mod correction;
 pub mod defaults;
 pub mod duration;
 pub mod files;

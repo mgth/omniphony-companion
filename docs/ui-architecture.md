@@ -223,3 +223,16 @@ refreshes the renderer. The UI restores its selected result and graph preference
 eframe owns persisted window/widget geometry. Cached speaker layouts remain separate
 from live discovery and cannot authorize measurement or mutation. See
 `workspace-restoration.md` for storage bounds and upgrade behavior.
+
+## Room correction
+
+The setup rail's **04 Room correction** guides the positions, the subwoofer and the
+computation; the controller runs them on workers like every capture. The speaker cards
+show the computed correction instead of the alignment while **On the cards** is on (a
+display choice kept in memory): the same two lines and the same fixed card size, with a
+small plot beside the lines, so the cards never move. The Room correction bar sits below
+the alignment's action bar, under the cards: Apply, Original/Corrected, Confirm and Undo
+with a status line that says what plays and whether Omniphony has saved it. The detail of
+the selected speaker is drawn at the top of the results drawer. Readiness, live state and
+save state come from `companion_service::correction`; `correction_view.rs` only draws them
+and returns actions. See `room-correction.md`.

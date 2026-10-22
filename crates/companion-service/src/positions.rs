@@ -16,6 +16,7 @@ use crate::{
     measurement::{MeasureProgress, TakeOutcome},
     sweep_plan::{self, Group},
 };
+use omniphony_adapter::Snapshot;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::atomic::AtomicBool};
 
@@ -79,6 +80,10 @@ pub struct PositionCapture {
     pub takes: Vec<PositionTake>,
     /// Why the pass stopped before every speaker was measured.
     pub error: Option<String>,
+    /// The outputs whose correction filter played: empty when the pass held the filters
+    /// off. `None` on captures from before it was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filtered_outputs: Option<Vec<String>>,
 }
 impl PositionCapture {
     /// Every speaker of the alignment has an accepted take here.
@@ -163,9 +168,9 @@ pub fn readiness(a: &Alignment, live: &omniphony_adapter::Snapshot) -> Result<()
     {
         return Err("Complete an alignment at the main seat first.".into());
     }
+    // Applied, the speakers are put in the passes' state for the position and back.
     match a.live_state(live) {
-        LiveState::Original => Ok(()),
-        LiveState::Applied => Err("Undo the applied correction first: other positions are measured with the settings of the main seat's passes. Apply it again afterwards.".into()),
+        LiveState::Original | LiveState::Applied => Ok(()),
         LiveState::Other => Err("Omniphony's settings changed since this alignment was measured. Measure a new alignment first.".into()),
     }
 }
@@ -194,14 +199,24 @@ pub fn measure<B: Backend + ?Sized>(
         .flat_map(|g| g.outputs.iter())
         .map(|id| a.rows.iter().position(|r| &r.output_id == id).unwrap_or(0))
         .collect();
+    // The state the passes measured under: zeroed when they measured from zero, the
+    // original settings when the alignment is applied now. Applied, the speakers go
+    // back to the state found; otherwise to their original settings.
+    let applied = a.live_state(&live) == LiveState::Applied;
+    let found = live.clone();
+    let back = if applied {
+        found.clone()
+    } else {
+        a.snapshot.clone()
+    };
     let mut current = live;
-    // The state the passes measured under: zeroed when they measured from zero.
-    if let Some(zeroed) = &a.zeroed_snapshot {
-        current = match alignment::move_outputs(backend, a.endpoint, &current, zeroed) {
+    if applied || a.zeroed_snapshot.is_some() {
+        let measured = a.measured_state().clone();
+        current = match alignment::move_outputs(backend, a.endpoint, &current, &measured) {
             Ok(current) => current,
             Err(error) => {
                 // The write may have gone through (a lost reply): put the settings back.
-                let settled = settle(backend, a);
+                let settled = settle(backend, a, &back);
                 return Err(format!(
                     "Setting the measured speakers to 0 dB and 0 ms failed ({error}); nothing was measured.{}",
                     if settled {
@@ -231,10 +246,18 @@ pub fn measure<B: Backend + ?Sized>(
         progress(order[i.min(order.len() - 1)], p)
     });
     // Stopped or failed, the outputs go back to their settings all the same.
-    let restored = alignment::put_back(backend, a, &current);
+    let restored = if applied {
+        alignment::move_outputs(backend, a.endpoint, &current, &found)
+            .map(|live| {
+                let _ = alignment::reconcile(a, &live);
+            })
+            .map_err(|error| format!("The speakers were set to the alignment's original settings for this position and could not be put back to the corrected ones ({error})."))
+    } else {
+        alignment::put_back(backend, a, &current)
+    };
     if let Err(error) = restored {
         // Another attempt from whatever the renderer reads back; else say it is unknown.
-        if !settle(backend, a) {
+        if !settle(backend, a, &back) {
             return Err(format!(
                 "{error} Their settings could not be confirmed: check them in Studio, then refresh."
             ));
@@ -261,6 +284,7 @@ pub fn measure<B: Backend + ?Sized>(
             .error
             .clone()
             .or_else(|| batch.cancelled.then(|| "capture cancelled by user".into())),
+        filtered_outputs: Some(alignment::filtered_outputs(&request)),
     };
     a.positions.retain(|p| p.step != capture.step);
     a.positions.push(capture);
@@ -270,30 +294,35 @@ pub fn measure<B: Backend + ?Sized>(
     Ok(batch.takes)
 }
 
-/// After a failed write around a position, bring the renderer back to the alignment's
-/// original settings, as read back. Returns whether that is confirmed; otherwise the
-/// alignment is saved as uncertain, which blocks every action until a refresh finds the
-/// renderer in a known state.
-fn settle<B: Backend + ?Sized>(backend: &B, a: &mut Alignment) -> bool {
+/// After a failed write around a position, bring the renderer back to `back` (the
+/// alignment's original settings, or the corrected ones it was found with), as read
+/// back. Returns whether that is confirmed; otherwise the alignment is saved as
+/// uncertain, which blocks every action until a refresh finds the renderer in a known
+/// state.
+fn settle<B: Backend + ?Sized>(backend: &B, a: &mut Alignment, back: &Snapshot) -> bool {
     let restored = backend.discover(a.endpoint).ok().and_then(|live| {
-        if omniphony_adapter::same_installation(&live, &a.snapshot) {
+        if omniphony_adapter::same_installation(&live, back) {
             Some(live)
         } else {
-            alignment::move_outputs(backend, a.endpoint, &live, &a.snapshot)
+            alignment::move_outputs(backend, a.endpoint, &live, back)
                 .ok()
                 // A lost reply: the write may have gone through all the same.
                 .or_else(|| {
                     backend
                         .discover(a.endpoint)
                         .ok()
-                        .filter(|live| omniphony_adapter::same_installation(live, &a.snapshot))
+                        .filter(|live| omniphony_adapter::same_installation(live, back))
                 })
         }
     });
     match restored {
         Some(live) => {
-            if live.revision != a.snapshot.revision {
-                a.restored_snapshot = Some(live);
+            if omniphony_adapter::same_installation(back, &a.snapshot) {
+                if live.revision != a.snapshot.revision {
+                    a.restored_snapshot = Some(live);
+                }
+            } else {
+                let _ = alignment::reconcile(a, &live);
             }
             let _ = alignment::save(a);
             true

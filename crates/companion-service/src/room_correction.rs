@@ -62,16 +62,43 @@ pub fn readiness(a: &Alignment) -> Result<(), String> {
 /// The stored responses of every speaker of `a`, and for each speaker the takes left
 /// out and why.
 pub fn measurements(a: &Alignment) -> Vec<(OutputMeasurements, Vec<String>)> {
+    // Sessions from before the filters were recorded: whatever the alignment's renderer
+    // reported, since nothing held them off then.
+    let unrecorded: Vec<String> = a
+        .measured_state()
+        .outputs
+        .iter()
+        .filter(|o| o.filter.is_some())
+        .map(|o| o.id.clone())
+        .collect();
+    let filtered = |recorded: &Option<Vec<String>>, id: &str| {
+        recorded
+            .as_ref()
+            .unwrap_or(&unrecorded)
+            .iter()
+            .any(|f| f == id)
+    };
     a.rows
         .iter()
         .map(|row| {
-            let mut sources: Vec<(PathBuf, bool, String)> = row
-                .take_folders
-                .iter()
-                .enumerate()
-                .map(|(pass, f)| (f.clone(), true, format!("pass {}", pass + 1)))
-                .collect();
+            let mut left_out = vec![];
+            let through = "played through its correction filter (measure it again: the Companion now holds the filters off)";
+            let mut sources: Vec<(PathBuf, bool, String)> = vec![];
+            if filtered(&a.filtered_outputs, &row.output_id) {
+                left_out.push(format!("main seat: {through}"));
+            } else {
+                sources.extend(
+                    row.take_folders
+                        .iter()
+                        .enumerate()
+                        .map(|(pass, f)| (f.clone(), true, format!("pass {}", pass + 1))),
+                );
+            }
             for capture in &a.positions {
+                if filtered(&capture.filtered_outputs, &row.output_id) {
+                    left_out.push(format!("{}: {through}", capture.step));
+                    continue;
+                }
                 for take in capture
                     .takes
                     .iter()
@@ -83,7 +110,6 @@ pub fn measurements(a: &Alignment) -> Vec<(OutputMeasurements, Vec<String>)> {
                 }
             }
             let mut measurements = vec![];
-            let mut left_out = vec![];
             for (folder, main_seat, label) in sources {
                 match read(
                     &crate::workspace::absolute(&folder),
@@ -295,7 +321,7 @@ pub fn export(a: &Alignment, design: &Design) -> AppResult<(PathBuf, Summary)> {
     Ok((directory, summary))
 }
 
-fn write_wav(path: &Path, taps: &[f32], rate: u32) -> AppResult<()> {
+pub(crate) fn write_wav(path: &Path, taps: &[f32], rate: u32) -> AppResult<()> {
     let mut writer = hound::WavWriter::create(
         path,
         hound::WavSpec {
