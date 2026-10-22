@@ -1331,6 +1331,7 @@ pub fn correction(
         applied: applied.then_some(live),
         uncertain: false,
         subwoofer: false,
+        pending: None,
         verification,
         verification_note: None,
         curves,

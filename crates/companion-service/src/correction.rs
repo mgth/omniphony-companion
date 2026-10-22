@@ -159,9 +159,15 @@ pub struct Correction {
     /// Set before a write; cleared once the renderer shows where it went.
     #[serde(default)]
     pub uncertain: bool,
-    /// Apply also applied the subwoofer's integration, which Undo then undoes.
+    /// Apply also applied the subwoofer's integration (or its filter alone, when the
+    /// write of its delay failed), which Undo then undoes.
     #[serde(default)]
     pub subwoofer: bool,
+    /// What the last write asked for, kept while it is uncertain: a readback that
+    /// matches it settles it even where the hashes alone are ambiguous (every speaker
+    /// had a filter, so the original and the comparison play the same).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending: Option<Target>,
     pub verification: Option<Verification>,
     pub verification_note: Option<String>,
     /// Per speaker, the design's curves, read from the export.
@@ -183,7 +189,8 @@ pub enum Live {
 }
 
 /// What Apply is asked for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Target {
     /// Every correction filter (and the subwoofer's integration when chosen).
     Corrected,
@@ -269,6 +276,30 @@ impl Correction {
             _ if self.applied.is_none() && !self.uncertain => Live::Original,
             _ => Live::Other,
         }
+    }
+    /// Whether `live` plays exactly what `to` asks for: every design hash, the recorded
+    /// filters with an identity where none was, or the recorded filters exactly.
+    pub fn matches(&self, live: &Snapshot, to: Target) -> bool {
+        if self.filters.is_empty() {
+            return false;
+        }
+        let identity = identity_hash();
+        self.filters.iter().all(|filter| {
+            let Some(now) = hash_of(live, &filter.output_id) else {
+                return false;
+            };
+            if to == Target::Corrected {
+                return now == Some(filter.taps.hash.as_str());
+            }
+            let Some(previous) = self.previous_of(&filter.output_id) else {
+                return false;
+            };
+            let before = previous.filter.as_ref().map(|f| f.taps.hash.as_str());
+            match to {
+                Target::Compare => now == before.or(Some(identity.as_str())),
+                _ => now == before,
+            }
+        })
     }
     /// Whether Omniphony's configuration holds what plays of this correction.
     pub fn saved(&self, live: &Snapshot) -> Saved {
@@ -449,6 +480,7 @@ pub fn compute(a: &Alignment, choices: Choices) -> Result<Correction, String> {
         applied: None,
         uncertain: false,
         subwoofer: false,
+        pending: None,
         verification: None,
         verification_note: None,
         curves,
@@ -652,6 +684,12 @@ pub fn apply_readiness(
             live.sample_rate, c.settings.sample_rate
         ));
     }
+    // The filters were designed for the speakers as the alignment measured them: a
+    // speaker routed elsewhere, split at another crossover or retuned in Studio under the
+    // same name is no longer that speaker. Undo stays possible.
+    if to != Target::Original && a.live_state(live) == LiveState::Other {
+        return Err("Omniphony's speakers changed since this alignment was measured (routing, crossover, mute, gain or delay): measure a new alignment, then compute the correction again.".into());
+    }
     let state = c.live_state(live);
     match to {
         Target::Corrected => match state {
@@ -769,7 +807,8 @@ pub fn apply<B: Backend + ?Sized>(
     }
     let subwoofer = match to {
         Target::Corrected => first && with_subwoofer(a, &c),
-        Target::Original => c.subwoofer && a.bass.as_ref().is_some_and(|b| b.is_applied()),
+        // Whatever of the subwoofer this correction changed, a partial Apply included.
+        Target::Original => c.subwoofer && a.bass.is_some(),
         Target::Compare => false,
     };
     let bass = a.bass.clone();
@@ -817,6 +856,7 @@ pub fn apply<B: Backend + ?Sized>(
     }
     let ids: Vec<String> = filters.iter().map(|f| f.output_id.clone()).collect();
     c.uncertain = true;
+    c.pending = Some(to);
     if subwoofer {
         a.application_uncertain = true;
     }
@@ -843,17 +883,12 @@ pub fn apply<B: Backend + ?Sized>(
         }
         Ok(current)
     })();
-    let expected = match to {
-        Target::Corrected => Live::Corrected,
-        Target::Compare => Live::Comparing,
-        Target::Original => Live::Original,
-    };
     let bass_expected = match to {
         Target::Corrected => LiveState::Applied,
         _ => LiveState::Original,
     };
     let reached = |s: &Snapshot| {
-        c.live_state(s) == expected
+        c.matches(s, to)
             && (!subwoofer
                 || bass
                     .as_ref()
@@ -863,6 +898,7 @@ pub fn apply<B: Backend + ?Sized>(
         Ok(snapshot) if reached(&snapshot) => {
             let mut c = c;
             c.uncertain = false;
+            c.pending = None;
             match to {
                 Target::Corrected if first => {
                     c.applied = Some(snapshot.clone());
@@ -923,11 +959,36 @@ fn settle_partial_subwoofer(a: &mut Alignment, live: &Snapshot) -> Result<(), St
 /// Record where `live` stands with `a`'s correction, settling an uncertain write when
 /// the renderer shows which way it went. Returns whether that changed the record.
 pub fn reconcile(a: &mut Alignment, live: &Snapshot) -> bool {
-    let bass_applied = a.bass.as_ref().is_some_and(|b| b.is_applied());
+    // The subwoofer still owes Undo something: its integration applied, or its filter
+    // left playing by an Apply whose delay write failed.
+    let subwoofer_owed = a.bass.as_ref().is_some_and(|b| {
+        b.is_applied()
+            || b.analysis
+                .as_ref()
+                .and_then(|x| x.filter.as_ref())
+                .is_some_and(|f| hash_of(live, &b.plan.subwoofer) == Some(Some(f.hash.as_str())))
+    });
     let Some(c) = &mut a.correction else {
         return false;
     };
     let before = c.clone();
+    // An uncertain write that reached what it asked for, ambiguous hashes included.
+    if c.uncertain
+        && let Some(to) = c.pending
+        && c.matches(live, to)
+    {
+        c.uncertain = false;
+        c.pending = None;
+        if to == Target::Original {
+            c.applied = None;
+            c.verification = None;
+            c.verification_note = None;
+            c.subwoofer &= subwoofer_owed;
+        } else {
+            c.applied = Some(live.clone());
+        }
+        return *c != before;
+    }
     match c.live_state(live) {
         Live::Corrected | Live::Comparing if !c.previous.is_empty() => {
             c.uncertain = false;
@@ -942,9 +1003,12 @@ pub fn reconcile(a: &mut Alignment, live: &Snapshot) -> bool {
                 c.verification = None;
                 c.verification_note = None;
             }
-            c.subwoofer &= bass_applied;
+            c.subwoofer &= subwoofer_owed;
         }
         _ => {}
+    }
+    if !c.uncertain {
+        c.pending = None;
     }
     *c != before
 }

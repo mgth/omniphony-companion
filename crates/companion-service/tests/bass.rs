@@ -112,6 +112,8 @@ struct Rig {
     lose_silencing_ack: AtomicBool,
     /// Captures fail, as when the microphone input disappears.
     fail_captures: AtomicBool,
+    /// The next gain/delay write is refused before it changes anything.
+    refuse_next_outputs: AtomicBool,
     batches: Mutex<Vec<Batch>>,
 }
 
@@ -181,6 +183,7 @@ impl Rig {
             writes: Mutex::new(0),
             lose_silencing_ack: AtomicBool::new(false),
             fail_captures: AtomicBool::new(false),
+            refuse_next_outputs: AtomicBool::new(false),
             batches: Mutex::new(vec![]),
         }
     }
@@ -260,6 +263,9 @@ impl Backend for Rig {
         expected: Snapshot,
         settings: Vec<OutputSetting>,
     ) -> Result<Snapshot, String> {
+        if self.refuse_next_outputs.swap(false, Ordering::Relaxed) {
+            return Err("renderer refused the request (busy)".into());
+        }
         let mut state = self.snapshot.lock().unwrap();
         if *state != expected {
             return Err("stale".into());
@@ -822,6 +828,7 @@ fn the_room_correction_applies_and_undoes_the_subwoofer_with_the_speakers_filter
         applied: None,
         uncertain: false,
         subwoofer: false,
+        pending: None,
         verification: None,
         verification_note: None,
         curves: vec![],
@@ -873,4 +880,23 @@ fn the_room_correction_applies_and_undoes_the_subwoofer_with_the_speakers_filter
         a.correction.as_ref().unwrap().live_state(&after),
         Live::Original
     );
+
+    // The filters went through but the subwoofer's delay did not: Undo still owes the
+    // subwoofer its filter back, and takes it.
+    rig.refuse_next_outputs.store(true, Ordering::Relaxed);
+    assert!(correction::apply(&rig, &mut a, Target::Corrected).is_err());
+    assert_eq!(
+        hash("LFE"),
+        Some(proposal.filter.as_ref().unwrap().hash.clone())
+    );
+    assert!(a.correction.as_ref().unwrap().subwoofer);
+    assert!(!a.bass.as_ref().unwrap().is_applied());
+    correction::apply(&rig, &mut a, Target::Original).unwrap();
+    assert_eq!(hash("FL"), None);
+    assert_eq!(hash("LFE"), None);
+    assert!(omniphony_adapter::same_installation(
+        &rig.discover(endpoint).unwrap(),
+        &original
+    ));
+    assert!(!a.correction.as_ref().unwrap().subwoofer);
 }

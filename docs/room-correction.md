@@ -121,9 +121,17 @@ Omniphony then holds as a live filter with the same hash as the file) and the
 subwoofer as it was measured, its delay first. The original file stays named in
 Omniphony's configuration: a Reload in Studio plays it from the file again.
 
-Every write marks the correction uncertain first. A refusal (another client wrote in
+Apply and the comparison are refused when Omniphony's speakers no longer match the
+alignment the correction was designed from (an output routed elsewhere, another
+crossover, mute, gain or delay than the alignment's original or applied settings);
+Undo stays possible. If the filters went through but the subwoofer's delay write did
+not, Undo still takes the subwoofer's filter back.
+
+Every write marks the correction uncertain first and records what it asked for. A refusal (another client wrote in
 between, or an old renderer) or a lost reply is settled by reading the renderer back:
-the hashes show whether it is corrected, comparing, original or none of these. While it
+the hashes show whether it is corrected, comparing, original or none of these, and
+when every speaker had a filter before (the original and the comparison then play the
+same), the recorded request decides. While it
 is unknown, nothing else is sent, and the next connection settles it the same way.
 Applying twice changes nothing.
 

@@ -733,3 +733,46 @@ fn speakers_with_filters_are_measured_without_them_and_filtered_takes_are_left_o
             .contains("Undo the applied correction first")
     );
 }
+
+#[test]
+fn filters_are_not_applied_to_speakers_routed_or_split_otherwise_since_the_alignment() {
+    let root = tempfile::tempdir().unwrap();
+    let rig = Rig::new(root.path());
+    let mut a = computed(&rig, root.path());
+    {
+        let mut state = rig.snapshot.lock().unwrap();
+        state.outputs[0].freq_low_hz = Some(80.0);
+        rig.bump(&mut state);
+    }
+    let e = correction::apply(&rig, &mut a, Target::Corrected).unwrap_err();
+    assert!(
+        e.contains("changed since this alignment was measured"),
+        "{e}"
+    );
+    assert_eq!(rig.filter_writes.load(Ordering::Relaxed), 0);
+    assert!(!a.correction.as_ref().unwrap().uncertain);
+}
+
+#[test]
+fn undo_is_recognised_when_every_speaker_had_a_filter_before() {
+    let root = tempfile::tempdir().unwrap();
+    let rig = Rig::new(root.path());
+    let mut a = computed(&rig, root.path());
+    rig.load_file("L", &root.path().join("L.wav"), &[0.9, 0.05]);
+    rig.load_file("R", &root.path().join("R.wav"), &[0.8, -0.05]);
+    correction::apply(&rig, &mut a, Target::Corrected).unwrap();
+    // Original and the comparison now play the same filters.
+    correction::apply(&rig, &mut a, Target::Original).unwrap();
+    let c = a.correction.as_ref().unwrap();
+    assert!(c.applied.is_none() && !c.uncertain && c.pending.is_none());
+    assert_eq!(state(&rig, &a), Live::Original);
+    // And after a lost reply, the readback settles it the same way.
+    correction::apply(&rig, &mut a, Target::Corrected).unwrap();
+    rig.lose_filter_ack.store(true, Ordering::Relaxed);
+    assert!(correction::apply(&rig, &mut a, Target::Original).is_err());
+    let c = a.correction.as_ref().unwrap();
+    assert!(c.applied.is_none() && !c.uncertain, "{c:?}");
+    // Computing again is allowed once undone.
+    let r = correction::readiness(&a, Some(&live(&rig)), Some(protocol::VERSION));
+    assert!(r.blocker.is_none(), "{:?}", r.blocker);
+}
