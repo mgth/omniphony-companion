@@ -114,6 +114,9 @@ struct Rig {
     fail_captures: AtomicBool,
     /// The next gain/delay write is refused before it changes anything.
     refuse_next_outputs: AtomicBool,
+    /// After that refusal, the renderer cannot be read until reconnected.
+    blind_after_refusal: AtomicBool,
+    unreadable: AtomicBool,
     batches: Mutex<Vec<Batch>>,
 }
 
@@ -184,6 +187,8 @@ impl Rig {
             lose_silencing_ack: AtomicBool::new(false),
             fail_captures: AtomicBool::new(false),
             refuse_next_outputs: AtomicBool::new(false),
+            blind_after_refusal: AtomicBool::new(false),
+            unreadable: AtomicBool::new(false),
             batches: Mutex::new(vec![]),
         }
     }
@@ -247,6 +252,9 @@ impl Backend for Rig {
         Ok(vec![])
     }
     fn discover(&self, _: SocketAddr) -> Result<Snapshot, String> {
+        if self.unreadable.load(Ordering::Relaxed) {
+            return Err("renderer unreachable".into());
+        }
         Ok(self.snapshot.lock().unwrap().clone())
     }
     fn measure(
@@ -264,6 +272,9 @@ impl Backend for Rig {
         settings: Vec<OutputSetting>,
     ) -> Result<Snapshot, String> {
         if self.refuse_next_outputs.swap(false, Ordering::Relaxed) {
+            if self.blind_after_refusal.load(Ordering::Relaxed) {
+                self.unreadable.store(true, Ordering::Relaxed);
+            }
             return Err("renderer refused the request (busy)".into());
         }
         let mut state = self.snapshot.lock().unwrap();
@@ -899,4 +910,25 @@ fn the_room_correction_applies_and_undoes_the_subwoofer_with_the_speakers_filter
         &original
     ));
     assert!(!a.correction.as_ref().unwrap().subwoofer);
+
+    // The same, with the renderer unreadable until a reconnect: the alignment is
+    // reloaded, reconciled, and Undo still takes the subwoofer's filter back.
+    rig.refuse_next_outputs.store(true, Ordering::Relaxed);
+    rig.blind_after_refusal.store(true, Ordering::Relaxed);
+    assert!(correction::apply(&rig, &mut a, Target::Corrected).is_err());
+    let mut a = alignment::load(&a.directory).unwrap();
+    assert!(a.correction.as_ref().unwrap().uncertain);
+    rig.unreadable.store(false, Ordering::Relaxed);
+    rig.blind_after_refusal.store(false, Ordering::Relaxed);
+    alignment::reconcile(&mut a, &rig.discover(endpoint).unwrap()).unwrap();
+    let c = a.correction.as_ref().unwrap();
+    assert!(!c.uncertain && c.subwoofer, "{c:?}");
+    assert!(!a.application_uncertain);
+    correction::apply(&rig, &mut a, Target::Original).unwrap();
+    assert_eq!(hash("FL"), None);
+    assert_eq!(hash("LFE"), None);
+    assert!(omniphony_adapter::same_installation(
+        &rig.discover(endpoint).unwrap(),
+        &original
+    ));
 }

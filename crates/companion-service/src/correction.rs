@@ -859,6 +859,11 @@ pub fn apply<B: Backend + ?Sized>(
     c.pending = Some(to);
     if subwoofer {
         a.application_uncertain = true;
+        // Persisted before the write: whatever reaches the subwoofer, Undo owes it back,
+        // even when the outcome is only read after a reconnect.
+        if to == Target::Corrected {
+            c.subwoofer = true;
+        }
     }
     a.correction = Some(c.clone());
     alignment::save(a)?;
