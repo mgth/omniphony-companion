@@ -800,6 +800,7 @@ fn alignment_session_stays_above_individual_results_and_unqualified_actions_stay
             physical_levels_changed: false,
             retake_snapshots: vec![],
             zeroed_snapshot: None,
+            bass: None,
         });
         let mut app = CompanionApp::preview(&ctx, controller);
         for _ in 0..3 {
@@ -1384,6 +1385,7 @@ fn loaded_alignment_pass_opens_its_latest_analysis_and_labels_the_original_verdi
         physical_levels_changed: false,
         retake_snapshots: vec![],
         zeroed_snapshot: None,
+        bass: None,
     };
     write_json(&dir.path().join("alignment-state.json"), &alignment).unwrap();
     controller.state.takes = vec![first, second];
@@ -3072,6 +3074,150 @@ fn the_setup_rail_exports_correction_filters_below_the_positions() {
     let rail = |needle: &str| text.iter().find(|(t, _)| t == needle).unwrap().1;
     assert!(rail("Correction filters").top() > rail("Other positions").top());
     assert!(rail("Correction filters").right() < 310.0);
+    assert!(central(&frame(&mut app, &ctx, vec![], size), "Front left").is_some());
+    assert_eq!(starts.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn the_setup_rail_shows_the_subwoofer_integration_below_the_filters() {
+    use calibration_core::bass::{Proposal, Setting, SpeakerResult, Subwoofer};
+    use companion_service::bass::{Analysis, BassIntegration, BassTake, Capture, Part, Plan};
+    let ctx = egui::Context::default();
+    let (mut controller, starts) = support::ready();
+    let size = Vec2::new(1160.0, 2600.0);
+    let mut a = support::room_alignment(&controller);
+    let speakers = ["Front left", "Front right", "Center"];
+    let sweep = omniphony_adapter::Sweep {
+        duration_ms: 3000,
+        peak_dbfs: -20.0,
+        start_hz: 20.0,
+        end_hz: 320.0,
+    };
+    let plan = Plan {
+        subwoofer: "Subwoofer".into(),
+        groups: vec![companion_service::sweep_plan::Group {
+            sweep,
+            reference: "Center".into(),
+            outputs: speakers.iter().map(|s| (*s).into()).collect(),
+        }],
+        skipped: vec![],
+        direct: companion_service::sweep_plan::Group {
+            sweep,
+            reference: "Subwoofer".into(),
+            outputs: vec!["Subwoofer".into()],
+        },
+    };
+    let take = |id: &str, part: Part| BassTake {
+        output_id: id.into(),
+        part,
+        take_folder: "synthetic-bass/take".into(),
+        accepted: true,
+        rejection_reason: None,
+        response: true,
+    };
+    let mut takes = vec![take("Subwoofer", Part::Direct)];
+    for id in speakers {
+        takes.push(take(id, Part::Sum));
+        takes.push(take(id, Part::Speaker));
+        if id != "Center" {
+            takes.push(take(id, Part::Subwoofer));
+        }
+    }
+    let speaker = |id: &str, excluded: Option<&str>| SpeakerResult {
+        output_id: id.into(),
+        crossover_hz: 80.0,
+        band_hz: Some([40.0, 160.0]),
+        positions: 1,
+        excluded: excluded.map(Into::into),
+        phase_delay_ms: Some(17.4),
+        phase_inverted: Some(true),
+        phase_fit_deg: Some(3.0),
+        subwoofer_share_db: Some(25.0),
+        consistency_db: Some(0.1),
+        best: None,
+        position_best: vec![],
+        summation_db: Some([-2.26, -0.03, -0.03]),
+        sum_level_db: None,
+        balance_db: Some([11.7, 0.2]),
+        warnings: vec![],
+        curves: None,
+    };
+    let proposal = Proposal {
+        method: "synthetic".into(),
+        subwoofer: Subwoofer {
+            output_id: "Subwoofer".into(),
+            delay_ms: 20.0,
+            gain_db: -3.0,
+            others_max_delay_ms: 3.45,
+            max_delay_ms: 100.0,
+        },
+        setting: Setting {
+            delay_change_ms: -18.0,
+            inverted: true,
+            gain_change_db: -6.0,
+        },
+        subwoofer_delay_ms: 2.0,
+        subwoofer_gain_db: -9.0,
+        others_delay_ms: 0.0,
+        mode_correction: false,
+        speakers: vec![
+            speaker("Front left", None),
+            speaker("Front right", None),
+            speaker(
+                "Center",
+                Some(
+                    "The subwoofer plays little of its low band: its bass goes to other speakers.",
+                ),
+            ),
+        ],
+        warnings: vec![],
+        refusal: None,
+    };
+    let snapshot = controller.state.snapshot.clone().unwrap();
+    a.bass = Some(BassIntegration {
+        plan,
+        snapshot,
+        level_probe: None,
+        captures: vec![Capture {
+            step: None,
+            position_id: a.settings.position_id.clone(),
+            directory: "synthetic-bass".into(),
+            takes,
+            error: None,
+        }],
+        analysis: Some(Analysis {
+            directory: "synthetic-bass/bass-integration".into(),
+            proposal,
+            mode_correction: None,
+            filter: None,
+            notes: vec![],
+        }),
+        analysis_error: None,
+        applied: None,
+        verification: None,
+        verification_note: None,
+    });
+    controller.state.alignment = Some(a);
+    let mut app = CompanionApp::preview(&ctx, controller);
+    frame(&mut app, &ctx, vec![], size);
+    let text = labels(&frame(&mut app, &ctx, vec![], size));
+    for needle in [
+        "Subwoofer",
+        "Main seat",
+        "measured",
+        "Main seat again",
+        "Position 1",
+        "Subwoofer: delay 20.0 → 2.0 ms, level -6.0 dB, polarity inverted",
+        "-2.3 → 0.0 dB",
+        "left out",
+        "Apply",
+        "Confirm",
+    ] {
+        assert!(text.iter().any(|(t, _)| t == needle), "{needle}: {text:?}");
+    }
+    let rail = |needle: &str| text.iter().find(|(t, _)| t == needle).unwrap().1;
+    assert!(rail("Main seat again").top() > rail("Correction filters").top());
+    assert!(rail("Main seat again").right() < 310.0);
     assert!(central(&frame(&mut app, &ctx, vec![], size), "Front left").is_some());
     assert_eq!(starts.load(Ordering::Relaxed), 0);
 }

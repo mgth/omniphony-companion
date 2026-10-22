@@ -153,6 +153,8 @@ fn measure(args: Measure) -> AppResult<()> {
             end_hz: args.end_hz,
         },
         out_dir: args.out_dir,
+        bass_managed: false,
+        bypass_output_filters: false,
     };
     eprintln!(
         "Recording input channel {}. Playback: {} → {} → {}. Ctrl+C stops and saves a rejected take.",

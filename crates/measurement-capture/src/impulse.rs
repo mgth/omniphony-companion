@@ -70,6 +70,11 @@ pub struct FullResponse {
     /// How far, in frames, each segment's correlation peak lies after its anchor frame:
     /// the window starts on a whole frame. Within ±0.5.
     pub anchor_offsets: [f64; 3],
+    /// How far, in frames, the speaker segment's correlation peak lies after the
+    /// midpoint of the two reference peaks: where it would be with the reference's own
+    /// acoustic delay. Responses measured against the same reference at one position
+    /// share this time base, whichever sequence played them.
+    pub target_offset: f64,
     /// `reference_before`, `speaker`, `reference_after`, of equal length.
     pub segments: [Vec<f32>; 3],
 }
@@ -187,6 +192,7 @@ pub fn full_response(
         rate,
         anchor: pre,
         anchor_offsets: peaks.map(|p| p - p.round()),
+        target_offset: peaks[1] - 0.5 * (peaks[0] + peaks[2]),
         segments,
     })
 }

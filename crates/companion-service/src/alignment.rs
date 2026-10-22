@@ -162,6 +162,10 @@ pub struct Alignment {
     /// correction only: they never change the rows, the proposal or the delays.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub positions: Vec<crate::positions::PositionCapture>,
+    /// The subwoofer's integration with the speakers, measured with this alignment
+    /// applied ([`crate::bass`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bass: Option<crate::bass::BassIntegration>,
 }
 /// How an alignment treats the gains and delays the renderer has when it starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -385,6 +389,7 @@ pub fn capture<B: Backend + ?Sized>(
         zeroed_snapshot: None,
         level_probe: None,
         positions: vec![],
+        bass: None,
     };
     let mut takes = vec![];
     // Preserve one calibration file for both passes, even if its source is edited.
@@ -1647,6 +1652,16 @@ pub enum LiveState {
 }
 impl Alignment {
     pub fn live_state(&self, live: &Snapshot) -> LiveState {
+        // The subwoofer integration applied on top: the state it was measured in.
+        if let Some(bass) = &self.bass
+            && self.bass_applied(live)
+            && !same_live_settings(live, &bass.snapshot)
+        {
+            return self.own_live_state(&bass.snapshot);
+        }
+        self.own_live_state(live)
+    }
+    fn own_live_state(&self, live: &Snapshot) -> LiveState {
         let same = |reference: &Snapshot| same_live_settings(live, reference);
         let applied = self
             .profile
@@ -1664,6 +1679,25 @@ impl Alignment {
     }
 }
 
+impl Alignment {
+    /// Whether `live` holds the subwoofer integration applied on top of this alignment.
+    pub fn bass_applied(&self, live: &Snapshot) -> bool {
+        self.bass
+            .as_ref()
+            .is_some_and(|b| b.is_applied() && b.live_state(live) == LiveState::Applied)
+    }
+    /// Why the alignment's own Apply, Undo or Confirm must wait.
+    fn bass_blocker(&self) -> Result<(), String> {
+        if self.bass.as_ref().is_some_and(|b| b.is_applied()) {
+            return Err(
+                "Undo the subwoofer integration first: it is applied on top of this alignment."
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+}
+
 /// Studio keeps and republishes gains rounded to 0.1 dB, and delays come back from
 /// the renderer within about a microsecond: a renderer within half a gain step and a
 /// hundredth of a millisecond (under half a sample) of a state is in that state.
@@ -1672,7 +1706,7 @@ const LIVE_DELAY_TOLERANCE_MS: f32 = 0.01;
 
 /// Whether two snapshots carry the same settings as far as a renderer, and the
 /// state recorded from it, can show them: within Studio's rounding.
-fn same_live_settings(a: &Snapshot, b: &Snapshot) -> bool {
+pub(crate) fn same_live_settings(a: &Snapshot, b: &Snapshot) -> bool {
     omniphony_adapter::same_settings_within(a, b, LIVE_GAIN_TOLERANCE_DB, LIVE_DELAY_TOLERANCE_MS)
 }
 
@@ -1682,13 +1716,36 @@ fn same_live_settings(a: &Snapshot, b: &Snapshot) -> bool {
 /// settles an uncertain application: the renderer shows which way it went. A renderer
 /// with other settings leaves the session as it is, uncertainty included.
 pub fn reconcile(a: &mut Alignment, live: &Snapshot) -> Result<bool, String> {
+    // The subwoofer integration first: whether it is on top decides the alignment's state.
+    let mut bass_changed = false;
+    if let Some(bass) = &mut a.bass {
+        match bass.live_state(live) {
+            LiveState::Applied if bass.applied.as_ref() != Some(live) => {
+                bass.applied = Some(live.clone());
+                bass_changed = true;
+            }
+            LiveState::Original if bass.applied.is_some() => {
+                bass.applied = None;
+                bass.verification = None;
+                bass.verification_note = None;
+                bass_changed = true;
+            }
+            _ => {}
+        }
+    }
     let state = a.live_state(live);
     if a.application_uncertain && state == LiveState::Other {
-        return Ok(false);
+        if bass_changed {
+            save(a)?;
+        }
+        return Ok(bass_changed);
     }
     let settled = std::mem::take(&mut a.application_uncertain);
     let changed = settled
+        | bass_changed
         | match state {
+            // The subwoofer integration on top: the alignment's own state stays recorded.
+            _ if a.bass_applied(live) => false,
             LiveState::Applied if a.applied_snapshot.as_ref() != Some(live) => {
                 a.applied_snapshot = Some(live.clone());
                 true
@@ -1742,6 +1799,7 @@ pub fn apply<B: Backend + ?Sized>(
     if alignment.application_uncertain {
         return Err("Previous application is uncertain. Inspect the renderer and saved original settings before further changes.".into());
     }
+    alignment.bass_blocker()?;
     let targets = alignment.targets(restore)?;
     // The recorded states come from the renderer, so from Studio's rounding too.
     if let Some(restored) = &alignment.restored_snapshot
@@ -1814,6 +1872,7 @@ pub fn verify<B: Backend + ?Sized>(
     if a.application_uncertain {
         return Err("Application state is uncertain.".into());
     }
+    a.bass_blocker()?;
     a.targets(false)?;
     a.verification = None;
     a.verification_pass_reports = Some(vec![]);
@@ -1900,6 +1959,8 @@ pub fn request(
             .then(|| PathBuf::from(&s.calibration_path)),
         sweep: s.sweep,
         out_dir,
+        bass_managed: false,
+        bypass_output_filters: false,
     })
 }
 pub fn save(a: &Alignment) -> Result<(), String> {

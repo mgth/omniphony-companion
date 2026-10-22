@@ -188,6 +188,7 @@ mod tests {
             rate,
             anchor,
             anchor_offsets: [0.0; 3],
+            target_offset: 0.0,
             segments: [segment.clone(), segment.clone(), segment],
         }
     }

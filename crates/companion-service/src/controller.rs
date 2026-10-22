@@ -54,6 +54,17 @@ pub trait Backend: Send + Sync + 'static {
         let _ = endpoint;
         Err("Switching the output is unavailable in this backend.".into())
     }
+    /// Replace the room correction filters of some outputs at once (protocol 8),
+    /// revision-checked and live only: each named output gets its taps, or no filter.
+    fn set_output_filters(
+        &self,
+        endpoint: SocketAddr,
+        expected: Snapshot,
+        filters: Vec<OutputFilter>,
+    ) -> Result<Snapshot, String> {
+        let _ = (endpoint, expected, filters);
+        Err("Sending correction filters is unavailable in this backend.".into())
+    }
     fn measure_batch(
         &self,
         request: MeasureRequest,
@@ -77,6 +88,13 @@ pub trait Backend: Send + Sync + 'static {
         progress: &mut dyn FnMut(MeasureProgress),
     ) -> Result<TakeOutcome, String>;
 }
+/// One output's room correction filter to send: its taps at their rate, or none.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OutputFilter {
+    pub output_id: String,
+    pub taps: Option<(u32, Vec<f32>)>,
+}
+
 pub struct LiveBackend;
 impl Backend for LiveBackend {
     fn manual_levels(
@@ -129,6 +147,35 @@ impl Backend for LiveBackend {
     fn use_speaker_output(&self, endpoint: SocketAddr) -> Result<Snapshot, String> {
         Client::connect(endpoint, Duration::from_secs(2))
             .and_then(|mut client| client.use_speaker_output())
+            .map_err(|e| e.to_string())
+    }
+    fn set_output_filters(
+        &self,
+        endpoint: SocketAddr,
+        expected: Snapshot,
+        filters: Vec<OutputFilter>,
+    ) -> Result<Snapshot, String> {
+        let mut client =
+            Client::connect(endpoint, Duration::from_secs(2)).map_err(|e| e.to_string())?;
+        // Discovery agrees on the protocol version before anything is uploaded.
+        client.discover().map_err(|e| e.to_string())?;
+        let mut settings = Vec::with_capacity(filters.len());
+        for filter in filters {
+            let upload = match &filter.taps {
+                Some((rate, taps)) => Some(
+                    client
+                        .upload_filter(*rate, taps)
+                        .map_err(|e| e.to_string())?,
+                ),
+                None => None,
+            };
+            settings.push(omniphony_adapter::protocol::OutputFilterSetting {
+                output_id: filter.output_id,
+                filter: upload,
+            });
+        }
+        client
+            .set_output_filters(&expected, settings)
             .map_err(|e| e.to_string())
     }
     fn measure(
@@ -215,6 +262,22 @@ pub enum Job {
     },
     /// Designing the current alignment's room-correction filters and exporting them.
     RoomCorrection,
+    /// The subwoofer's integration measured at the main seat (`step` `None`) or at a
+    /// guide step, the speakers of its plan in order.
+    Bass {
+        step: Option<usize>,
+        output_ids: Vec<String>,
+        current: usize,
+    },
+    /// The subwoofer integration applied, or undone with `restore`.
+    ApplyBass {
+        restore: bool,
+    },
+    /// The applied subwoofer integration measured again at the main seat.
+    VerifyBass {
+        output_ids: Vec<String>,
+        current: usize,
+    },
     ApplyAlignment,
     LoadAlignment,
     RestoreWorkspace,
@@ -338,6 +401,13 @@ enum Event {
     ),
     AlignmentLoaded(Box<Result<LoadedAlignment, String>>),
     PositionMeasured(Box<alignment::Alignment>, Result<(), String>),
+    /// A subwoofer measurement, Apply, Undo or Confirm finished; the renderer as read
+    /// back after an Apply or Undo.
+    BassUpdated(
+        Box<alignment::Alignment>,
+        Result<Option<Snapshot>, String>,
+        Option<Snapshot>,
+    ),
     RoomCorrectionExported(PathBuf, Box<Result<RoomCorrectionExport, String>>),
     Reviewed(Box<Result<SavedReview, String>>),
     SavedTakeLoaded(PathBuf, Box<Result<TakeOutcome, String>>),
@@ -424,6 +494,8 @@ impl Controller {
                     | Job::Alignment { .. }
                     | Job::Remeasure { .. }
                     | Job::Position { .. }
+                    | Job::Bass { .. }
+                    | Job::VerifyBass { .. }
             )
         )
     }
@@ -980,6 +1052,8 @@ impl Controller {
                 .then(|| PathBuf::from(&settings.calibration_path)),
             sweep: settings.sweep,
             out_dir,
+            bass_managed: false,
+            bypass_output_filters: false,
         };
         self.cancelled = Arc::new(AtomicBool::new(false));
         self.state.job = Some(Job::Measure {
@@ -1022,6 +1096,7 @@ impl Controller {
     fn active_alignment_blocks(&self) -> bool {
         self.state.alignment.as_ref().is_some_and(|a| {
             a.application_uncertain
+                || a.bass.as_ref().is_some_and(|b| b.is_applied())
                 || a.applied_snapshot.is_some()
                     && self.alignment_live_state() == Some(alignment::LiveState::Applied)
         })
@@ -1359,6 +1434,182 @@ impl Controller {
             let _ = sender.send(Event::PositionMeasured(Box::new(a), result));
         });
     }
+    /// The current alignment, the connected renderer and its address, when the
+    /// renderer can be reached.
+    fn connected_alignment(&self) -> Result<(&alignment::Alignment, &Snapshot), String> {
+        if self.busy() {
+            return Err("Wait for the current operation to finish.".into());
+        }
+        let a = self
+            .state
+            .alignment
+            .as_ref()
+            .ok_or("Align levels and delays at the main seat first.")?;
+        let live = self
+            .state
+            .snapshot
+            .as_ref()
+            .ok_or("Connect to Omniphony first.")?;
+        if self.state.endpoint.is_none() {
+            return Err("Connect to Omniphony first.".into());
+        }
+        Ok((a, live))
+    }
+    /// Whether the subwoofer can be measured now at the main seat (`step` `None`) or at
+    /// a guide step; the error says why not.
+    pub fn bass_readiness(&self, step: Option<usize>) -> Result<(), String> {
+        let (a, live) = self.connected_alignment()?;
+        crate::bass::readiness(a, live, step)?;
+        if self.settings != a.settings {
+            return Err(
+                "Restore the measurement settings this alignment was captured with.".into(),
+            );
+        }
+        if self.selected_input().is_some_and(|i| i.is_monitor) {
+            return Err("Choose an acoustic microphone, not a sink monitor.".into());
+        }
+        let plan = match (&a.bass, step) {
+            (Some(bass), Some(_)) => bass.plan.clone(),
+            _ => crate::bass::plan(a, live)?,
+        };
+        self.output_readiness(&plan.groups[0].reference)
+    }
+    /// Measure the subwoofer's integration at the main seat (`None`, which starts over)
+    /// or at guide step `step`.
+    pub fn measure_bass(&mut self, step: Option<usize>) {
+        if let Err(error) = self.bass_readiness(step) {
+            self.state.error = Some(error);
+            return;
+        }
+        let Some(mut a) = self.state.alignment.clone() else {
+            return;
+        };
+        a.endpoint = self.state.endpoint.expect("checked by bass_readiness");
+        let output_ids = match (&a.bass, step, &self.state.snapshot) {
+            (Some(bass), Some(_), _) => bass.plan.speakers(),
+            (_, _, Some(live)) => crate::bass::plan(&a, live)
+                .map(|p| p.speakers())
+                .unwrap_or_default(),
+            _ => vec![],
+        };
+        self.state.job = Some(Job::Bass {
+            step,
+            output_ids,
+            current: 0,
+        });
+        self.start_bass_job(a, move |backend, a, cancel, progress| {
+            crate::bass::measure(backend, a, step, cancel, progress).map(|()| None)
+        });
+    }
+    /// Whether the subwoofer integration can be applied (or undone, with `restore`) now.
+    pub fn bass_apply_readiness(&self, restore: bool) -> Result<(), String> {
+        let (a, live) = self.connected_alignment()?;
+        crate::bass::apply_readiness(a, live, restore)
+    }
+    /// Apply the subwoofer integration, or undo it with `restore`.
+    pub fn apply_bass(&mut self, restore: bool) {
+        if let Err(error) = self.bass_apply_readiness(restore) {
+            self.state.error = Some(error);
+            return;
+        }
+        let Some(mut a) = self.state.alignment.clone() else {
+            return;
+        };
+        a.endpoint = self
+            .state
+            .endpoint
+            .expect("checked by bass_apply_readiness");
+        self.state.job = Some(Job::ApplyBass { restore });
+        self.start_bass_job(a, move |backend, a, _, _| {
+            crate::bass::apply(backend, a, restore).map(Some)
+        });
+    }
+    /// Whether the applied subwoofer integration can be confirmed now.
+    pub fn bass_verify_readiness(&self) -> Result<(), String> {
+        let (a, live) = self.connected_alignment()?;
+        crate::bass::verify_readiness(a, live)?;
+        if self.settings != a.settings {
+            return Err(
+                "Restore the measurement settings this alignment was captured with.".into(),
+            );
+        }
+        let reference = a
+            .bass
+            .as_ref()
+            .and_then(|b| b.plan.groups.first())
+            .map(|g| g.reference.clone());
+        self.output_readiness(reference.as_deref().unwrap_or_default())
+    }
+    /// Measure the applied subwoofer integration again at the main seat.
+    pub fn verify_bass(&mut self) {
+        if let Err(error) = self.bass_verify_readiness() {
+            self.state.error = Some(error);
+            return;
+        }
+        let Some(mut a) = self.state.alignment.clone() else {
+            return;
+        };
+        a.endpoint = self
+            .state
+            .endpoint
+            .expect("checked by bass_verify_readiness");
+        let output_ids = a
+            .bass
+            .as_ref()
+            .map(|b| b.plan.speakers())
+            .unwrap_or_default();
+        for b in [self.state.alignment.as_mut(), Some(&mut a)]
+            .into_iter()
+            .flatten()
+            .filter_map(|a| a.bass.as_mut())
+        {
+            b.verification = None;
+            b.verification_note = Some("Confirmation in progress.".into());
+        }
+        self.state.job = Some(Job::VerifyBass {
+            output_ids,
+            current: 0,
+        });
+        self.start_bass_job(a, |backend, a, cancel, progress| {
+            crate::bass::verify(backend, a, cancel, progress).map(|()| None)
+        });
+    }
+    fn start_bass_job(
+        &mut self,
+        mut a: alignment::Alignment,
+        job: impl FnOnce(
+            &dyn Backend,
+            &mut alignment::Alignment,
+            &AtomicBool,
+            &mut dyn FnMut(usize, MeasureProgress),
+        ) -> Result<Option<Snapshot>, String>
+        + Send
+        + 'static,
+    ) {
+        self.state.progress = Some(MeasureProgress::Preparing);
+        self.state.stopping = false;
+        self.state.error = None;
+        self.cancelled = Arc::new(AtomicBool::new(false));
+        let (backend, sender, cancel) = (
+            self.backend.clone(),
+            self.sender.clone(),
+            self.cancelled.clone(),
+        );
+        std::thread::spawn(move || {
+            let result = catch_job(|| {
+                job(backend.as_ref(), &mut a, &cancel, &mut |i, p| {
+                    let _ = sender.send(Event::BatchProgress(i, p));
+                })
+            });
+            // Silencing outputs and putting them back gives the renderer a newer
+            // revision: read it again, whatever happened.
+            let live = match &result {
+                Ok(Some(snapshot)) => Some(snapshot.clone()),
+                _ => backend.discover(a.endpoint).ok(),
+            };
+            let _ = sender.send(Event::BassUpdated(Box::new(a), result, live));
+        });
+    }
     /// Whether the current alignment's correction filters can be designed now; the
     /// error says why not. No renderer is needed: only stored responses are read.
     pub fn room_correction_readiness(&self) -> Result<(), String> {
@@ -1521,6 +1772,15 @@ impl Controller {
                 output_ids,
                 current,
                 ..
+            })
+            | Some(Job::Bass {
+                output_ids,
+                current,
+                ..
+            })
+            | Some(Job::VerifyBass {
+                output_ids,
+                current,
             }) => output_ids.get(*current).map(String::as_str),
             _ => None,
         }
@@ -1642,6 +1902,8 @@ impl Controller {
             sweep: settings.sweep,
             out_dir: PathBuf::from(&settings.output_root)
                 .join(format!("batch-{stamp}-{}", self.sequence)),
+            bass_managed: false,
+            bypass_output_filters: false,
         };
         self.cancelled = Arc::new(AtomicBool::new(false));
         self.state.job = Some(Job::Batch {
@@ -1904,6 +2166,15 @@ impl Controller {
                             output_ids,
                             current,
                             ..
+                        }
+                        | Job::Bass {
+                            output_ids,
+                            current,
+                            ..
+                        }
+                        | Job::VerifyBass {
+                            output_ids,
+                            current,
                         },
                     ) = &mut self.state.job
                     {
@@ -1914,6 +2185,19 @@ impl Controller {
                 Event::RoomCorrectionExported(directory, result) => {
                     self.state.room_correction = Some((directory, *result));
                     self.state.job = None;
+                }
+                Event::BassUpdated(a, result, live) => {
+                    if let Err(e) = result {
+                        self.state.error = Some(e);
+                    }
+                    if let Some(snapshot) = live {
+                        self.state.saved_snapshot = Some(snapshot.clone());
+                        self.state.snapshot = Some(snapshot);
+                    }
+                    self.state.alignment = Some(*a);
+                    self.state.job = None;
+                    self.state.progress = None;
+                    self.state.stopping = false;
                 }
                 Event::PositionMeasured(a, result) => {
                     if let Err(e) = result {

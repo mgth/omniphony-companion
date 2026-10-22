@@ -257,7 +257,119 @@ impl Client {
         Ok(snapshot)
     }
 
+    /// Upload one room correction filter (protocol 8): `taps` at `sample_rate`, in
+    /// chunks of at most [`protocol::MAX_UPLOAD_CHUNK_TAPS`]. Returns the upload id that
+    /// [`Self::set_output_filters`] applies, once the renderer holds every tap with the
+    /// hash of what was sent. Uploading only stores the taps: nothing plays them yet.
+    pub fn upload_filter(&mut self, sample_rate: u32, taps: &[f32]) -> Result<String> {
+        if self.version < protocol::FILTERS_VERSION {
+            return Err(Error::Protocol(FILTERS_UNSUPPORTED.into()));
+        }
+        if taps.is_empty()
+            || taps.iter().any(|t| !t.is_finite())
+            || taps.iter().all(|&t| t == 0.0)
+            || taps.len() > protocol::max_filter_taps(sample_rate)
+        {
+            return Err(Error::Protocol(
+                "a filter needs finite taps, not all zero, at most 1.5 s long".into(),
+            ));
+        }
+        let total_taps =
+            u32::try_from(taps.len()).map_err(|_| Error::Protocol("filter is too long".into()))?;
+        let hash = protocol::taps_hash_hex(taps);
+        let mut upload_id: Option<String> = None;
+        let mut offset = 0usize;
+        loop {
+            let end = (offset + protocol::MAX_UPLOAD_CHUNK_TAPS).min(taps.len());
+            let reply = self.exchange(protocol::Command::UploadFilter {
+                upload_id: upload_id.clone(),
+                sample_rate,
+                total_taps,
+                offset: offset as u32,
+                taps: protocol::encode_taps(&taps[offset..end]),
+            })?;
+            let protocol::Reply::FilterUpload { upload } = reply else {
+                return Err(self.fail("expected the state of a filter upload"));
+            };
+            if upload.upload_id.is_empty()
+                || upload.upload_id.len() > 128
+                || upload_id.as_ref().is_some_and(|id| *id != upload.upload_id)
+                || upload.sample_rate != sample_rate
+                || upload.total_taps != total_taps
+                || upload.received_taps as usize != end
+            {
+                return Err(self.fail("the renderer acknowledged another filter upload"));
+            }
+            upload_id = Some(upload.upload_id);
+            offset = end;
+            if offset == taps.len() {
+                if upload.hash.as_deref() != Some(hash.as_str()) {
+                    return Err(self.fail("the renderer holds other taps than were uploaded"));
+                }
+                return Ok(upload_id.expect("set above"));
+            }
+        }
+    }
+
+    /// Replace the filters of some outputs at once (protocol 8): an upload id from
+    /// [`Self::upload_filter`], or `None` for no filter. Revision-checked and live only,
+    /// like [`Self::set_outputs`]; refused during a session. A lost acknowledgement is
+    /// not success.
+    pub fn set_output_filters(
+        &mut self,
+        expected: &Snapshot,
+        filters: Vec<protocol::OutputFilterSetting>,
+    ) -> Result<Snapshot> {
+        if self.session.is_some() {
+            return Err(Error::Protocol(
+                "end measurement before changing filters".into(),
+            ));
+        }
+        if self.version < protocol::FILTERS_VERSION {
+            return Err(Error::Protocol(FILTERS_UNSUPPORTED.into()));
+        }
+        validate_snapshot(expected).map_err(Error::Protocol)?;
+        let mut seen = std::collections::HashSet::new();
+        if filters.is_empty()
+            || filters.iter().any(|f| {
+                !seen.insert(&f.output_id) || !expected.outputs.iter().any(|o| o.id == f.output_id)
+            })
+        {
+            return Err(Error::Protocol("invalid output filter targets".into()));
+        }
+        let reply = self.exchange(protocol::Command::SetOutputFilters {
+            expected_revision: expected.revision.clone(),
+            outputs: filters.clone(),
+        })?;
+        let protocol::Reply::Snapshot { snapshot } = reply else {
+            return Err(self.fail("missing filter acknowledgement; the outcome is uncertain"));
+        };
+        validate_snapshot(&snapshot).map_err(|e| self.fail(&e))?;
+        // Gains, delays and every output left alone stay as they were.
+        if !same_installation(&snapshot, expected)
+            || filters.iter().any(|f| {
+                let output = snapshot.outputs.iter().find(|o| o.id == f.output_id);
+                match (&f.filter, output.and_then(|o| o.filter.as_ref())) {
+                    (None, None) => false,
+                    (Some(_), Some(filter)) => filter.origin != protocol::FilterOrigin::Live,
+                    _ => true,
+                }
+            })
+        {
+            return Err(
+                self.fail("the renderer reads back other filters; refresh before proceeding")
+            );
+        }
+        Ok(snapshot)
+    }
+
     pub fn begin(&mut self, snapshot: &Snapshot) -> Result<()> {
+        self.begin_with(snapshot, false)
+    }
+
+    /// Begin a session; with `bypass_output_filters` (protocol 8) every output plays
+    /// without its room correction filter until the session ends, however it ends.
+    pub fn begin_with(&mut self, snapshot: &Snapshot, bypass_output_filters: bool) -> Result<()> {
         if self.session.is_some() {
             return Err(Error::Protocol("a session is already open".into()));
         }
@@ -265,15 +377,22 @@ impl Client {
         if let Some(reason) = &snapshot.unavailable_reason {
             return Err(Error::Protocol(reason.clone()));
         }
+        if bypass_output_filters && self.version < protocol::FILTERS_VERSION {
+            return Err(Error::Protocol(FILTERS_UNSUPPORTED.into()));
+        }
+        // The session's snapshot says whether it holds the filters off.
+        let mut expected = snapshot.clone();
+        expected.output_filters_bypassed = bypass_output_filters;
         match self.exchange_negotiated(protocol::Command::Begin {
             expected_revision: snapshot.revision.clone(),
+            bypass_output_filters,
         })? {
             protocol::Reply::Session {
                 session_id,
                 snapshot: confirmed,
                 lease_ms,
                 signal: None,
-            } if confirmed == *snapshot
+            } if confirmed == expected
                 && !session_id.is_empty()
                 && session_id.len() <= 128
                 && lease_ms == protocol::LEASE_MS =>
@@ -351,15 +470,59 @@ impl Client {
         sequence_outputs: &[String],
         signal: Sweep,
     ) -> Result<Progress> {
-        let session_id = self.session_id()?;
-        let reply = self.exchange(protocol::Command::Start {
-            session_id,
+        self.start_sequence_with(
             signal_id,
-            output_id: output_id.into(),
-            reference_output_id: reference_output_id.map(str::to_owned),
-            sequence_outputs: sequence_outputs.to_vec(),
+            output_id,
+            reference_output_id,
+            sequence_outputs,
             signal,
-        })?;
+            false,
+        )
+    }
+
+    /// [`Self::start_sequence`]; with `bass_managed` (protocol 8) each target's sweep
+    /// plays as a source at its layout position, through the crossover and bass
+    /// management, while the reference sweeps stay direct. A renderer whose filters are
+    /// still loading or switching (`filters_settling`, protocol 8) has played nothing:
+    /// the same signal is started again shortly, the session kept alive meanwhile.
+    pub fn start_sequence_with(
+        &mut self,
+        signal_id: u64,
+        output_id: &str,
+        reference_output_id: Option<&str>,
+        sequence_outputs: &[String],
+        signal: Sweep,
+        bass_managed: bool,
+    ) -> Result<Progress> {
+        let session_id = self.session_id()?;
+        if bass_managed && self.version < protocol::FILTERS_VERSION {
+            return Err(Error::Protocol(FILTERS_UNSUPPORTED.into()));
+        }
+        let deadline = Instant::now() + SETTLING_LIMIT;
+        let mut next_status = Instant::now() + SETTLING_STATUS;
+        let reply = loop {
+            let reply = self.exchange(protocol::Command::Start {
+                session_id: session_id.clone(),
+                signal_id,
+                output_id: output_id.into(),
+                reference_output_id: reference_output_id.map(str::to_owned),
+                sequence_outputs: sequence_outputs.to_vec(),
+                signal,
+                bass_managed,
+            });
+            match reply {
+                Err(Error::Server { code, .. })
+                    if code == "filters_settling" && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(SETTLING_RETRY);
+                    if Instant::now() >= next_status {
+                        self.status()?;
+                        next_status = Instant::now() + SETTLING_STATUS;
+                    }
+                }
+                reply => break reply?,
+            }
+        };
         let Some(progress) = self.accept_session(reply)? else {
             return Err(self.fail("missing signal acknowledgement"));
         };
@@ -368,6 +531,7 @@ impl Client {
             || progress.sequence_outputs != sequence_outputs
             || progress.reference_output_id.as_deref() != reference_output_id
             || progress.signal != signal
+            || progress.bass_managed != bass_managed
         {
             return Err(self.fail("renderer acknowledged a different signal"));
         }
@@ -391,6 +555,7 @@ impl Client {
                     && old.reference_output_id == new.reference_output_id
                     && old.sequence_outputs == new.sequence_outputs
                     && old.signal == new.signal
+                    && old.bass_managed == new.bass_managed
                     && new.rendered_frames >= old.rendered_frames
                     && (matches!(old.state, SignalState::Queued | SignalState::Rendering)
                         || old.state == new.state)
@@ -547,6 +712,13 @@ impl Read for DeadlineReader<'_> {
     }
 }
 
+const FILTERS_UNSUPPORTED: &str = "this Omniphony build cannot measure or apply room correction filters (protocol 8); update Omniphony";
+/// How long a Start refused with `filters_settling` is tried again, and how often.
+const SETTLING_LIMIT: Duration = Duration::from_secs(5);
+const SETTLING_RETRY: Duration = Duration::from_millis(100);
+/// The lease is renewed this often while a Start waits for the filters.
+const SETTLING_STATUS: Duration = Duration::from_millis(500);
+
 /// Farther than any room: a declared distance beyond it is not a speaker position.
 const MAX_DISTANCE_M: f32 = 1_000.0;
 
@@ -662,6 +834,65 @@ pub fn same_configuration(a: &Snapshot, b: &Snapshot) -> bool {
         }
         out.gain_db = expected.gain_db;
         out.delay_ms = expected.delay_ms;
+        // A filter that finished loading meanwhile is still the same filter.
+        if let (Some(filter), Some(was)) = (&out.filter, &expected.filter)
+            && filter.origin == was.origin
+            && filter.file == was.file
+            && (was.hash.is_none() || filter.hash == was.hash)
+            && was.state == protocol::FilterLoadState::Pending
+        {
+            out.filter = expected.filter.clone();
+        }
     }
     normalized == *b
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn snapshot(state: protocol::FilterLoadState, hash: Option<&str>) -> Snapshot {
+        Snapshot {
+            instance_id: "test".into(),
+            revision: "test:1".into(),
+            sample_rate: 48000,
+            master_gain_db: 0.0,
+            max_delay_ms: 250.0,
+            unavailable_reason: None,
+            output_filters_bypassed: false,
+            outputs: vec![protocol::Output {
+                id: "L".into(),
+                name: "L".into(),
+                index: 0,
+                gain_db: 0.0,
+                delay_ms: 0.0,
+                muted: false,
+                freq_low_hz: None,
+                freq_high_hz: None,
+                azimuth_deg: None,
+                elevation_deg: None,
+                distance_m: None,
+                filter: Some(protocol::OutputFilter {
+                    origin: protocol::FilterOrigin::File,
+                    file: Some("L.wav".into()),
+                    state,
+                    sample_rate: hash.map(|_| 48000),
+                    taps: hash.map(|_| 8192),
+                    hash: hash.map(Into::into),
+                    error: None,
+                }),
+            }],
+        }
+    }
+    #[test]
+    fn a_filter_that_finished_loading_is_the_same_configuration() {
+        use protocol::FilterLoadState::*;
+        let pending = snapshot(Pending, None);
+        let loaded = snapshot(Loaded, Some("0123456789abcdef"));
+        assert!(same_configuration(&loaded, &pending));
+        // Not the other way round, nor another filter.
+        assert!(!same_configuration(&pending, &loaded));
+        let mut other = loaded.clone();
+        other.outputs[0].filter.as_mut().unwrap().file = Some("other.wav".into());
+        assert!(!same_configuration(&other, &pending));
+    }
 }

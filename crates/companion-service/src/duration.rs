@@ -194,6 +194,7 @@ mod tests {
                 output_id: "FL".into(),
                 reference_output_id: Some("C".into()),
                 sequence_outputs: vec!["FL".into(); 4],
+                bass_managed: false,
                 signal: sweep(1000),
                 state: SignalState::Rendering,
                 rendered_frames: (total as f64 * fraction) as u64,

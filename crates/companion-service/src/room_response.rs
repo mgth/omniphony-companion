@@ -56,6 +56,11 @@ pub struct StoredResponse {
     pub anchor_frame: usize,
     /// Where each segment's correlation peak lies after `anchor_frame`, in frames.
     pub anchor_offsets: [f64; 3],
+    /// How far the speaker segment's correlation peak lies after the midpoint of the
+    /// reference peaks, in frames: the speaker's time base relative to the reference's
+    /// arrival. Absent in responses stored before it was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_offset_frames: Option<f64>,
     pub frames: usize,
     pub output_id: String,
     pub reference_output_id: String,
@@ -147,6 +152,7 @@ pub fn store(
         file_sample_rate: capture_rate,
         anchor_frame: full.anchor,
         anchor_offsets: full.anchor_offsets,
+        target_offset_frames: Some(full.target_offset),
         frames,
         output_id: args.output.clone(),
         reference_output_id: args.reference_output.clone(),
@@ -191,6 +197,7 @@ pub fn load(directory: &Path) -> AppResult<(StoredResponse, FullResponse)> {
         rate: stored.sample_rate_hz,
         anchor: stored.anchor_frame,
         anchor_offsets: stored.anchor_offsets,
+        target_offset: stored.target_offset_frames.unwrap_or(0.0),
         segments,
     };
     Ok((stored, full))

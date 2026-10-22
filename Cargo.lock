@@ -568,6 +568,7 @@ dependencies = [
  "hound",
  "measurement-capture",
  "omniphony-adapter",
+ "rustfft",
  "serde",
  "serde_json",
  "sha2",
@@ -2270,7 +2271,7 @@ dependencies = [
 [[package]]
 name = "omniphony-osc-contract"
 version = "0.1.0"
-source = "git+https://github.com/mgth/Omniphony?rev=371497349a525a78349a8fdb02336ce32b0fd4b0#371497349a525a78349a8fdb02336ce32b0fd4b0"
+source = "git+https://github.com/mgth/Omniphony?rev=38439cff9e707a4051f462eca466e9ce24931a76#38439cff9e707a4051f462eca466e9ce24931a76"
 dependencies = [
  "serde",
 ]

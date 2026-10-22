@@ -60,6 +60,7 @@ impl Rig {
                 master_gain_db: 0.0,
                 max_delay_ms: 100.0,
                 unavailable_reason: None,
+                output_filters_bypassed: false,
                 outputs: ["L", "R", "Unused"]
                     .iter()
                     .enumerate()
@@ -75,6 +76,7 @@ impl Rig {
                         azimuth_deg: None,
                         elevation_deg: None,
                         distance_m: None,
+                        filter: None,
                     })
                     .collect(),
             }),
@@ -2029,6 +2031,7 @@ fn room_correction_passes_sweep_each_range_and_keep_the_subwoofer_out_of_timing(
         azimuth_deg: None,
         elevation_deg: None,
         distance_m: None,
+        filter: None,
     });
     let outcome = room_capture(&rig, root.path(), room_settings(false), &["L", "R", "Sub"]);
     let a = &outcome.alignment;
@@ -2188,6 +2191,7 @@ fn measuring_from_zero_leaves_a_bass_only_output_as_it_was() {
         azimuth_deg: None,
         elevation_deg: None,
         distance_m: None,
+        filter: None,
     });
     rig.snapshot.lock().unwrap().outputs[1].gain_db = -2.0;
     let settings = room_settings(false);

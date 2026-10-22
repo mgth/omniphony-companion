@@ -45,6 +45,8 @@ fn main() -> companion_service::AppResult<()> {
             end_hz: 10000.0,
         },
         out_dir: args[3].clone().into(),
+        bass_managed: false,
+        bypass_output_filters: false,
     };
     let result = batch::measure(
         request.clone(),
