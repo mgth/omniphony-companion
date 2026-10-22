@@ -146,6 +146,7 @@ pub fn ready() -> (Controller, Arc<AtomicUsize>) {
     c.state.inputs = backend.inputs().unwrap();
     c.state.snapshot = Some(backend.discover(endpoint).unwrap());
     c.state.endpoint = Some(endpoint);
+    c.state.protocol_version = Some(omniphony_adapter::protocol::VERSION);
     c.settings.device = Some("Preview audio interface".into());
     c.settings.reference_output = Some("Front left".into());
     (c, starts)
@@ -448,6 +449,8 @@ pub fn alignment(
         retake_snapshots: vec![],
         zeroed_snapshot: None,
         bass: None,
+        correction: None,
+        filtered_outputs: None,
     }
 }
 
@@ -603,6 +606,8 @@ pub fn room_alignment(controller: &Controller) -> companion_service::alignment::
         retake_snapshots: vec![],
         zeroed_snapshot: None,
         bass: None,
+        correction: None,
+        filtered_outputs: None,
     }
 }
 
@@ -701,6 +706,8 @@ pub fn late_device_alignment(
         retake_snapshots: vec![],
         zeroed_snapshot: None,
         bass: None,
+        correction: None,
+        filtered_outputs: None,
     }
 }
 
@@ -950,5 +957,418 @@ pub fn bench_alignment(controller: &mut Controller) -> companion_service::alignm
         retake_snapshots: vec![],
         zeroed_snapshot: None,
         bass: None,
+        correction: None,
+        filtered_outputs: None,
+    }
+}
+
+/// The preview subwoofer's integration with the three front speakers, analysed at the
+/// main seat: 18 ms early, inverted, 6 dB loud; Center's bass goes elsewhere.
+pub fn bass_integration(controller: &Controller) -> companion_service::bass::BassIntegration {
+    use calibration_core::bass::{Proposal, Setting, SpeakerResult, Subwoofer};
+    use companion_service::bass::{Analysis, BassIntegration, BassTake, Capture, Part, Plan};
+    let speakers = ["Front left", "Front right", "Center"];
+    let sweep = omniphony_adapter::Sweep {
+        duration_ms: 3000,
+        peak_dbfs: -20.0,
+        start_hz: 20.0,
+        end_hz: 320.0,
+    };
+    let plan = Plan {
+        subwoofer: "Subwoofer".into(),
+        groups: vec![companion_service::sweep_plan::Group {
+            sweep,
+            reference: "Center".into(),
+            outputs: speakers.iter().map(|s| (*s).into()).collect(),
+        }],
+        skipped: vec![],
+        direct: companion_service::sweep_plan::Group {
+            sweep,
+            reference: "Subwoofer".into(),
+            outputs: vec!["Subwoofer".into()],
+        },
+    };
+    let take = |id: &str, part: Part| BassTake {
+        output_id: id.into(),
+        part,
+        take_folder: "synthetic-bass/take".into(),
+        accepted: true,
+        rejection_reason: None,
+        response: true,
+    };
+    let mut takes = vec![take("Subwoofer", Part::Direct)];
+    for id in speakers {
+        takes.push(take(id, Part::Sum));
+        takes.push(take(id, Part::Speaker));
+        if id != "Center" {
+            takes.push(take(id, Part::Subwoofer));
+        }
+    }
+    let speaker = |id: &str, excluded: Option<&str>| SpeakerResult {
+        output_id: id.into(),
+        crossover_hz: 80.0,
+        band_hz: Some([40.0, 160.0]),
+        positions: 1,
+        excluded: excluded.map(Into::into),
+        phase_delay_ms: Some(17.4),
+        phase_inverted: Some(true),
+        phase_fit_deg: Some(3.0),
+        subwoofer_share_db: Some(25.0),
+        consistency_db: Some(0.1),
+        best: None,
+        position_best: vec![],
+        summation_db: Some([-2.26, -0.03, -0.03]),
+        sum_level_db: None,
+        balance_db: Some([11.7, 0.2]),
+        warnings: vec![],
+        curves: None,
+    };
+    let proposal = Proposal {
+        method: "synthetic".into(),
+        subwoofer: Subwoofer {
+            output_id: "Subwoofer".into(),
+            delay_ms: 20.0,
+            gain_db: -3.0,
+            others_max_delay_ms: 3.45,
+            max_delay_ms: 100.0,
+        },
+        setting: Setting {
+            delay_change_ms: -18.0,
+            inverted: true,
+            gain_change_db: -6.0,
+        },
+        subwoofer_delay_ms: 2.0,
+        subwoofer_gain_db: -9.0,
+        others_delay_ms: 0.0,
+        mode_correction: false,
+        speakers: vec![
+            speaker("Front left", None),
+            speaker("Front right", None),
+            speaker(
+                "Center",
+                Some(
+                    "The subwoofer plays little of its low band: its bass goes to other speakers.",
+                ),
+            ),
+        ],
+        warnings: vec![],
+        refusal: None,
+    };
+    BassIntegration {
+        plan,
+        snapshot: controller.state.snapshot.clone().unwrap(),
+        level_probe: None,
+        captures: vec![Capture {
+            step: None,
+            position_id: controller.settings.position_id.clone(),
+            directory: "synthetic-bass".into(),
+            takes,
+            error: None,
+        }],
+        analysis: Some(Analysis {
+            directory: "synthetic-bass/bass-integration".into(),
+            proposal,
+            mode_correction: None,
+            filter: None,
+            notes: vec![],
+        }),
+        analysis_error: None,
+        applied: None,
+        verification: None,
+        verification_note: None,
+    }
+}
+
+/// Where the preview's correction stands: computed only, applied, compared, saved in
+/// Omniphony's configuration, or applied and confirmed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CorrectionState {
+    Computed,
+    Applied,
+    Comparing,
+    Saved,
+    Verified,
+}
+
+/// Synthetic curves of a speaker with a bump at `peak_hz`, a dip at `dip_hz` and a
+/// low-frequency roll-off, and the correction that flattens it within its limits.
+fn synthetic_curves(peak_hz: f64, dip_hz: f64) -> calibration_core::room_correction::Curves {
+    let frequency_hz: Vec<f64> = calibration_core::room_correction::grid(70.0, 16000.0);
+    let bump =
+        |hz: f64, at: f64, width: f64, db: f64| db * (-((hz / at).log2() / width).powi(2)).exp();
+    let target = |hz: f64| {
+        if hz <= 1000.0 {
+            0.0
+        } else {
+            -3.0 * (hz / 1000.0).log10()
+        }
+    };
+    let measured: Vec<f64> = frequency_hz
+        .iter()
+        .map(|&hz| {
+            target(hz)
+                + bump(hz, peak_hz, 0.4, 6.0)
+                + bump(hz, dip_hz, 0.25, -5.0)
+                + bump(hz, 55.0, 0.15, 7.0)
+                - 12.0 * (60.0 / hz).powi(4).min(1.0)
+                + 0.8 * (hz.log2() * 5.0).sin() * (hz / 2000.0).min(1.0)
+        })
+        .collect();
+    let correction: Vec<f64> = frequency_hz
+        .iter()
+        .zip(&measured)
+        .map(|(&hz, m)| {
+            if !(100.0..=10000.0).contains(&hz) {
+                0.0
+            } else {
+                (target(hz) - m).clamp(-15.0, 3.5)
+            }
+        })
+        .collect();
+    let filter: Vec<f64> = correction
+        .iter()
+        .enumerate()
+        .map(|(i, _)| {
+            let lo = i.saturating_sub(4);
+            let hi = (i + 5).min(correction.len());
+            correction[lo..hi].iter().sum::<f64>() / (hi - lo) as f64
+        })
+        .collect();
+    let f32s = |v: &[f64]| v.iter().map(|&x| x as f32).collect();
+    let predicted: Vec<f64> = measured.iter().zip(&filter).map(|(m, f)| m + f).collect();
+    calibration_core::room_correction::Curves {
+        target_db: f32s(
+            &frequency_hz
+                .iter()
+                .map(|&hz| target(hz))
+                .collect::<Vec<_>>(),
+        ),
+        measured_db: f32s(&measured),
+        correction_db: f32s(&correction),
+        filter_db: f32s(&filter),
+        predicted_db: f32s(&predicted),
+        frequency_hz,
+    }
+}
+
+/// The preview alignment's room correction: three front speakers corrected, the
+/// surrounds refused, the subwoofer integrated; `state` says where Omniphony stands.
+/// Updates the controller's live snapshot to match `state`.
+pub fn correction(
+    controller: &mut Controller,
+    a: &mut companion_service::alignment::Alignment,
+    state: CorrectionState,
+) {
+    use calibration_core::room_correction::{DesignSettings, PositionAgreement, Reflection};
+    use companion_service::{
+        correction::{Correction, Previous, SpeakerCheck, SpeakerFilter, Taps, Verification},
+        room_correction::{OutputSummary, Summary},
+    };
+    use omniphony_adapter::protocol::{self, FilterLoadState, FilterOrigin};
+    let corrected = [
+        ("Front left", 4.3, 1.2, 3.1, -8.4, 250.0, 2900.0),
+        ("Front right", 3.9, 1.6, 2.4, -6.1, 320.0, 4200.0),
+        ("Center", 5.1, 1.4, 3.5, -9.7, 180.0, 1800.0),
+    ];
+    let taps = |i: usize| vec![1.0_f32, 0.01 * (i as f32 + 1.0), -0.003];
+    let summary = |id: &str| OutputSummary {
+        output_id: id.into(),
+        file: None,
+        refusal: None,
+        warnings: vec![],
+        calibrated: true,
+        taps: Some(8192),
+        sample_rate: Some(48000),
+        headroom_db: None,
+        deepest_cut_db: None,
+        normalisation_db: Some(-0.4),
+        band_hz: Some([89.0, 10000.0]),
+        low_limit_hz: Some(62.0),
+        evaluation_band_hz: Some([89.0, 10000.0]),
+        deviation_db: None,
+        repeatability_db: Some(0.3),
+        spread_db: Some(1.1),
+        positions: vec![
+            PositionAgreement {
+                position_id: "reference-seat".into(),
+                main_seat: true,
+                takes: 2,
+                deviation_db: Some(0.6),
+            },
+            PositionAgreement {
+                position_id: "reference-seat/left-30cm".into(),
+                main_seat: false,
+                takes: 1,
+                deviation_db: Some(if id == "Front right" { 2.4 } else { 1.0 }),
+            },
+        ],
+        reflections: vec![],
+    };
+    let mut outputs = vec![];
+    let mut filters = vec![];
+    let mut curves = vec![];
+    for (i, (id, before, after, boost, cut, peak, dip)) in corrected.iter().enumerate() {
+        let mut s = summary(id);
+        s.file = Some(format!("{id}.wav"));
+        s.headroom_db = Some(*boost);
+        s.deepest_cut_db = Some(*cut);
+        s.deviation_db = Some([*before, *after]);
+        if *id == "Front left" {
+            s.reflections = vec![Reflection {
+                delay_ms: 2.38,
+                level_db: -4.1,
+                extra_path_cm: 81.6,
+            }];
+        }
+        if *id == "Front right" {
+            s.warnings = vec![
+                "Positions disagree: reference-seat/left-30cm is 2.4 dB from the average.".into(),
+            ];
+        }
+        outputs.push(s);
+        filters.push(SpeakerFilter {
+            output_id: (*id).into(),
+            taps: Taps {
+                file: format!("synthetic-room-correction/{id}.wav").into(),
+                sample_rate: 48000,
+                taps: 8192,
+                hash: protocol::taps_hash_hex(&taps(i)),
+            },
+        });
+        curves.push(((*id).to_owned(), synthetic_curves(*peak, *dip)));
+    }
+    for (id, reason) in [
+        (
+            "Surround left",
+            "No accepted response with its stored response to design from.",
+        ),
+        (
+            "Surround right",
+            "Its positions disagree too much: the median position is 3.4 dB from the average above 300 Hz.",
+        ),
+    ] {
+        let mut s = summary(id);
+        s.refusal = Some(reason.into());
+        s.taps = None;
+        s.sample_rate = None;
+        s.positions = vec![];
+        outputs.push(s);
+    }
+    let applied = state != CorrectionState::Computed;
+    let mut live = controller.state.snapshot.clone().unwrap();
+    if applied {
+        for (i, (id, ..)) in corrected.iter().enumerate() {
+            let o = live.outputs.iter_mut().find(|o| o.id == *id).unwrap();
+            let hash = if state == CorrectionState::Comparing {
+                companion_service::correction::identity_hash()
+            } else {
+                protocol::taps_hash_hex(&taps(i))
+            };
+            o.filter = Some(protocol::OutputFilter {
+                origin: if state == CorrectionState::Saved {
+                    FilterOrigin::File
+                } else {
+                    FilterOrigin::Live
+                },
+                file: (state == CorrectionState::Saved)
+                    .then(|| format!("room-correction/default/{id}-48000-{hash}.wav")),
+                state: FilterLoadState::Loaded,
+                sample_rate: Some(48000),
+                taps: Some(8192),
+                hash: Some(hash),
+                error: None,
+            });
+        }
+        live.revision = "ui-preview:2".into();
+        controller.state.snapshot = Some(live.clone());
+    }
+    let verification = (state == CorrectionState::Verified).then(|| Verification {
+        directory: "synthetic-room-correction/verification".into(),
+        speakers: corrected
+            .iter()
+            .zip(&curves)
+            .map(|((id, before, after, ..), (_, c))| SpeakerCheck {
+                output_id: (*id).into(),
+                deviation_db: [*before, *after, after + 0.3],
+                from_prediction_db: 0.6,
+                measured_db: c
+                    .predicted_db
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| v + 0.6 * ((i as f32) / 7.0).sin())
+                    .collect(),
+            })
+            .collect(),
+        warnings: vec![],
+    });
+    let mut bass = bass_integration(controller);
+    if applied {
+        bass.applied = Some(live.clone());
+    }
+    a.bass = Some(bass);
+    a.correction = Some(Correction {
+        choices: Default::default(),
+        settings: DesignSettings::default(),
+        directory: "synthetic-room-correction".into(),
+        summary: Summary {
+            schema_version: 1,
+            method: "synthetic".into(),
+            settings: DesignSettings::default(),
+            outputs,
+        },
+        filters,
+        previous: if applied {
+            corrected
+                .iter()
+                .map(|(id, ..)| Previous {
+                    output_id: (*id).into(),
+                    filter: None,
+                })
+                .collect()
+        } else {
+            vec![]
+        },
+        applied: applied.then_some(live),
+        uncertain: false,
+        subwoofer: false,
+        verification,
+        verification_note: None,
+        curves,
+    });
+}
+
+/// `count` guided positions measured around the main seat, the last one partly.
+pub fn measured_positions(a: &mut companion_service::alignment::Alignment, count: usize) {
+    for index in 0..count {
+        let measured = if index + 1 == count && count > 1 {
+            a.rows.len() - 1
+        } else {
+            a.rows.len()
+        };
+        let step = companion_service::positions::GUIDE[index];
+        a.positions
+            .push(companion_service::positions::PositionCapture {
+                step: step.id.into(),
+                position_id: companion_service::positions::position_id(
+                    &a.settings.position_id,
+                    &step,
+                ),
+                instruction: step.instruction.into(),
+                directory: format!("synthetic-position-{}", step.id).into(),
+                takes: a
+                    .rows
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| companion_service::positions::PositionTake {
+                        output_id: r.output_id.clone(),
+                        take_folder: format!("synthetic-position-{}/{i}", step.id).into(),
+                        accepted: i < measured,
+                        rejection_reason: (i >= measured).then(|| "clipped recording".into()),
+                        response: true,
+                    })
+                    .collect(),
+                error: None,
+                filtered_outputs: Some(vec![]),
+            });
     }
 }

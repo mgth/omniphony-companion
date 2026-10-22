@@ -1,5 +1,6 @@
 //! Native presentation only. Workers and measurement ownership live in companion-service.
 mod alignment_view;
+mod correction_view;
 mod manual_level_view;
 mod microphone_view;
 mod quality_view;
@@ -82,6 +83,9 @@ pub struct CompanionApp {
     /// The timing reference's distance the user entered on the room map; `None` fits
     /// the measured distances to the layout. Display only, kept as a view preference.
     room_reference_m: Option<f32>,
+    /// The speaker cards show the room correction instead of the alignment, once one is
+    /// computed. Display only.
+    pub correction_cards: bool,
 }
 
 impl CompanionApp {
@@ -179,6 +183,7 @@ impl CompanionApp {
             edit_reference: false,
             room_distances: None,
             room_reference_m: None,
+            correction_cards: true,
         }
     }
 
@@ -248,7 +253,10 @@ impl CompanionApp {
         self.sync_selected_analysis();
         if ctx.input(|i| i.viewport().close_requested())
             && (self.controller.cancellable()
-                || matches!(self.controller.state.job, Some(Job::ApplyAlignment)))
+                || matches!(
+                    self.controller.state.job,
+                    Some(Job::ApplyAlignment | Job::ApplyBass { .. } | Job::ApplyCorrection { .. })
+                ))
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.closing = true;
@@ -894,55 +902,83 @@ impl CompanionApp {
                 });
         });
         ui.add_space(23.0);
-        self.positions(ui);
-        ui.add_space(23.0);
-        self.correction_filters(ui);
-        ui.add_space(23.0);
-        self.subwoofer(ui);
+        self.room_correction(ui);
     }
 
-    /// The subwoofer's integration with the speakers around their crossover: measured,
-    /// proposed, applied live and confirmed.
-    fn subwoofer(&mut self, ui: &mut egui::Ui) {
-        use companion_service::positions::GUIDE;
-        section(ui, "06", "Subwoofer");
+    /// The guided room correction: the positions around the main seat (with the
+    /// subwoofer's integration), then the correction computed for review on the cards.
+    /// Apply, Original/Corrected, Confirm and Undo are in the bar below the cards.
+    fn room_correction(&mut self, ui: &mut egui::Ui) {
+        use companion_service::positions::{self, GUIDE};
+        section(ui, "04", "Room correction");
         ui.add_space(10.0);
-        let snapshot = self.controller.state.snapshot.clone();
-        let name = |id: &str| {
-            snapshot
-                .as_ref()
-                .and_then(|s| s.outputs.iter().find(|o| o.id == id))
-                .map_or(id.to_owned(), |o| o.name.clone())
-        };
-        let Some(a) = self.controller.state.alignment.clone() else {
+        let Some(a) = &self.controller.state.alignment else {
             ui.label(
-                RichText::new("After an alignment, measure how the subwoofer adds up with each speaker around their crossover, then set its delay, polarity, level and mode correction.")
-                    .small()
-                    .color(MUTED),
+                RichText::new(format!(
+                    "After an alignment at the main seat: measure {} positions around it, compute one correction filter per speaker with the subwoofer's integration, review it on the cards, apply, listen and confirm.",
+                    GUIDE.len()
+                ))
+                .small()
+                .color(MUTED),
             );
             return;
         };
+        enum Step {
+            Subwoofer,
+            Position(usize),
+            Compute,
+        }
+        let mut clicked = None;
         let job = self.controller.state.job.clone();
-        let running =
-            |step: Option<usize>| matches!(&job, Some(Job::Bass { step: s, .. }) if *s == step);
-        let bass = a.bass.as_ref();
+        let choices = self.controller.correction_choices;
         ui.label(
-            RichText::new("Each speaker with a low limit plays through bass management with the subwoofer silenced, the speakers silenced and both, at the main seat and around it; the room correction filters are held off meanwhile.")
+            RichText::new("Keep the microphone at ear height, pointing as at the main seat. Each speaker plays without its current filter while it is measured.")
                 .small()
                 .color(MUTED),
         );
         ui.add_space(6.0);
-        // Where it was measured.
-        let steps = std::iter::once(None).chain((0..GUIDE.len()).map(Some));
-        for step in steps {
-            let label = step.map_or("Main seat", |s| GUIDE[s].label);
-            let capture = bass.and_then(|b| b.capture(step.map(|s| GUIDE[s].id)));
-            let (status, color) = match capture {
-                _ if running(step) => ("measuring…".to_owned(), ACCENT),
-                Some(c) if bass.is_some_and(|b| c.complete(&b.plan)) => {
-                    ("measured".to_owned(), ACCENT)
-                }
-                Some(c) => (
+        let row = |ui: &mut egui::Ui,
+                   number: &str,
+                   next: bool,
+                   label: &str,
+                   hover: &str,
+                   (status, color): (String, Color32)| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(number).small().monospace().color(if next {
+                    ACCENT
+                } else {
+                    MUTED
+                }));
+                ui.add(egui::Label::new(RichText::new(label).small()).truncate())
+                    .on_hover_text(hover);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(RichText::new(status).small().color(color));
+                });
+            });
+        };
+        row(
+            ui,
+            "·",
+            false,
+            "Main seat",
+            "Measured by the alignment's two passes.",
+            ("from the alignment".into(), ACCENT),
+        );
+        // The subwoofer at the main seat first: the positions then measure it too.
+        let bass = a.bass.as_ref();
+        let has_subwoofer = bass.is_some()
+            || self
+                .controller
+                .state
+                .snapshot
+                .as_ref()
+                .is_some_and(|live| companion_service::bass::plan(a, live).is_ok());
+        if choices.with_subwoofer && has_subwoofer {
+            let measuring = matches!(&job, Some(Job::Bass { step: None, .. }));
+            let status = match bass.and_then(|b| b.capture(None).map(|c| (b, c))) {
+                _ if measuring => ("measuring…".to_owned(), ACCENT),
+                Some((b, c)) if c.complete(&b.plan) => ("measured".to_owned(), ACCENT),
+                Some((_, c)) => (
                     c.error
                         .as_deref()
                         .map_or("partly measured", |_| "stopped")
@@ -951,339 +987,41 @@ impl CompanionApp {
                 ),
                 None => ("not yet".to_owned(), MUTED),
             };
-            if step.is_some() && bass.is_none() {
-                break;
-            }
             ui.horizontal(|ui| {
-                ui.add(egui::Label::new(RichText::new(label).small()).truncate());
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let response = ui.label(RichText::new(status).small().color(color));
-                    if let Some(error) = capture.and_then(|c| c.error.as_deref()) {
-                        response.on_hover_text(error);
-                    }
-                });
+                row(
+                    ui,
+                    "·",
+                    bass.is_none(),
+                    "Subwoofer at the main seat",
+                    "Every speaker with a low limit through bass management with the subwoofer silenced, the speakers silenced and both, and the subwoofer's own sweep.",
+                    status,
+                );
             });
-        }
-        ui.add_space(4.0);
-        let next = bass.and_then(|b| {
-            (0..GUIDE.len()).find(|&s| {
-                b.capture(Some(GUIDE[s].id))
-                    .is_none_or(|c| !c.complete(&b.plan))
-            })
-        });
-        ui.horizontal_wrapped(|ui| {
             let ready = self.controller.bass_readiness(None);
-            let label = if bass.is_some() {
-                "Main seat again"
-            } else {
-                "Measure the subwoofer"
-            };
             if ui
-                .add_enabled(ready.is_ok(), egui::Button::new(label))
-                .on_hover_text("With the microphone at the main seat: a quiet level probe, then every speaker with a low limit through bass management in three states, and the subwoofer's own sweep. Starts the subwoofer measurements over.")
-                .on_disabled_hover_text(ready.as_ref().err().map(String::as_str).unwrap_or(""))
-                .clicked()
-            {
-                self.controller.measure_bass(None);
-            }
-            if let Some(step) = next {
-                let ready = self.controller.bass_readiness(Some(step));
-                if ui
-                    .add_enabled(ready.is_ok(), egui::Button::new(format!("Position {}", step + 1)))
-                    .on_hover_text(GUIDE[step].instruction)
-                    .on_disabled_hover_text(ready.as_ref().err().map(String::as_str).unwrap_or(""))
-                    .clicked()
-                {
-                    self.controller.measure_bass(Some(step));
-                }
-            }
-        });
-        let Some(bass) = bass else {
-            return;
-        };
-        for (id, reason) in &bass.plan.skipped {
-            ui.label(
-                RichText::new(format!("{}: {reason}", name(id)))
-                    .small()
-                    .color(MUTED),
-            );
-        }
-        if let Some(error) = &bass.analysis_error {
-            ui.label(RichText::new(error).small().color(RED));
-        }
-        let Some(analysis) = &bass.analysis else {
-            return;
-        };
-        let proposal = &analysis.proposal;
-        ui.add_space(6.0);
-        if let Some(reason) = &proposal.refusal {
-            ui.label(RichText::new(reason).small().color(WARM));
-        } else {
-            let sub = &proposal.subwoofer;
-            let mut text = format!(
-                "{}: delay {:.1} → {:.1} ms, level {:+.1} dB{}",
-                name(&sub.output_id),
-                sub.delay_ms,
-                proposal.subwoofer_delay_ms,
-                proposal.setting.gain_change_db,
-                if proposal.setting.inverted {
-                    ", polarity inverted"
-                } else {
-                    ""
-                }
-            );
-            if proposal.others_delay_ms > 0.0 {
-                text.push_str(&format!(
-                    ", every other output +{:.1} ms",
-                    proposal.others_delay_ms
-                ));
-            }
-            ui.label(RichText::new(text).small().strong());
-            if let Some(mode) = &analysis.mode_correction {
-                let line = match (&mode.filter, &mode.refusal) {
-                    (Some(f), _) => {
-                        format!("Mode correction: cuts down to {:.1} dB.", f.deepest_cut_db)
-                    }
-                    (None, Some(reason)) => format!("No mode correction: {reason}"),
-                    (None, None) => String::new(),
-                };
-                ui.label(RichText::new(line).small().color(MUTED));
-            }
-        }
-        for speaker in &proposal.speakers {
-            let (status, color, mut hover) = match (&speaker.excluded, speaker.summation_db) {
-                (Some(reason), _) => ("left out".to_owned(), WARM, reason.clone()),
-                (None, Some([before, _, after])) => (
-                    format!("{} → {} dB", tenths(before), tenths(after)),
-                    if speaker.warnings.is_empty() { ACCENT } else { WARM },
-                    "How far the sum around the crossover falls below the two adding in phase, measured → with the proposal (0 dB: perfect).".to_owned(),
-                ),
-                _ => ("—".to_owned(), MUTED, String::new()),
-            };
-            if let Some(delay) = speaker.phase_delay_ms {
-                hover.push_str(&format!(
-                    "\nFrom the phase: the subwoofer arrives {delay:.1} ms after it{}.",
-                    if speaker.phase_inverted == Some(true) {
-                        ", in opposite polarity"
+                .add_enabled(
+                    ready.is_ok(),
+                    egui::Button::new(if bass.is_some() {
+                        "Measure the subwoofer again"
                     } else {
-                        ""
-                    }
-                ));
-            }
-            if let Some([before, after]) = speaker.balance_db {
-                hover.push_str(&format!(
-                    "\nBelow against above the {:.0} Hz crossover: {before:+.1} → {after:+.1} dB.",
-                    speaker.crossover_hz
-                ));
-            }
-            for warning in &speaker.warnings {
-                hover.push('\n');
-                hover.push_str(warning);
-            }
-            ui.horizontal(|ui| {
-                ui.add(
-                    egui::Label::new(RichText::new(name(&speaker.output_id)).small()).truncate(),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new(status).small().color(color))
-                        .on_hover_text(hover);
-                });
-            });
-        }
-        for warning in proposal.warnings.iter().chain(&analysis.notes) {
-            ui.label(RichText::new(warning).small().color(WARM));
-        }
-        ui.add_space(6.0);
-        let applying = matches!(job, Some(Job::ApplyBass { .. }));
-        ui.horizontal_wrapped(|ui| {
-            let applied = bass.is_applied();
-            let ready = self.controller.bass_apply_readiness(applied);
-            let label = match (applying, applied) {
-                (true, _) => "Working…",
-                (false, true) => "Undo",
-                (false, false) => "Apply",
-            };
-            if ui
-                .add_enabled(ready.is_ok(), egui::Button::new(label))
-                .on_hover_text(if applied {
-                    "Put the subwoofer (and the other outputs' delays) back as they were measured, without its filter."
-                } else {
-                    "Send the subwoofer's delay, level and filter to Omniphony, live: they reach its configuration only through Studio's Save."
-                })
-                .on_disabled_hover_text(ready.as_ref().err().map(String::as_str).unwrap_or(""))
-                .clicked()
-            {
-                self.controller.apply_bass(applied);
-            }
-            let ready = self.controller.bass_verify_readiness();
-            let label = if matches!(job, Some(Job::VerifyBass { .. })) {
-                "Confirming…"
-            } else {
-                "Confirm"
-            };
-            if ui
-                .add_enabled(ready.is_ok(), egui::Button::new(label))
-                .on_hover_text("With the microphone back at the main seat: measure every speaker's sum with the subwoofer again, through the filters, and compare it with the prediction.")
-                .on_disabled_hover_text(ready.as_ref().err().map(String::as_str).unwrap_or(""))
-                .clicked()
-            {
-                self.controller.verify_bass();
-            }
-        });
-        if let Some(note) = &bass.verification_note {
-            ui.label(RichText::new(note).small().color(MUTED));
-        }
-        if let Some(verification) = &bass.verification {
-            for check in &verification.speakers {
-                let [before, predicted, measured] = check.balance_db;
-                let color = if check.deviation_db <= 1.5 {
-                    ACCENT
-                } else {
-                    WARM
-                };
-                ui.horizontal(|ui| {
-                    ui.add(egui::Label::new(RichText::new(name(&check.output_id)).small()).truncate());
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(
-                            RichText::new(format!("{:.1} dB from prediction", check.deviation_db))
-                                .small()
-                                .color(color),
-                        )
-                        .on_hover_text(format!(
-                            "Measured again: {:.1} dB from the predicted sum (RMS over the band). Below against above the crossover: {before:+.1} dB before, {predicted:+.1} dB predicted, {measured:+.1} dB now.",
-                            check.deviation_db
-                        ));
-                    });
-                });
-            }
-            for warning in &verification.warnings {
-                ui.label(RichText::new(warning).small().color(WARM));
-            }
-        }
-    }
-
-    /// Room-correction filters designed from the stored responses, exported as WAV files
-    /// for Studio's speaker editor. Nothing is sent to Omniphony from here.
-    fn correction_filters(&mut self, ui: &mut egui::Ui) {
-        section(ui, "05", "Correction filters");
-        ui.add_space(10.0);
-        ui.label(
-            RichText::new(
-                "One filter per speaker from the main seat and the other positions, up to 10 kHz, saved as WAV files to load in Studio's speaker editor (Choose filter…).",
-            )
-            .small()
-            .color(MUTED),
-        );
-        ui.add_space(6.0);
-        let running = matches!(self.controller.state.job, Some(Job::RoomCorrection));
-        let ready = self.controller.room_correction_readiness();
-        if ui
-            .add_enabled(
-                ready.is_ok(),
-                egui::Button::new(if running {
-                    "Designing filters…"
-                } else {
-                    "Design and export filters"
-                }),
-            )
-            .on_hover_text("A minimum-phase filter per speaker: 8192 taps at the renderer's rate, boosts up to 3.5 dB, a gentle downward tilt above 1 kHz, the 500 Hz–2 kHz level kept. Saved with a summary in a new folder of the alignment; nothing changes in Omniphony.")
-            .on_disabled_hover_text(ready.as_ref().err().map(String::as_str).unwrap_or(""))
-            .clicked()
-        {
-            self.controller.export_room_correction();
-        }
-        let name = |id: &str| {
-            self.controller
-                .state
-                .snapshot
-                .as_ref()
-                .and_then(|s| s.outputs.iter().find(|o| o.id == id))
-                .map_or(id.to_owned(), |o| o.name.clone())
-        };
-        match self.controller.room_correction() {
-            None => {}
-            Some(Err(error)) => {
-                ui.label(RichText::new(error).small().color(RED));
-            }
-            Some(Ok((folder, summary))) => {
-                let saved = summary.outputs.iter().filter(|o| o.file.is_some()).count();
-                ui.add_space(4.0);
-                ui.label(
-                    RichText::new(format!(
-                        "{saved} of {} filters saved in",
-                        summary.outputs.len()
-                    ))
+                        "Measure the subwoofer"
+                    })
                     .small(),
-                );
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(folder.display().to_string())
-                            .small()
-                            .monospace()
-                            .color(MUTED),
-                    )
-                    .truncate(),
                 )
-                .on_hover_text(folder.display().to_string());
-                for output in &summary.outputs {
-                    let (status, color, mut hover) = match (&output.refusal, output.deviation_db) {
-                        (Some(reason), _) => ("not corrected".to_owned(), WARM, reason.clone()),
-                        (None, Some([before, after])) => (
-                            format!("{before:.1} → {after:.1} dB"),
-                            if output.warnings.is_empty() {
-                                ACCENT
-                            } else {
-                                WARM
-                            },
-                            format!(
-                                "Distance from the target's shape at the measured positions, before → after (predicted). Largest boost {:.1} dB.",
-                                output.headroom_db.unwrap_or(0.0)
-                            ),
-                        ),
-                        (None, None) => ("saved".to_owned(), ACCENT, String::new()),
-                    };
-                    for warning in &output.warnings {
-                        hover.push('\n');
-                        hover.push_str(warning);
-                    }
-                    ui.horizontal(|ui| {
-                        ui.add(
-                            egui::Label::new(RichText::new(name(&output.output_id)).small())
-                                .truncate(),
-                        );
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(RichText::new(status).small().color(color))
-                                .on_hover_text(hover);
-                        });
-                    });
-                }
+                .on_hover_text("With the microphone at the main seat: a quiet level probe, then the subwoofer with every speaker it serves, about a minute per group. Starts the subwoofer measurements over.")
+                .on_disabled_hover_text(ready.as_ref().err().map(String::as_str).unwrap_or(""))
+                .clicked()
+            {
+                clicked = Some(Step::Subwoofer);
             }
         }
-    }
-
-    /// Guided microphone positions around the main seat, for room correction.
-    fn positions(&mut self, ui: &mut egui::Ui) {
-        use companion_service::positions::{self, GUIDE};
-        section(ui, "04", "Other positions");
-        ui.add_space(10.0);
-        let Some(a) = &self.controller.state.alignment else {
-            ui.label(
-                RichText::new(format!(
-                    "After an alignment at the main seat, measure {} positions around it for room correction. Delays and levels keep using the main seat.",
-                    GUIDE.len()
-                ))
-                .small()
-                .color(MUTED),
-            );
-            return;
-        };
-        let running = match &self.controller.state.job {
+        let running = match &job {
             Some(Job::Position { step, .. }) => Some(*step),
             _ => None,
         };
         let next = positions::next_step(a);
         for (index, step) in GUIDE.iter().enumerate() {
-            let (status, color) = match positions::captured(a, step) {
+            let status = match positions::captured(a, step) {
                 _ if running == Some(index) => ("measuring…".to_owned(), ACCENT),
                 Some(p) if p.complete(a) => ("measured".to_owned(), ACCENT),
                 Some(p) => (
@@ -1292,39 +1030,30 @@ impl CompanionApp {
                 ),
                 None => ("not yet".to_owned(), MUTED),
             };
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(format!("{}", index + 1))
-                        .small()
-                        .monospace()
-                        .color(if next == Some(index) { ACCENT } else { MUTED }),
-                );
-                ui.add(egui::Label::new(RichText::new(step.label).small()).truncate())
-                    .on_hover_text(step.instruction);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new(status).small().color(color));
-                });
-            });
+            row(
+                ui,
+                &format!("{}", index + 1),
+                next == Some(index),
+                step.label,
+                step.instruction,
+                status,
+            );
         }
         ui.add_space(6.0);
         let ready = self.controller.position_readiness();
         let step = next.unwrap_or(0);
         if let Some(next) = next {
             ui.label(RichText::new(GUIDE[next].instruction).strong());
-            ui.label(
-                RichText::new("Keep it at ear height and pointing as at the main seat.")
-                    .small()
-                    .color(MUTED),
-            );
         } else {
             ui.label(
                 RichText::new(
-                    "All positions are measured. Put the microphone back at the main seat before aligning again.",
+                    "All positions are measured. Put the microphone back at the main seat to confirm or to align again.",
                 )
                 .small()
                 .color(MUTED),
             );
         }
+        let with_subwoofer = self.controller.position_includes_subwoofer(step);
         let label = if next.is_some() {
             format!("Measure position {}", step + 1)
         } else {
@@ -1332,11 +1061,138 @@ impl CompanionApp {
         };
         if ui
             .add_enabled(ready.is_ok(), egui::Button::new(label))
-            .on_hover_text("One take of every aligned speaker here, stored for room correction. Delays and levels do not change.")
+            .on_hover_text(if with_subwoofer {
+                "One take of every aligned speaker here, then the subwoofer with the speakers it serves. Stored for the correction; delays and levels do not change."
+            } else {
+                "One take of every aligned speaker here, stored for the correction. Delays and levels do not change."
+            })
             .on_disabled_hover_text(ready.as_ref().err().map(String::as_str).unwrap_or(""))
             .clicked()
         {
-            self.controller.measure_position(step);
+            clicked = Some(Step::Position(step));
+        }
+        ui.add_space(10.0);
+        let readiness = self.controller.correction_readiness();
+        for warning in &readiness.warnings {
+            ui.label(RichText::new(warning).small().color(WARM));
+        }
+        let computing = matches!(job, Some(Job::RoomCorrection));
+        let enabled = readiness.blocker.is_none();
+        if ui
+            .add_enabled(
+                enabled,
+                egui::Button::new(
+                    RichText::new(if computing {
+                        "Computing…"
+                    } else if a.correction.is_some() {
+                        "Compute again"
+                    } else {
+                        "Compute the correction"
+                    })
+                    .strong()
+                    .color(if enabled { BG } else { MUTED }),
+                )
+                .fill(if enabled { ACCENT } else { PANEL }),
+            )
+            .on_hover_text(format!(
+                "One minimum-phase filter per speaker from the main seat and the positions: up to {} kHz, boosts up to {} dB, {} dB per decade downward above 1 kHz, the 500 Hz–2 kHz level kept. Saved as WAV files in a new folder of the alignment; nothing changes in Omniphony until Apply.",
+                tenths(choices.max_hz / 1000.0),
+                tenths(choices.max_boost_db),
+                tenths(choices.tilt_db_per_decade)
+            ))
+            .on_disabled_hover_text(readiness.blocker.as_deref().unwrap_or(""))
+            .clicked()
+        {
+            clicked = Some(Step::Compute);
+        }
+        if let Some(c) = &a.correction {
+            let corrected = c.filters.len();
+            let integrated = c.choices.with_subwoofer
+                && bass.is_some_and(|b| {
+                    b.analysis
+                        .as_ref()
+                        .is_some_and(|x| x.proposal.refusal.is_none())
+                });
+            ui.label(
+                RichText::new(format!(
+                    "{corrected} of {} speakers corrected{}. Review them on the cards.",
+                    c.summary.outputs.len(),
+                    if integrated {
+                        ", subwoofer integrated"
+                    } else {
+                        ""
+                    }
+                ))
+                .small(),
+            );
+            if self.lab {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(c.directory.display().to_string())
+                            .small()
+                            .monospace()
+                            .color(MUTED),
+                    )
+                    .truncate(),
+                )
+                .on_hover_text("The filters as WAV files, which Studio's speaker editor also loads (Choose filter…), with the design summary and curves.");
+            }
+        }
+        if let Some(Err(error)) = bass.map(|b| b.analysis_error.as_ref().map_or(Ok(()), Err)) {
+            ui.label(RichText::new(error).small().color(RED));
+        }
+        if self.lab {
+            ui.add_space(6.0);
+            let mut choices = self.controller.correction_choices;
+            ui.add_enabled_ui(!self.controller.busy(), |ui| {
+                egui::CollapsingHeader::new("Correction settings")
+                    .id_salt("correction_settings")
+                    .show(ui, |ui| {
+                        caption(ui, "Target tilt above 1 kHz");
+                        ui.add(
+                            egui::Slider::new(&mut choices.tilt_db_per_decade, 0.0..=6.0)
+                                .step_by(0.5)
+                                .suffix(" dB / decade"),
+                        );
+                        caption(ui, "Correct up to");
+                        let mut khz = choices.max_hz / 1000.0;
+                        ui.add(
+                            egui::Slider::new(&mut khz, 2.0..=20.0)
+                                .step_by(0.5)
+                                .suffix(" kHz"),
+                        );
+                        choices.max_hz = khz * 1000.0;
+                        caption(ui, "Boost limit");
+                        ui.add(
+                            egui::Slider::new(&mut choices.max_boost_db, 0.0..=6.0)
+                                .step_by(0.5)
+                                .suffix(" dB"),
+                        );
+                        ui.add_space(4.0);
+                        switch(ui, &mut choices.with_subwoofer, "Integrate the subwoofer")
+                            .on_hover_text("Measure the subwoofer with the speakers it serves around their crossover, and apply its delay, level, polarity and mode correction with the room correction. Off, the subwoofer stays as it is.");
+                        ui.label(
+                            RichText::new("The defaults need no touching. Changes apply to the next computation.")
+                                .small()
+                                .color(MUTED),
+                        );
+                        if choices != companion_service::correction::Choices::default()
+                            && ui.link("Defaults").clicked()
+                        {
+                            choices = Default::default();
+                        }
+                    });
+            });
+            self.controller.correction_choices = choices;
+        }
+        match clicked {
+            Some(Step::Subwoofer) => self.controller.measure_bass(None),
+            Some(Step::Position(step)) => self.controller.measure_position(step),
+            Some(Step::Compute) => {
+                self.correction_cards = true;
+                self.controller.compute_correction();
+            }
+            None => {}
         }
     }
 
@@ -1635,9 +1491,18 @@ impl CompanionApp {
             _ => None,
         };
         if let (Some(summary), Some(outputs)) = (&summary, &outputs) {
+            // The room correction once computed, the alignment otherwise.
+            let correction =
+                self.controller.state.alignment.as_ref().filter(|a| {
+                    self.correction_cards && (a.correction.is_some() || a.bass.is_some())
+                });
             cards = outputs
                 .iter()
-                .map(|o| summary.speaker(&o.id).map(alignment_view::card))
+                .map(|o| {
+                    correction
+                        .and_then(|a| correction_view::card(a, &o.id))
+                        .or_else(|| summary.speaker(&o.id).map(alignment_view::card))
+                })
                 .collect();
         }
         let mut map_response = room_map::MapResponse::default();
@@ -1813,6 +1678,52 @@ impl CompanionApp {
                     matches!(self.controller.state.job, Some(Job::UpdateProposal)),
                 );
             });
+            ui.add_space(6.0);
+            let mut correction_action = None;
+            card().show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Room correction").strong());
+                    if alignment.correction.is_some() || alignment.bass.is_some() {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            switch(ui, &mut self.correction_cards, "On the cards")
+                                .on_hover_text("Show each speaker's room correction on its card instead of its alignment.");
+                        });
+                    }
+                });
+                use companion_service::correction::Target;
+                let applying = match &self.controller.state.job {
+                    Some(Job::ApplyCorrection { target }) => Some(*target),
+                    _ => None,
+                };
+                let live = self.controller.correction_live_state();
+                let bar = correction_view::Bar {
+                    correction: alignment.correction.as_ref(),
+                    live,
+                    saved: alignment.correction.as_ref().zip(self.controller.state.snapshot.as_ref()).map(|(c, s)| c.saved(s)),
+                    apply: self.controller.correction_apply_readiness(Target::Corrected),
+                    compare: self.controller.correction_apply_readiness(Target::Compare),
+                    corrected: self.controller.correction_apply_readiness(Target::Corrected),
+                    undo: self.controller.correction_apply_readiness(Target::Original),
+                    verify: self.controller.correction_verify_readiness(),
+                    applying,
+                    verifying: matches!(self.controller.state.job, Some(Job::VerifyCorrection { .. })),
+                };
+                correction_action = correction_view::action_bar(ui, &bar);
+            });
+            match correction_action {
+                Some(correction_view::Action::Apply(target)) => {
+                    self.controller.apply_correction(target)
+                }
+                Some(correction_view::Action::Verify) => self.controller.verify_correction(),
+                None => {}
+            }
+            let alignment = self
+                .controller
+                .state
+                .alignment
+                .as_ref()
+                .expect("drawn above");
             if self.lab {
                 ui.add_space(10.0);
                 let summary = alignment_view::Summary::new(alignment);
@@ -2240,6 +2151,22 @@ impl CompanionApp {
                         Some(&(output.layout.clone(), MUTED)),
                     ),
                 };
+                // A response plot on the right of the lines, the lines narrower.
+                let plot = text.and_then(|t| t.plot.as_ref());
+                let line = |top: f32, height: f32| {
+                    let mut rect = line(top, height);
+                    if plot.is_some() {
+                        rect.max.x -= 86.0;
+                    }
+                    rect
+                };
+                if let Some(plot) = plot {
+                    let area = egui::Rect::from_min_size(
+                        egui::pos2(inner.right() - 80.0, inner.top() + 32.0),
+                        Vec2::new(80.0, 38.0),
+                    );
+                    correction_view::paint_card_plot(ui.painter(), area, plot);
+                }
                 match planned {
                     Some(planned) => {
                         card_line(ui, line(32.0, 18.0), measured, 1);
@@ -2461,7 +2388,8 @@ impl CompanionApp {
         }
     }
 
-    fn select_speaker(&mut self, output_id: &str) {
+    /// Select a speaker as a click on its card does.
+    pub fn select_speaker(&mut self, output_id: &str) {
         if let Some(take) = self.controller.display_take(output_id).cloned() {
             self.select_take(take);
         } else {
@@ -2751,6 +2679,20 @@ impl CompanionApp {
                 .map(|r| companion_service::workspace::absolute(&r.report_file)),
         ));
         egui::ScrollArea::vertical().id_salt(scroll_id).auto_shrink([false, false]).show(ui, |ui| {
+            // The selected speaker's room correction, above its latest take.
+            if self.correction_cards
+                && let (Some(id), Some(a)) = (&self.selected_speaker, &self.controller.state.alignment)
+            {
+                let name = a
+                    .snapshot
+                    .outputs
+                    .iter()
+                    .find(|o| &o.id == id)
+                    .map_or(id.as_str(), |o| o.name.as_str());
+                if correction_view::inspect(ui, a, id, name, self.lab) {
+                    ui.separator();
+                }
+            }
             if self.active_review().is_some() {
                 self.review_panel(ui);
             } else if self.saved_selected {
